@@ -13,8 +13,8 @@ Runners are **ephemeral** — each container handles exactly one job and is remo
 
 ```mermaid
 flowchart LR
-    A["GitHub Actions\n(job queue)"] -- long poll --> B["runscaler\n(this tool)"]
-    B -- Docker API --> C["Runner Containers\n(ephemeral)"]
+    A["GitHub Actions<br/>(job queue)"] -- long poll --> B["runscaler<br/>(this tool)"]
+    B -- Docker API --> C["Runner Containers<br/>(ephemeral)"]
 ```
 
 1. Registers a [runner scale set](https://docs.github.com/en/actions/hosting-your-own-runners/managing-self-hosted-runners-with-actions-runner-controller/about-actions-runner-controller) with GitHub
@@ -39,7 +39,14 @@ flowchart LR
 ### Prerequisites
 
 - Docker running on the host
-- A GitHub **Personal Access Token** with `admin:org` scope (for org runners) or `repo` scope (for repo runners)
+- A GitHub **Personal Access Token** — required scopes depend on token type and runner level:
+
+  | Token type | Organization runners | Repository runners |
+  |---|---|---|
+  | **Classic PAT** | `admin:org` | `repo` |
+  | **Fine-grained PAT** | Self-hosted runners: **Read and write** + Administration: **Read** | Administration: **Read and write** |
+
+  > **Note:** The token owner must be an **org owner** (for org runners) or have **admin access** to the repo (for repo runners). Fine-grained PATs targeting an organization may also require [admin approval](https://docs.github.com/en/organizations/managing-programmatic-access-to-your-organization/setting-a-personal-access-token-policy-for-your-organization) depending on org policy.
 
 ### Install
 

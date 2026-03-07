@@ -25,6 +25,7 @@ type Config struct {
 	RunnerImage     string   `mapstructure:"runner-image"`
 	DockerSocket    string   `mapstructure:"docker-socket"`
 	DinD            bool     `mapstructure:"dind"`
+	SharedVolume    string   `mapstructure:"shared-volume"`
 	WorkDirBase     string   `mapstructure:"work-dir"`
 	LogLevel        string   `mapstructure:"log-level"`
 	LogFormat       string   `mapstructure:"log-format"`

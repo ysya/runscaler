@@ -40,6 +40,7 @@ func init() {
 	// Docker
 	flags.StringVar(&cfg.DockerSocket, "docker-socket", "/var/run/docker.sock", "Path to Docker socket")
 	flags.BoolVar(&cfg.DinD, "dind", true, "Mount Docker socket into runner containers (Docker-in-Docker)")
+	flags.StringVar(&cfg.SharedVolume, "shared-volume", "", "Shared volume mount for all runners (host:container, e.g. /cache:/shared)")
 	flags.StringVar(&cfg.WorkDirBase, "work-dir", "/tmp/runner", "Base directory for runner work directories")
 
 	// Logging
@@ -215,6 +216,7 @@ func run(ctx context.Context, c Config) error {
 		maxRunners:     c.MaxRunners,
 		dockerSocket:   c.DockerSocket,
 		dind:           c.DinD,
+		sharedVolume:   c.SharedVolume,
 		workDirBase:    c.WorkDirBase,
 		runners: runnerState{
 			idle: make(map[string]string),

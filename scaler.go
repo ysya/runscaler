@@ -47,6 +47,7 @@ type Scaler struct {
 	maxRunners     int
 	dockerSocket   string
 	dind           bool
+	sharedVolume   string
 	workDirBase    string
 	logger         *slog.Logger
 }
@@ -137,6 +138,9 @@ func (s *Scaler) startRunner(ctx context.Context) (string, error) {
 		if gid, err := socketGroupID(s.dockerSocket); err == nil {
 			groupAdd = append(groupAdd, strconv.Itoa(gid))
 		}
+	}
+	if s.sharedVolume != "" {
+		binds = append(binds, s.sharedVolume)
 	}
 	if s.workDirBase != "" {
 		workDir := fmt.Sprintf("%s/%s", s.workDirBase, name)

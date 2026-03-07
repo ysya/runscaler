@@ -11,9 +11,10 @@ Runners are **ephemeral** — each container handles exactly one job and is remo
 
 ## How It Works
 
-```
-GitHub Actions  ──long poll──▶  runscaler  ──Docker API──▶  Runner Containers
-   (job queue)                    (this tool)                          (ephemeral)
+```mermaid
+flowchart LR
+    A["GitHub Actions\n(job queue)"] -- long poll --> B["runscaler\n(this tool)"]
+    B -- Docker API --> C["Runner Containers\n(ephemeral)"]
 ```
 
 1. Registers a [runner scale set](https://docs.github.com/en/actions/hosting-your-own-runners/managing-self-hosted-runners-with-actions-runner-controller/about-actions-runner-controller) with GitHub

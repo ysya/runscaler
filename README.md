@@ -1,5 +1,10 @@
 # runscaler
 
+[![Release](https://img.shields.io/github/v/release/ysya/runscaler)](https://github.com/ysya/runscaler/releases)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/ysya/runscaler)](https://go.dev)
+[![License](https://img.shields.io/github/license/ysya/runscaler)](LICENSE)
+[![Go Report Card](https://goreportcard.com/badge/github.com/ysya/runscaler)](https://goreportcard.com/report/github.com/ysya/runscaler)
+
 Auto-scale GitHub Actions self-hosted runners as Docker containers. Powered by [actions/scaleset](https://github.com/actions/scaleset).
 
 Runners are **ephemeral** — each container handles exactly one job and is removed upon completion. No Kubernetes required.
@@ -17,6 +22,16 @@ GitHub Actions  ──long poll──▶  runscaler  ──Docker API──▶  
 4. Removes containers automatically when jobs complete
 5. Cleans up all containers and the scale set on shutdown
 
+## Features
+
+- **Zero Kubernetes** — runs directly on any Docker host
+- **Ephemeral runners** — each job gets a fresh container, no state leakage
+- **Auto-scaling** — scales from 0 to N based on job demand via long-poll (no cron, no polling delay)
+- **Docker-in-Docker** — optional DinD support for workflows that build containers
+- **Shared volumes** — cross-runner caching via named Docker volumes
+- **Single binary** — no runtime dependencies beyond Docker
+- **Config file or flags** — TOML config with CLI flag overrides
+
 ## Quick Start
 
 ### Prerequisites
@@ -26,13 +41,25 @@ GitHub Actions  ──long poll──▶  runscaler  ──Docker API──▶  
 
 ### Install
 
-**From source:**
+**Shell script (Linux/macOS):**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ysya/runscaler/main/install.sh | sh
+```
+
+You can set `INSTALL_DIR` to customize the install location, or `RUNSCALER_VERSION` to pin a version:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ysya/runscaler/main/install.sh | INSTALL_DIR=./bin sh
+```
+
+**Go install:**
 
 ```bash
 go install github.com/ysya/runscaler@latest
 ```
 
-**From binary releases:**
+**Binary releases:**
 
 Download from [Releases](https://github.com/ysya/runscaler/releases) and add to your `PATH`.
 
@@ -90,7 +117,6 @@ runner-group = "default"
 docker-socket = "/var/run/docker.sock"
 dind = true
 shared-volume = "/shared"
-work-dir = "/tmp/runner"
 log-level = "info"
 log-format = "text"
 ```
@@ -111,7 +137,6 @@ log-format = "text"
 | `--docker-socket` | `/var/run/docker.sock` | Docker socket path |
 | `--dind` | `true` | Mount Docker socket into runners (Docker-in-Docker) |
 | `--shared-volume` | | Shared Docker volume path in runners (e.g. `/shared`) |
-| `--work-dir` | `/tmp/runner` | Work directory base |
 | `--log-level` | `info` | Log level (debug/info/warn/error) |
 | `--log-format` | `text` | Log format (text/json) |
 

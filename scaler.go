@@ -50,7 +50,6 @@ type Scaler struct {
 	dockerSocket   string
 	dind           bool
 	sharedVolume   string
-	workDirBase    string
 	logger         *slog.Logger
 }
 
@@ -112,7 +111,6 @@ func (s *Scaler) HandleJobCompleted(ctx context.Context, jobInfo *scaleset.JobCo
 		return fmt.Errorf("failed to remove runner container: %w", err)
 	}
 
-	s.cleanupWorkDir(jobInfo.RunnerName)
 	return nil
 }
 
@@ -149,11 +147,6 @@ func (s *Scaler) startRunner(ctx context.Context) (string, error) {
 			Target: s.sharedVolume,
 		})
 	}
-	if s.workDirBase != "" {
-		workDir := fmt.Sprintf("%s/%s", s.workDirBase, name)
-		binds = append(binds, fmt.Sprintf("%s:%s", workDir, workDir))
-	}
-
 	// Build command — fix shared volume ownership before starting runner.
 	// The runner image runs as UID 1001 (runner) with GID 123 (docker).
 	// Named volumes are created as root, so we use sudo chown to fix ownership.
@@ -212,7 +205,6 @@ func (s *Scaler) shutdown(ctx context.Context) {
 		if err := s.dockerClient.ContainerRemove(ctx, containerID, container.RemoveOptions{Force: true}); err != nil {
 			s.logger.Error("Failed to remove idle runner", slog.String("name", name), slog.String("error", err.Error()))
 		}
-		s.cleanupWorkDir(name)
 	}
 	clear(s.runners.idle)
 
@@ -221,7 +213,6 @@ func (s *Scaler) shutdown(ctx context.Context) {
 		if err := s.dockerClient.ContainerRemove(ctx, containerID, container.RemoveOptions{Force: true}); err != nil {
 			s.logger.Error("Failed to remove busy runner", slog.String("name", name), slog.String("error", err.Error()))
 		}
-		s.cleanupWorkDir(name)
 	}
 	clear(s.runners.busy)
 
@@ -234,17 +225,6 @@ func (s *Scaler) shutdown(ctx context.Context) {
 	}
 
 	s.pruneDocker(ctx)
-}
-
-// cleanupWorkDir removes the host-side work directory for a runner.
-func (s *Scaler) cleanupWorkDir(runnerName string) {
-	if s.workDirBase == "" {
-		return
-	}
-	workDir := fmt.Sprintf("%s/%s", s.workDirBase, runnerName)
-	if err := os.RemoveAll(workDir); err != nil {
-		s.logger.Error("Failed to clean work directory", slog.String("dir", workDir), slog.String("error", err.Error()))
-	}
 }
 
 // pruneDocker removes dangling images, stopped containers, and build cache

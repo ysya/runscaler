@@ -26,7 +26,6 @@ type Config struct {
 	DockerSocket    string   `mapstructure:"docker-socket"`
 	DinD            bool     `mapstructure:"dind"`
 	SharedVolume    string   `mapstructure:"shared-volume"`
-	WorkDirBase     string   `mapstructure:"work-dir"`
 	LogLevel        string   `mapstructure:"log-level"`
 	LogFormat       string   `mapstructure:"log-format"`
 }

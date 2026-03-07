@@ -100,7 +100,7 @@ Then in your workflow:
 ```yaml
 jobs:
   build:
-    runs-on: my-runners  # matches --name
+    runs-on: my-runners  # matches --labels (defaults to --name if not set)
     steps:
       - uses: actions/checkout@v4
       - run: echo "Running on auto-scaled runner!"

@@ -12,7 +12,7 @@ PLATFORMS := \
 	darwin/arm64 \
 	windows/amd64
 
-.PHONY: build clean test all dev
+.PHONY: build clean test all dev release
 
 ## dev: Run locally with debug logging (requires config.toml)
 dev:
@@ -42,6 +42,10 @@ $(PLATFORMS):
 ## clean: Remove build artifacts
 clean:
 	rm -rf dist/ $(BINARY_NAME)
+
+## release: Interactive release — pick version, tag, and push
+release:
+	@sh scripts/release.sh
 
 ## help: Show this help
 help:

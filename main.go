@@ -39,6 +39,7 @@ func init() {
 
 	// Docker
 	flags.StringVar(&cfg.DockerSocket, "docker-socket", "/var/run/docker.sock", "Path to Docker socket")
+	flags.BoolVar(&cfg.DinD, "dind", true, "Mount Docker socket into runner containers (Docker-in-Docker)")
 	flags.StringVar(&cfg.WorkDirBase, "work-dir", "/tmp/runner", "Base directory for runner work directories")
 
 	// Logging
@@ -150,13 +151,23 @@ func run(ctx context.Context, c Config) error {
 		}
 	}()
 
-	// Create Docker client
+	// Create Docker client and verify connectivity
 	dockerClient, err := dockerclient.NewClientWithOpts(
 		dockerclient.FromEnv,
 		dockerclient.WithAPIVersionNegotiation(),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create docker client: %w", err)
+	}
+
+	if _, err := dockerClient.Ping(ctx); err != nil {
+		return fmt.Errorf("cannot connect to Docker at %s: %w\n\n"+
+			"  Possible fixes:\n"+
+			"  1. Ensure Docker is running\n"+
+			"  2. Add your user to the docker group: sudo usermod -aG docker $USER\n"+
+			"  3. Re-login or run: newgrp docker\n"+
+			"  4. Or check the docker-socket path in your config",
+			c.DockerSocket, err)
 	}
 
 	// Pull runner image
@@ -203,6 +214,7 @@ func run(ctx context.Context, c Config) error {
 		minRunners:     c.MinRunners,
 		maxRunners:     c.MaxRunners,
 		dockerSocket:   c.DockerSocket,
+		dind:           c.DinD,
 		workDirBase:    c.WorkDirBase,
 		runners: runnerState{
 			idle: make(map[string]string),

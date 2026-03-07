@@ -24,6 +24,7 @@ type Config struct {
 	RunnerGroup     string   `mapstructure:"runner-group"`
 	RunnerImage     string   `mapstructure:"runner-image"`
 	DockerSocket    string   `mapstructure:"docker-socket"`
+	DinD            bool     `mapstructure:"dind"`
 	WorkDirBase     string   `mapstructure:"work-dir"`
 	LogLevel        string   `mapstructure:"log-level"`
 	LogFormat       string   `mapstructure:"log-format"`

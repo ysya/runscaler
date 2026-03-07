@@ -88,6 +88,7 @@ labels = ["self-hosted", "linux"]
 runner-image = "ghcr.io/actions/actions-runner:latest"
 runner-group = "default"
 docker-socket = "/var/run/docker.sock"
+dind = true
 work-dir = "/tmp/runner"
 log-level = "info"
 log-format = "text"
@@ -107,6 +108,7 @@ log-format = "text"
 | `--runner-group` | `default` | Runner group name |
 | `--runner-image` | `ghcr.io/actions/actions-runner:latest` | Docker image |
 | `--docker-socket` | `/var/run/docker.sock` | Docker socket path |
+| `--dind` | `true` | Mount Docker socket into runners (Docker-in-Docker) |
 | `--work-dir` | `/tmp/runner` | Work directory base |
 | `--log-level` | `info` | Log level (debug/info/warn/error) |
 | `--log-format` | `text` | Log format (text/json) |

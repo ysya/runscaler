@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strconv"
 	"sync"
+	"syscall"
 
 	"github.com/actions/scaleset"
 	"github.com/actions/scaleset/listener"
@@ -44,6 +46,7 @@ type Scaler struct {
 	minRunners     int
 	maxRunners     int
 	dockerSocket   string
+	dind           bool
 	workDirBase    string
 	logger         *slog.Logger
 }
@@ -125,9 +128,15 @@ func (s *Scaler) startRunner(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("failed to generate JIT config: %w", err)
 	}
 
-	// Build volume binds for Docker-in-Docker and workspace isolation
-	binds := []string{
-		fmt.Sprintf("%s:/var/run/docker.sock", s.dockerSocket),
+	// Build volume binds and group membership
+	var binds []string
+	var groupAdd []string
+	if s.dind {
+		binds = append(binds, fmt.Sprintf("%s:/var/run/docker.sock", s.dockerSocket))
+		// Add the docker.sock owning group so the runner user can access it
+		if gid, err := socketGroupID(s.dockerSocket); err == nil {
+			groupAdd = append(groupAdd, strconv.Itoa(gid))
+		}
 	}
 	if s.workDirBase != "" {
 		workDir := fmt.Sprintf("%s/%s", s.workDirBase, name)
@@ -146,6 +155,7 @@ func (s *Scaler) startRunner(ctx context.Context) (string, error) {
 		},
 		&container.HostConfig{
 			Binds:       binds,
+			GroupAdd:    groupAdd,
 			SecurityOpt: []string{"label:disable"},
 		},
 		nil, nil,
@@ -241,6 +251,19 @@ func formatBytes(b uint64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %ciB", float64(b)/float64(div), "KMGTPE"[exp])
+}
+
+// socketGroupID returns the owning group ID of a Unix socket file.
+func socketGroupID(path string) (int, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0, err
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, fmt.Errorf("unsupported platform")
+	}
+	return int(stat.Gid), nil
 }
 
 // --- Runner State ---

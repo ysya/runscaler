@@ -1,3 +1,16 @@
+# Secrets
 .env
+config.toml
+
+# Generated
 compose.yaml
 runner/
+
+# Build output
+runscaler
+dist/
+
+# IDE
+.idea/
+.vscode/
+*.swp

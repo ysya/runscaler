@@ -165,7 +165,7 @@ func run(ctx context.Context, c Config) error {
 		wg.Add(1)
 		go func(ss ScaleSetConfig) {
 			defer wg.Done()
-			ssLogger := logger.With(slog.String("scaleset", ss.ScaleSetName))
+			ssLogger := logger.WithGroup("[" + ss.ScaleSetName + "]")
 			if err := runScaleSet(ctx, c, ss, dockerClient, ssLogger); err != nil {
 				errs <- fmt.Errorf("scaleset %q: %w", ss.ScaleSetName, err)
 			}
@@ -266,7 +266,7 @@ func runScaleSet(ctx context.Context, global Config, ss ScaleSetConfig, dockerCl
 	l, err := listener.New(sessionClient, listener.Config{
 		ScaleSetID: scaleSet.ID,
 		MaxRunners: ss.MaxRunners,
-		Logger:     logger.WithGroup("listener"),
+		Logger:     logger,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create listener: %w", err)
@@ -274,7 +274,7 @@ func runScaleSet(ctx context.Context, global Config, ss ScaleSetConfig, dockerCl
 
 	// Create scaler
 	scaler := &Scaler{
-		logger:         logger.WithGroup("scaler"),
+		logger:         logger,
 		runnerImage:    ss.RunnerImage,
 		scaleSetID:     scaleSet.ID,
 		dockerClient:   dockerClient,

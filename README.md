@@ -72,16 +72,6 @@ go install github.com/ysya/runscaler@latest
 
 Download from [Releases](https://github.com/ysya/runscaler/releases) and add to your `PATH`.
 
-**Docker:**
-
-```bash
-docker run --rm \
-  -v /var/run/docker.sock:/var/run/docker.sock \
-  -v /path/to/config.toml:/etc/runscaler/config.toml \
-  ghcr.io/ysya/runscaler \
-  --config /etc/runscaler/config.toml
-```
-
 ### Run
 
 ```bash
@@ -235,30 +225,14 @@ RestartSec=10s
 WantedBy=multi-user.target
 ```
 
-### Docker Compose
-
-```yaml
-services:
-  scaler:
-    image: ghcr.io/ysya/runscaler
-    restart: unless-stopped
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - ./config.toml:/etc/runscaler/config.toml:ro
-    command: ["--config", "/etc/runscaler/config.toml"]
-```
-
 ## Building
 
 ```bash
 # Current platform
 make build
 
-# All platforms (linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64)
+# All platforms (linux/amd64, linux/arm64, darwin/amd64, darwin/arm64)
 make all
-
-# Docker image
-docker build -t runscaler .
 ```
 
 ## Architecture

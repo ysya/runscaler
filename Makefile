@@ -3,6 +3,7 @@ VERSION     := $(shell git describe --tags --always --dirty 2>/dev/null || echo 
 COMMIT      := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 BUILD_DATE  := $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 LDFLAGS     := -s -w
+GOFLAGS     := -trimpath
 
 PLATFORMS := \
 	linux/amd64 \
@@ -19,7 +20,7 @@ dev:
 
 ## build: Build for current platform
 build:
-	go build -ldflags "$(LDFLAGS)" -o $(BINARY_NAME) .
+	go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BINARY_NAME) .
 
 ## test: Run tests
 test:
@@ -35,7 +36,7 @@ $(PLATFORMS):
 	@echo "Building $(OS)/$(ARCH)..."
 	@mkdir -p dist
 	GOOS=$(OS) GOARCH=$(ARCH) go build \
-		-ldflags "$(LDFLAGS)" \
+		$(GOFLAGS) -ldflags "$(LDFLAGS)" \
 		-o dist/$(BINARY_NAME)-$(OS)-$(ARCH)$(EXT) .
 
 ## clean: Remove build artifacts

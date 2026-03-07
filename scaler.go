@@ -297,6 +297,19 @@ func (r *runnerState) count() int {
 	return count
 }
 
+func (r *runnerState) counts() (idle, busy int) {
+	r.mu.Lock()
+	idle = len(r.idle)
+	busy = len(r.busy)
+	r.mu.Unlock()
+	return
+}
+
+// RunnerCounts returns the number of idle and busy runners.
+func (s *Scaler) RunnerCounts() (idle, busy int) {
+	return s.runners.counts()
+}
+
 func (r *runnerState) addIdle(name, containerID string) {
 	r.mu.Lock()
 	r.idle[name] = containerID

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"sync"
@@ -51,7 +53,14 @@ func init() {
 	// Config file
 	flags.String("config", "", "Path to config file (TOML)")
 
+	// Operational
+	flags.Bool("dry-run", false, "Validate everything without starting listeners")
+	flags.Int("health-port", 8080, "Health check HTTP port (0 to disable)")
+
 	viper.BindPFlags(flags)
+
+	// Register subcommands
+	cmd.AddCommand(initCmd, validateCmd, statusCmd)
 }
 
 func main() {
@@ -62,7 +71,7 @@ func main() {
 }
 
 var cmd = &cobra.Command{
-	Use:     "runscaler",
+	Use:     "runscaler [flags]",
 	Version: version,
 	Short:   "GitHub Actions Runner Auto-Scaler for Docker",
 	Long: `Dynamically scales GitHub Actions self-hosted runners as Docker containers
@@ -71,6 +80,16 @@ handles one job and is removed upon completion.
 
 Supports multiple scale sets via [[scaleset]] entries in TOML config,
 or a single scale set via CLI flags.`,
+	Example: `  # Quick start
+  runscaler init                            # Generate config.toml interactively
+  runscaler validate --config config.toml   # Verify configuration
+  runscaler --config config.toml            # Start scaling
+
+  # Using CLI flags
+  runscaler --url https://github.com/org --name my-runners --token ghp_xxx
+
+  # Dry run (validate everything without starting listeners)
+  runscaler --dry-run --config config.toml`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		// Load config file: explicit --config flag, or search default paths
 		if configFile, _ := cmd.Flags().GetString("config"); configFile != "" {
@@ -104,11 +123,13 @@ or a single scale set via CLI flags.`,
 			os.Exit(1)
 		}()
 
-		return run(ctx, cfg)
+		dryRun, _ := cmd.Flags().GetBool("dry-run")
+		healthPort, _ := cmd.Flags().GetInt("health-port")
+		return run(ctx, cfg, dryRun, healthPort)
 	},
 }
 
-func run(ctx context.Context, c Config) error {
+func run(ctx context.Context, c Config, dryRun bool, healthPort int) error {
 	logger := c.Logger()
 
 	scaleSets := c.ResolveScaleSets()
@@ -155,6 +176,30 @@ func run(ctx context.Context, c Config) error {
 		pulled[ss.RunnerImage] = true
 	}
 
+	if dryRun {
+		logger.Info("Dry run complete — configuration, Docker, and images are all valid",
+			slog.Int("scaleSetCount", len(scaleSets)),
+		)
+		return nil
+	}
+
+	// Start health check server
+	var healthServer *HealthServer
+	if healthPort > 0 {
+		healthServer = NewHealthServer(healthPort)
+		ln, err := net.Listen("tcp", fmt.Sprintf(":%d", healthPort))
+		if err != nil {
+			return fmt.Errorf("failed to start health server on port %d: %w", healthPort, err)
+		}
+		go func() {
+			if err := healthServer.Serve(ln); err != nil && err != http.ErrServerClosed {
+				logger.Error("Health server error", slog.String("error", err.Error()))
+			}
+		}()
+		defer healthServer.Shutdown(context.WithoutCancel(ctx))
+		logger.Info("Health check server started", slog.Int("port", healthPort))
+	}
+
 	logger.Info("Starting scale sets", slog.Int("count", len(scaleSets)))
 
 	// Run each scale set in its own goroutine
@@ -166,7 +211,7 @@ func run(ctx context.Context, c Config) error {
 		go func(ss ScaleSetConfig) {
 			defer wg.Done()
 			ssLogger := logger.WithGroup("[" + ss.ScaleSetName + "]")
-			if err := runScaleSet(ctx, c, ss, dockerClient, ssLogger); err != nil {
+			if err := runScaleSet(ctx, c, ss, dockerClient, ssLogger, healthServer); err != nil {
 				errs <- fmt.Errorf("scaleset %q: %w", ss.ScaleSetName, err)
 			}
 		}(scaleSets[i])
@@ -187,7 +232,7 @@ func run(ctx context.Context, c Config) error {
 }
 
 // runScaleSet manages the lifecycle of a single scale set.
-func runScaleSet(ctx context.Context, global Config, ss ScaleSetConfig, dockerClient *dockerclient.Client, logger *slog.Logger) error {
+func runScaleSet(ctx context.Context, global Config, ss ScaleSetConfig, dockerClient *dockerclient.Client, logger *slog.Logger, health *HealthServer) error {
 	// Create scaleset client
 	scalesetClient, err := ss.ScalesetClient(logger)
 	if err != nil {
@@ -290,6 +335,12 @@ func runScaleSet(ctx context.Context, global Config, ss ScaleSetConfig, dockerCl
 		},
 	}
 	defer scaler.shutdown(context.WithoutCancel(ctx))
+
+	// Register with health server
+	if health != nil {
+		health.RegisterScaler(ss.ScaleSetName, scaler)
+		defer health.UnregisterScaler(ss.ScaleSetName)
+	}
 
 	// Start listening
 	logger.Info("Listening for jobs",

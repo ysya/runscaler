@@ -85,15 +85,24 @@ docker run --rm \
 ### Run
 
 ```bash
-# Using a config file (recommended)
+# Generate config interactively
+runscaler init
+
+# Validate everything before starting
+runscaler validate --config config.toml
+
+# Start scaling
 runscaler --config config.toml
 
-# Or using CLI flags
+# Or using CLI flags directly
 runscaler \
   --url https://github.com/your-org \
   --name my-runners \
   --token ghp_xxx \
   --max-runners 10
+
+# Dry run — validate config, Docker, and images without starting listeners
+runscaler --dry-run --config config.toml
 ```
 
 Then in your workflow:
@@ -106,6 +115,15 @@ jobs:
       - uses: actions/checkout@v4
       - run: echo "Running on auto-scaled runner!"
 ```
+
+## Commands
+
+| Command | Description |
+|---------|-------------|
+| `runscaler` | Start the auto-scaler (default) |
+| `runscaler init` | Generate a config file interactively |
+| `runscaler validate` | Validate configuration and connectivity |
+| `runscaler status` | Show current runner status via health endpoint |
 
 ## Configuration
 
@@ -131,6 +149,21 @@ shared-volume = "/shared"
 log-level = "info"
 log-format = "text"
 ```
+
+### Token Security
+
+Avoid passing tokens as CLI flags (visible in `ps` output). Use one of these approaches:
+
+```bash
+# Environment variable
+export RUNSCALER_TOKEN=ghp_xxx
+runscaler --url https://github.com/org --name my-runners
+
+# In config file, reference an env var
+token = "env:GITHUB_TOKEN"
+```
+
+Priority: CLI flag > `RUNSCALER_TOKEN` env var > config file value.
 
 **Multiple scale sets (multi-org):**
 
@@ -179,6 +212,8 @@ labels = ["linux", "gpu"]
 | `--shared-volume` | | Shared Docker volume path in runners (e.g. `/shared`) |
 | `--log-level` | `info` | Log level (debug/info/warn/error) |
 | `--log-format` | `text` | Log format (text/json) |
+| `--dry-run` | `false` | Validate everything without starting listeners |
+| `--health-port` | `8080` | Health check HTTP port (0 to disable) |
 
 ## Deployment
 

@@ -65,12 +65,13 @@ func (c *Config) ResolveScaleSets() []ScaleSetConfig {
 			if ss.MaxRunners == 0 {
 				ss.MaxRunners = c.MaxRunners
 			}
+			ss.resolveEnvToken()
 		}
 		return c.ScaleSets
 	}
 
 	// Legacy single scale set mode
-	return []ScaleSetConfig{{
+	ss := ScaleSetConfig{
 		RegistrationURL: c.RegistrationURL,
 		ScaleSetName:    c.ScaleSetName,
 		Token:           c.Token,
@@ -79,7 +80,26 @@ func (c *Config) ResolveScaleSets() []ScaleSetConfig {
 		Labels:          c.Labels,
 		RunnerGroup:     c.RunnerGroup,
 		RunnerImage:     c.RunnerImage,
-	}}
+	}
+	ss.resolveEnvToken()
+	return []ScaleSetConfig{ss}
+}
+
+// resolveEnvToken resolves the token value from environment variables.
+// Supports two patterns:
+//   - token = "env:VARIABLE_NAME" — reads from the named env var
+//   - Empty token with RUNSCALER_TOKEN env var set — uses that as fallback
+func (ss *ScaleSetConfig) resolveEnvToken() {
+	if strings.HasPrefix(ss.Token, "env:") {
+		envName := strings.TrimPrefix(ss.Token, "env:")
+		ss.Token = os.Getenv(envName)
+		return
+	}
+	if ss.Token == "" {
+		if v := os.Getenv("RUNSCALER_TOKEN"); v != "" {
+			ss.Token = v
+		}
+	}
 }
 
 // Validate checks required fields and logical constraints for a scale set.

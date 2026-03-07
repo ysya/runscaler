@@ -15,6 +15,7 @@ import (
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/image"
+	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/api/types/network"
 	"github.com/google/uuid"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -28,6 +29,7 @@ type dockerAPI interface {
 	ContainerRemove(ctx context.Context, containerID string, options container.RemoveOptions) error
 	ImagesPrune(ctx context.Context, pruneFilters filters.Args) (image.PruneReport, error)
 	BuildCachePrune(ctx context.Context, opts build.CachePruneOptions) (*build.CachePruneReport, error)
+	VolumeRemove(ctx context.Context, volumeID string, force bool) error
 }
 
 // scalesetAPI abstracts the scaleset client methods used by Scaler.
@@ -139,8 +141,13 @@ func (s *Scaler) startRunner(ctx context.Context) (string, error) {
 			groupAdd = append(groupAdd, strconv.Itoa(gid))
 		}
 	}
+	var mounts []mount.Mount
 	if s.sharedVolume != "" {
-		binds = append(binds, s.sharedVolume)
+		mounts = append(mounts, mount.Mount{
+			Type:   mount.TypeVolume,
+			Source: "runscaler-shared",
+			Target: s.sharedVolume,
+		})
 	}
 	if s.workDirBase != "" {
 		workDir := fmt.Sprintf("%s/%s", s.workDirBase, name)
@@ -159,6 +166,7 @@ func (s *Scaler) startRunner(ctx context.Context) (string, error) {
 		},
 		&container.HostConfig{
 			Binds:       binds,
+			Mounts:      mounts,
 			GroupAdd:    groupAdd,
 			SecurityOpt: []string{"label:disable"},
 		},
@@ -170,6 +178,8 @@ func (s *Scaler) startRunner(ctx context.Context) (string, error) {
 	}
 
 	if err := s.dockerClient.ContainerStart(ctx, c.ID, container.StartOptions{}); err != nil {
+		// Clean up the created-but-not-started container
+		_ = s.dockerClient.ContainerRemove(ctx, c.ID, container.RemoveOptions{Force: true})
 		return "", fmt.Errorf("failed to start runner container: %w", err)
 	}
 
@@ -201,6 +211,14 @@ func (s *Scaler) shutdown(ctx context.Context) {
 		s.cleanupWorkDir(name)
 	}
 	clear(s.runners.busy)
+
+	// Remove shared Docker volume
+	if s.sharedVolume != "" {
+		s.logger.Info("Removing shared volume", slog.String("volume", "runscaler-shared"))
+		if err := s.dockerClient.VolumeRemove(ctx, "runscaler-shared", true); err != nil {
+			s.logger.Error("Failed to remove shared volume", slog.String("error", err.Error()))
+		}
+	}
 
 	s.pruneDocker(ctx)
 }

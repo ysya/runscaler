@@ -48,6 +48,10 @@ func (m *mockDocker) BuildCachePrune(_ context.Context, _ build.CachePruneOption
 	return &build.CachePruneReport{}, nil
 }
 
+func (m *mockDocker) VolumeRemove(_ context.Context, _ string, _ bool) error {
+	return nil
+}
+
 type mockScaleset struct {
 	generated int
 }

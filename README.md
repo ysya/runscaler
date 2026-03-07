@@ -89,7 +89,7 @@ runner-image = "ghcr.io/actions/actions-runner:latest"
 runner-group = "default"
 docker-socket = "/var/run/docker.sock"
 dind = true
-shared-volume = "/cache:/shared"
+shared-volume = "/shared"
 work-dir = "/tmp/runner"
 log-level = "info"
 log-format = "text"
@@ -110,7 +110,7 @@ log-format = "text"
 | `--runner-image` | `ghcr.io/actions/actions-runner:latest` | Docker image |
 | `--docker-socket` | `/var/run/docker.sock` | Docker socket path |
 | `--dind` | `true` | Mount Docker socket into runners (Docker-in-Docker) |
-| `--shared-volume` | | Shared volume for all runners (host:container) |
+| `--shared-volume` | | Shared Docker volume path in runners (e.g. `/shared`) |
 | `--work-dir` | `/tmp/runner` | Work directory base |
 | `--log-level` | `info` | Log level (debug/info/warn/error) |
 | `--log-format` | `text` | Log format (text/json) |

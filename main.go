@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"syscall"
 
 	"github.com/actions/scaleset"
 	"github.com/actions/scaleset/listener"
@@ -40,7 +41,7 @@ func init() {
 	// Docker
 	flags.StringVar(&cfg.DockerSocket, "docker-socket", "/var/run/docker.sock", "Path to Docker socket")
 	flags.BoolVar(&cfg.DinD, "dind", true, "Mount Docker socket into runner containers (Docker-in-Docker)")
-	flags.StringVar(&cfg.SharedVolume, "shared-volume", "", "Shared volume mount for all runners (host:container, e.g. /cache:/shared)")
+	flags.StringVar(&cfg.SharedVolume, "shared-volume", "", "Shared Docker volume mounted into all runners (container path, e.g. /shared)")
 	flags.StringVar(&cfg.WorkDirBase, "work-dir", "/tmp/runner", "Base directory for runner work directories")
 
 	// Logging
@@ -90,8 +91,19 @@ or a TOML config file (--config).`,
 			return fmt.Errorf("failed to parse configuration: %w", err)
 		}
 
-		ctx, cancel := signal.NotifyContext(cmd.Context(), os.Interrupt)
+		ctx, cancel := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 		defer cancel()
+
+		// Force exit on second signal
+		go func() {
+			<-ctx.Done()
+			// First signal received, ctx is cancelled. Wait for another.
+			sig := make(chan os.Signal, 1)
+			signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+			<-sig
+			fmt.Fprintln(os.Stderr, "\nForce exit")
+			os.Exit(1)
+		}()
 
 		return run(ctx, cfg)
 	},

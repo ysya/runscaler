@@ -6,7 +6,7 @@ builds:
     binary: runscaler
     env:
       - CGO_ENABLED=0
-    goflags:
+    flags:
       - -trimpath
     ldflags:
       - -s -w

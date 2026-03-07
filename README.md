@@ -142,18 +142,22 @@ log-format = "text"
 
 ### Token Security
 
-Avoid passing tokens as CLI flags (visible in `ps` output). Use one of these approaches:
+Avoid passing tokens as CLI flags (visible in `ps` output). Two alternatives:
+
+**Option 1: `RUNSCALER_TOKEN` environment variable** — automatically used when no `--token` flag or config value is set:
 
 ```bash
-# Environment variable
 export RUNSCALER_TOKEN=ghp_xxx
 runscaler --url https://github.com/org --name my-runners
-
-# In config file, reference an env var
-token = "env:GITHUB_TOKEN"
 ```
 
-Priority: CLI flag > `RUNSCALER_TOKEN` env var > config file value.
+**Option 2: `env:` syntax in config file** — reference any environment variable by name:
+
+```toml
+token = "env:GITHUB_TOKEN"  # reads from $GITHUB_TOKEN at startup
+```
+
+Priority: `--token` flag > `RUNSCALER_TOKEN` env var > config file value (including `env:` resolution).
 
 **Multiple scale sets (multi-org):**
 

@@ -1,0 +1,44 @@
+# runscaler configuration
+# Copy this file to config.toml and edit as needed.
+
+# --- Global settings ---
+
+docker-socket = "/var/run/docker.sock"
+dind = true
+# shared-volume = "/shared"
+log-level = "info"
+log-format = "text"
+
+# Default runner image and group (inherited by scale sets if not specified)
+runner-image = "ghcr.io/actions/actions-runner:latest"
+runner-group = "default"
+max-runners = 10
+
+# --- Single scale set mode ---
+# Use top-level fields when managing a single org/repo.
+# These are ignored when [[scaleset]] entries exist.
+
+# url = "https://github.com/your-org"
+# name = "my-runners"
+# token = "ghp_xxx"
+# max-runners = 10
+# min-runners = 0
+# labels = ["self-hosted", "linux"]
+
+# --- Multiple scale sets mode ---
+# Use [[scaleset]] entries to manage multiple orgs/repos from one process.
+# Each entry inherits runner-image, runner-group, and max-runners from
+# the global settings above unless explicitly overridden.
+
+# [[scaleset]]
+# url = "https://github.com/org-a"
+# name = "runners-a"
+# token = "ghp_aaa"
+# max-runners = 5
+
+# [[scaleset]]
+# url = "https://github.com/org-b"
+# name = "runners-b"
+# token = "ghp_bbb"
+# runner-image = "custom-runner:latest"
+# labels = ["linux", "gpu"]

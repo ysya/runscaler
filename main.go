@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 
 	"github.com/actions/scaleset"
@@ -30,26 +31,20 @@ var cfg Config
 func init() {
 	flags := cmd.Flags()
 
-	// Required
-	flags.StringVar(&cfg.RegistrationURL, "url", "", "REQUIRED: Registration URL (e.g. https://github.com/org or https://github.com/org/repo)")
-	flags.StringVar(&cfg.ScaleSetName, "name", "", "REQUIRED: Name of the scale set (also used as runs-on label)")
-	flags.StringVar(&cfg.Token, "token", "", "REQUIRED: Personal access token")
-
-	// Scaling
+	// Per-scaleset (also used as legacy single mode)
+	flags.StringVar(&cfg.RegistrationURL, "url", "", "Registration URL (e.g. https://github.com/org)")
+	flags.StringVar(&cfg.ScaleSetName, "name", "", "Name of the scale set (also used as runs-on label)")
+	flags.StringVar(&cfg.Token, "token", "", "Personal access token")
 	flags.IntVar(&cfg.MaxRunners, "max-runners", 10, "Maximum number of runners")
 	flags.IntVar(&cfg.MinRunners, "min-runners", 0, "Minimum number of runners")
-
-	// Runner
-	flags.StringSliceVar(&cfg.Labels, "labels", nil, "Runner labels (comma-separated). Defaults to --name if not provided")
+	flags.StringSliceVar(&cfg.Labels, "labels", nil, "Runner labels (comma-separated)")
 	flags.StringVar(&cfg.RunnerGroup, "runner-group", scaleset.DefaultRunnerGroup, "Runner group name")
 	flags.StringVar(&cfg.RunnerImage, "runner-image", "ghcr.io/actions/actions-runner:latest", "Docker image for runners")
 
-	// Docker
+	// Global
 	flags.StringVar(&cfg.DockerSocket, "docker-socket", "/var/run/docker.sock", "Path to Docker socket")
 	flags.BoolVar(&cfg.DinD, "dind", true, "Mount Docker socket into runner containers (Docker-in-Docker)")
 	flags.StringVar(&cfg.SharedVolume, "shared-volume", "", "Shared Docker volume mounted into all runners (container path, e.g. /shared)")
-
-	// Logging
 	flags.StringVar(&cfg.LogLevel, "log-level", "info", "Log level (debug, info, warn, error)")
 	flags.StringVar(&cfg.LogFormat, "log-format", "text", "Log format (text, json)")
 
@@ -74,9 +69,8 @@ var cmd = &cobra.Command{
 using the actions/scaleset library. Runners are ephemeral — each container
 handles one job and is removed upon completion.
 
-Requires a GitHub Personal Access Token with admin:org scope (or repo scope
-for repository-level runners). Configuration can be provided via CLI flags
-or a TOML config file (--config).`,
+Supports multiple scale sets via [[scaleset]] entries in TOML config,
+or a single scale set via CLI flags.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		// Load config file: explicit --config flag, or search default paths
 		if configFile, _ := cmd.Flags().GetString("config"); configFile != "" {
@@ -103,7 +97,6 @@ or a TOML config file (--config).`,
 		// Force exit on second signal
 		go func() {
 			<-ctx.Done()
-			// First signal received, ctx is cancelled. Wait for another.
 			sig := make(chan os.Signal, 1)
 			signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 			<-sig
@@ -116,25 +109,98 @@ or a TOML config file (--config).`,
 }
 
 func run(ctx context.Context, c Config) error {
-	if err := c.Validate(); err != nil {
-		return fmt.Errorf("configuration validation failed: %w", err)
-	}
-
 	logger := c.Logger()
 
+	scaleSets := c.ResolveScaleSets()
+	for i := range scaleSets {
+		if err := scaleSets[i].Validate(); err != nil {
+			return fmt.Errorf("scaleset[%d] %q: %w", i, scaleSets[i].ScaleSetName, err)
+		}
+	}
+
+	// Create shared Docker client and verify connectivity
+	dockerClient, err := dockerclient.NewClientWithOpts(
+		dockerclient.FromEnv,
+		dockerclient.WithAPIVersionNegotiation(),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create docker client: %w", err)
+	}
+
+	if _, err := dockerClient.Ping(ctx); err != nil {
+		return fmt.Errorf("cannot connect to Docker at %s: %w\n\n"+
+			"  Possible fixes:\n"+
+			"  1. Ensure Docker is running\n"+
+			"  2. Add your user to the docker group: sudo usermod -aG docker $USER\n"+
+			"  3. Re-login or run: newgrp docker\n"+
+			"  4. Or check the docker-socket path in your config",
+			c.DockerSocket, err)
+	}
+
+	// Pull unique runner images
+	pulled := make(map[string]bool)
+	for _, ss := range scaleSets {
+		if pulled[ss.RunnerImage] {
+			continue
+		}
+		logger.Info("Pulling runner image", slog.String("image", ss.RunnerImage))
+		pull, err := dockerClient.ImagePull(ctx, ss.RunnerImage, image.PullOptions{})
+		if err != nil {
+			return fmt.Errorf("failed to pull runner image %s: %w", ss.RunnerImage, err)
+		}
+		if _, err := io.ReadAll(pull); err != nil {
+			return fmt.Errorf("failed to read image pull response: %w", err)
+		}
+		pull.Close()
+		pulled[ss.RunnerImage] = true
+	}
+
+	logger.Info("Starting scale sets", slog.Int("count", len(scaleSets)))
+
+	// Run each scale set in its own goroutine
+	var wg sync.WaitGroup
+	errs := make(chan error, len(scaleSets))
+
+	for i := range scaleSets {
+		wg.Add(1)
+		go func(ss ScaleSetConfig) {
+			defer wg.Done()
+			ssLogger := logger.With(slog.String("scaleset", ss.ScaleSetName))
+			if err := runScaleSet(ctx, c, ss, dockerClient, ssLogger); err != nil {
+				errs <- fmt.Errorf("scaleset %q: %w", ss.ScaleSetName, err)
+			}
+		}(scaleSets[i])
+	}
+
+	wg.Wait()
+	close(errs)
+
+	// Collect errors
+	var errsSlice []error
+	for err := range errs {
+		errsSlice = append(errsSlice, err)
+	}
+	if len(errsSlice) > 0 {
+		return errors.Join(errsSlice...)
+	}
+	return nil
+}
+
+// runScaleSet manages the lifecycle of a single scale set.
+func runScaleSet(ctx context.Context, global Config, ss ScaleSetConfig, dockerClient *dockerclient.Client, logger *slog.Logger) error {
 	// Create scaleset client
-	scalesetClient, err := c.ScalesetClient(logger)
+	scalesetClient, err := ss.ScalesetClient(logger)
 	if err != nil {
 		return fmt.Errorf("failed to create scaleset client: %w", err)
 	}
 
 	// Resolve runner group ID
 	var runnerGroupID int
-	switch c.RunnerGroup {
-	case scaleset.DefaultRunnerGroup:
+	switch ss.RunnerGroup {
+	case scaleset.DefaultRunnerGroup, "":
 		runnerGroupID = 1
 	default:
-		runnerGroup, err := scalesetClient.GetRunnerGroupByName(ctx, c.RunnerGroup)
+		runnerGroup, err := scalesetClient.GetRunnerGroupByName(ctx, ss.RunnerGroup)
 		if err != nil {
 			return fmt.Errorf("failed to get runner group: %w", err)
 		}
@@ -143,17 +209,16 @@ func run(ctx context.Context, c Config) error {
 
 	// Get or create runner scale set
 	desired := &scaleset.RunnerScaleSet{
-		Name:          c.ScaleSetName,
+		Name:          ss.ScaleSetName,
 		RunnerGroupID: runnerGroupID,
-		Labels:        c.BuildLabels(),
+		Labels:        ss.BuildLabels(),
 		RunnerSetting: scaleset.RunnerSetting{
 			DisableUpdate: true,
 		},
 	}
 
-	scaleSet, err := scalesetClient.GetRunnerScaleSet(ctx, runnerGroupID, c.ScaleSetName)
+	scaleSet, err := scalesetClient.GetRunnerScaleSet(ctx, runnerGroupID, ss.ScaleSetName)
 	if err != nil || scaleSet == nil {
-		// Not found — create new
 		scaleSet, err = scalesetClient.CreateRunnerScaleSet(ctx, desired)
 		if err != nil {
 			return fmt.Errorf("failed to create runner scale set: %w", err)
@@ -163,7 +228,6 @@ func run(ctx context.Context, c Config) error {
 			slog.String("name", scaleSet.Name),
 		)
 	} else {
-		// Found — update labels and settings
 		scaleSet, err = scalesetClient.UpdateRunnerScaleSet(ctx, scaleSet.ID, desired)
 		if err != nil {
 			return fmt.Errorf("failed to update runner scale set: %w", err)
@@ -185,44 +249,14 @@ func run(ctx context.Context, c Config) error {
 		}
 	}()
 
-	// Create Docker client and verify connectivity
-	dockerClient, err := dockerclient.NewClientWithOpts(
-		dockerclient.FromEnv,
-		dockerclient.WithAPIVersionNegotiation(),
-	)
-	if err != nil {
-		return fmt.Errorf("failed to create docker client: %w", err)
-	}
-
-	if _, err := dockerClient.Ping(ctx); err != nil {
-		return fmt.Errorf("cannot connect to Docker at %s: %w\n\n"+
-			"  Possible fixes:\n"+
-			"  1. Ensure Docker is running\n"+
-			"  2. Add your user to the docker group: sudo usermod -aG docker $USER\n"+
-			"  3. Re-login or run: newgrp docker\n"+
-			"  4. Or check the docker-socket path in your config",
-			c.DockerSocket, err)
-	}
-
-	// Pull runner image
-	logger.Info("Pulling runner image", slog.String("image", c.RunnerImage))
-	pull, err := dockerClient.ImagePull(ctx, c.RunnerImage, image.PullOptions{})
-	if err != nil {
-		return fmt.Errorf("failed to pull runner image: %w", err)
-	}
-	if _, err := io.ReadAll(pull); err != nil {
-		return fmt.Errorf("failed to read image pull response: %w", err)
-	}
-	pull.Close()
-
 	// Create message session
 	hostname, err := os.Hostname()
 	if err != nil {
 		hostname = uuid.NewString()
-		logger.Info("Failed to get hostname, using UUID", "uuid", hostname)
 	}
+	sessionID := fmt.Sprintf("%s-%s", hostname, ss.ScaleSetName)
 
-	sessionClient, err := scalesetClient.MessageSessionClient(ctx, scaleSet.ID, hostname)
+	sessionClient, err := scalesetClient.MessageSessionClient(ctx, scaleSet.ID, sessionID)
 	if err != nil {
 		return fmt.Errorf("failed to create message session: %w", err)
 	}
@@ -231,7 +265,7 @@ func run(ctx context.Context, c Config) error {
 	// Create listener
 	l, err := listener.New(sessionClient, listener.Config{
 		ScaleSetID: scaleSet.ID,
-		MaxRunners: c.MaxRunners,
+		MaxRunners: ss.MaxRunners,
 		Logger:     logger.WithGroup("listener"),
 	})
 	if err != nil {
@@ -241,15 +275,15 @@ func run(ctx context.Context, c Config) error {
 	// Create scaler
 	scaler := &Scaler{
 		logger:         logger.WithGroup("scaler"),
-		runnerImage:    c.RunnerImage,
+		runnerImage:    ss.RunnerImage,
 		scaleSetID:     scaleSet.ID,
 		dockerClient:   dockerClient,
 		scalesetClient: scalesetClient,
-		minRunners:     c.MinRunners,
-		maxRunners:     c.MaxRunners,
-		dockerSocket:   c.DockerSocket,
-		dind:           c.DinD,
-		sharedVolume:   c.SharedVolume,
+		minRunners:     ss.MinRunners,
+		maxRunners:     ss.MaxRunners,
+		dockerSocket:   global.DockerSocket,
+		dind:           global.DinD,
+		sharedVolume:   global.SharedVolume,
 		runners: runnerState{
 			idle: make(map[string]string),
 			busy: make(map[string]string),
@@ -259,13 +293,12 @@ func run(ctx context.Context, c Config) error {
 
 	// Start listening
 	logger.Info("Listening for jobs",
-		slog.String("scaleSet", c.ScaleSetName),
-		slog.Int("maxRunners", c.MaxRunners),
-		slog.Int("minRunners", c.MinRunners),
+		slog.Int("maxRunners", ss.MaxRunners),
+		slog.Int("minRunners", ss.MinRunners),
 	)
 
 	if err := l.Run(ctx, scaler); !errors.Is(err, context.Canceled) {
-		return fmt.Errorf("listener run failed: %w", err)
+		return fmt.Errorf("listener failed: %w", err)
 	}
 
 	return nil

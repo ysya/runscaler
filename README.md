@@ -29,6 +29,7 @@ GitHub Actions  ──long poll──▶  runscaler  ──Docker API──▶  
 - **Auto-scaling** — scales from 0 to N based on job demand via long-poll (no cron, no polling delay)
 - **Docker-in-Docker** — optional DinD support for workflows that build containers
 - **Shared volumes** — cross-runner caching via named Docker volumes
+- **Multi-org support** — manage multiple scale sets from a single process
 - **Single binary** — no runtime dependencies beyond Docker
 - **Config file or flags** — TOML config with CLI flag overrides
 
@@ -104,6 +105,8 @@ Configuration can be provided via a TOML config file (`--config`) or CLI flags. 
 
 ### Config File (TOML)
 
+**Single scale set:**
+
 ```toml
 # config.toml
 url = "https://github.com/your-org"
@@ -119,6 +122,35 @@ dind = true
 shared-volume = "/shared"
 log-level = "info"
 log-format = "text"
+```
+
+**Multiple scale sets (multi-org):**
+
+```toml
+# Global settings
+docker-socket = "/var/run/docker.sock"
+dind = true
+shared-volume = "/shared"
+runner-image = "ghcr.io/actions/actions-runner:latest"
+runner-group = "default"
+max-runners = 10
+log-level = "info"
+
+# Each [[scaleset]] runs independently.
+# runner-image, runner-group, and max-runners inherit from global if omitted.
+
+[[scaleset]]
+url = "https://github.com/org-a"
+name = "runners-a"
+token = "ghp_aaa"
+max-runners = 5
+
+[[scaleset]]
+url = "https://github.com/org-b"
+name = "runners-b"
+token = "ghp_bbb"
+runner-image = "custom-runner:latest"
+labels = ["linux", "gpu"]
 ```
 
 ### CLI Flags

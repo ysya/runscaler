@@ -6,8 +6,8 @@ import (
 	"github.com/actions/scaleset"
 )
 
-func validConfig() Config {
-	return Config{
+func validScaleSetConfig() ScaleSetConfig {
+	return ScaleSetConfig{
 		RegistrationURL: "https://github.com/test-org",
 		ScaleSetName:    "test-runners",
 		Token:           "ghp_test",
@@ -16,49 +16,49 @@ func validConfig() Config {
 	}
 }
 
-func TestConfigValidate(t *testing.T) {
+func TestScaleSetConfigValidate(t *testing.T) {
 	tests := []struct {
 		name    string
-		modify  func(*Config)
+		modify  func(*ScaleSetConfig)
 		wantErr string
 	}{
 		{
 			name:   "valid config",
-			modify: func(c *Config) {},
+			modify: func(c *ScaleSetConfig) {},
 		},
 		{
 			name:    "missing url",
-			modify:  func(c *Config) { c.RegistrationURL = "" },
+			modify:  func(c *ScaleSetConfig) { c.RegistrationURL = "" },
 			wantErr: "registration URL",
 		},
 		{
 			name:    "invalid url",
-			modify:  func(c *Config) { c.RegistrationURL = "not-a-url" },
+			modify:  func(c *ScaleSetConfig) { c.RegistrationURL = "not-a-url" },
 			wantErr: "invalid registration URL",
 		},
 		{
 			name:    "missing name",
-			modify:  func(c *Config) { c.ScaleSetName = "" },
+			modify:  func(c *ScaleSetConfig) { c.ScaleSetName = "" },
 			wantErr: "scale set name",
 		},
 		{
 			name:    "missing token",
-			modify:  func(c *Config) { c.Token = "" },
+			modify:  func(c *ScaleSetConfig) { c.Token = "" },
 			wantErr: "token",
 		},
 		{
 			name:    "negative min runners",
-			modify:  func(c *Config) { c.MinRunners = -1 },
+			modify:  func(c *ScaleSetConfig) { c.MinRunners = -1 },
 			wantErr: "min-runners must be >= 0",
 		},
 		{
 			name:    "zero max runners",
-			modify:  func(c *Config) { c.MaxRunners = 0 },
+			modify:  func(c *ScaleSetConfig) { c.MaxRunners = 0 },
 			wantErr: "max-runners must be >= 1",
 		},
 		{
 			name: "min exceeds max",
-			modify: func(c *Config) {
+			modify: func(c *ScaleSetConfig) {
 				c.MinRunners = 5
 				c.MaxRunners = 3
 			},
@@ -68,7 +68,7 @@ func TestConfigValidate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			c := validConfig()
+			c := validScaleSetConfig()
 			tt.modify(&c)
 			err := c.Validate()
 
@@ -91,7 +91,7 @@ func TestConfigValidate(t *testing.T) {
 
 func TestBuildLabels(t *testing.T) {
 	t.Run("custom labels", func(t *testing.T) {
-		c := Config{
+		c := ScaleSetConfig{
 			ScaleSetName: "my-runners",
 			Labels:       []string{"linux", "x64", "docker"},
 		}
@@ -112,7 +112,7 @@ func TestBuildLabels(t *testing.T) {
 	})
 
 	t.Run("defaults to scale set name", func(t *testing.T) {
-		c := Config{
+		c := ScaleSetConfig{
 			ScaleSetName: "my-runners",
 			Labels:       nil,
 		}
@@ -125,6 +125,73 @@ func TestBuildLabels(t *testing.T) {
 			t.Errorf("label[0].Name = %q, want %q", labels[0].Name, "my-runners")
 		}
 	})
+}
+
+func TestResolveScaleSets_Legacy(t *testing.T) {
+	c := Config{
+		RegistrationURL: "https://github.com/test-org",
+		ScaleSetName:    "my-runners",
+		Token:           "ghp_test",
+		MaxRunners:      10,
+		RunnerImage:     "ghcr.io/actions/actions-runner:latest",
+	}
+
+	sets := c.ResolveScaleSets()
+	if len(sets) != 1 {
+		t.Fatalf("expected 1 scale set, got %d", len(sets))
+	}
+	if sets[0].ScaleSetName != "my-runners" {
+		t.Errorf("name = %q, want %q", sets[0].ScaleSetName, "my-runners")
+	}
+	if sets[0].MaxRunners != 10 {
+		t.Errorf("max-runners = %d, want 10", sets[0].MaxRunners)
+	}
+}
+
+func TestResolveScaleSets_Multi(t *testing.T) {
+	c := Config{
+		RunnerImage: "default-image:latest",
+		RunnerGroup: "default",
+		MaxRunners:  5,
+		ScaleSets: []ScaleSetConfig{
+			{
+				RegistrationURL: "https://github.com/org-a",
+				ScaleSetName:    "runners-a",
+				Token:           "token-a",
+			},
+			{
+				RegistrationURL: "https://github.com/org-b",
+				ScaleSetName:    "runners-b",
+				Token:           "token-b",
+				RunnerImage:     "custom-image:latest",
+				MaxRunners:      20,
+			},
+		},
+	}
+
+	sets := c.ResolveScaleSets()
+	if len(sets) != 2 {
+		t.Fatalf("expected 2 scale sets, got %d", len(sets))
+	}
+
+	// First should inherit defaults
+	if sets[0].RunnerImage != "default-image:latest" {
+		t.Errorf("sets[0].RunnerImage = %q, want default", sets[0].RunnerImage)
+	}
+	if sets[0].MaxRunners != 5 {
+		t.Errorf("sets[0].MaxRunners = %d, want 5 (inherited)", sets[0].MaxRunners)
+	}
+	if sets[0].RunnerGroup != "default" {
+		t.Errorf("sets[0].RunnerGroup = %q, want default (inherited)", sets[0].RunnerGroup)
+	}
+
+	// Second should keep its own values
+	if sets[1].RunnerImage != "custom-image:latest" {
+		t.Errorf("sets[1].RunnerImage = %q, want custom", sets[1].RunnerImage)
+	}
+	if sets[1].MaxRunners != 20 {
+		t.Errorf("sets[1].MaxRunners = %d, want 20", sets[1].MaxRunners)
+	}
 }
 
 func TestSystemInfo(t *testing.T) {

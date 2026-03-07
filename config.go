@@ -13,8 +13,19 @@ import (
 	"github.com/hashicorp/go-retryablehttp"
 )
 
-// Config holds all configuration for runscaler.
+// Config holds global configuration for runscaler.
 type Config struct {
+	// Global settings
+	DockerSocket string `mapstructure:"docker-socket"`
+	DinD         bool   `mapstructure:"dind"`
+	SharedVolume string `mapstructure:"shared-volume"`
+	LogLevel     string `mapstructure:"log-level"`
+	LogFormat    string `mapstructure:"log-format"`
+
+	// Scale sets (multi-org support)
+	ScaleSets []ScaleSetConfig `mapstructure:"scaleset"`
+
+	// Legacy top-level fields for single scale set / CLI mode
 	RegistrationURL string   `mapstructure:"url"`
 	ScaleSetName    string   `mapstructure:"name"`
 	Token           string   `mapstructure:"token"`
@@ -23,35 +34,76 @@ type Config struct {
 	Labels          []string `mapstructure:"labels"`
 	RunnerGroup     string   `mapstructure:"runner-group"`
 	RunnerImage     string   `mapstructure:"runner-image"`
-	DockerSocket    string   `mapstructure:"docker-socket"`
-	DinD            bool     `mapstructure:"dind"`
-	SharedVolume    string   `mapstructure:"shared-volume"`
-	LogLevel        string   `mapstructure:"log-level"`
-	LogFormat       string   `mapstructure:"log-format"`
 }
 
-// Validate checks required fields and logical constraints.
-func (c *Config) Validate() error {
-	if c.RegistrationURL == "" {
-		return fmt.Errorf("registration URL (--url) is required")
+// ScaleSetConfig holds per-scale-set configuration.
+type ScaleSetConfig struct {
+	RegistrationURL string   `mapstructure:"url"`
+	ScaleSetName    string   `mapstructure:"name"`
+	Token           string   `mapstructure:"token"`
+	MaxRunners      int      `mapstructure:"max-runners"`
+	MinRunners      int      `mapstructure:"min-runners"`
+	Labels          []string `mapstructure:"labels"`
+	RunnerGroup     string   `mapstructure:"runner-group"`
+	RunnerImage     string   `mapstructure:"runner-image"`
+}
+
+// ResolveScaleSets returns the list of scale set configs to run.
+// If [[scaleset]] entries exist, use them. Otherwise fall back to
+// top-level fields (single scale set / CLI mode).
+func (c *Config) ResolveScaleSets() []ScaleSetConfig {
+	if len(c.ScaleSets) > 0 {
+		// Apply defaults from global config to each scale set
+		for i := range c.ScaleSets {
+			ss := &c.ScaleSets[i]
+			if ss.RunnerImage == "" {
+				ss.RunnerImage = c.RunnerImage
+			}
+			if ss.RunnerGroup == "" {
+				ss.RunnerGroup = c.RunnerGroup
+			}
+			if ss.MaxRunners == 0 {
+				ss.MaxRunners = c.MaxRunners
+			}
+		}
+		return c.ScaleSets
 	}
-	if _, err := url.ParseRequestURI(c.RegistrationURL); err != nil {
+
+	// Legacy single scale set mode
+	return []ScaleSetConfig{{
+		RegistrationURL: c.RegistrationURL,
+		ScaleSetName:    c.ScaleSetName,
+		Token:           c.Token,
+		MaxRunners:      c.MaxRunners,
+		MinRunners:      c.MinRunners,
+		Labels:          c.Labels,
+		RunnerGroup:     c.RunnerGroup,
+		RunnerImage:     c.RunnerImage,
+	}}
+}
+
+// Validate checks required fields and logical constraints for a scale set.
+func (ss *ScaleSetConfig) Validate() error {
+	if ss.RegistrationURL == "" {
+		return fmt.Errorf("registration URL (url) is required")
+	}
+	if _, err := url.ParseRequestURI(ss.RegistrationURL); err != nil {
 		return fmt.Errorf("invalid registration URL: %w", err)
 	}
-	if c.ScaleSetName == "" {
-		return fmt.Errorf("scale set name (--name) is required")
+	if ss.ScaleSetName == "" {
+		return fmt.Errorf("scale set name (name) is required")
 	}
-	if c.Token == "" {
-		return fmt.Errorf("token (--token or config file) is required")
+	if ss.Token == "" {
+		return fmt.Errorf("token is required")
 	}
-	if c.MinRunners < 0 {
+	if ss.MinRunners < 0 {
 		return fmt.Errorf("min-runners must be >= 0")
 	}
-	if c.MaxRunners < 1 {
+	if ss.MaxRunners < 1 {
 		return fmt.Errorf("max-runners must be >= 1")
 	}
-	if c.MinRunners > c.MaxRunners {
-		return fmt.Errorf("min-runners (%d) must be <= max-runners (%d)", c.MinRunners, c.MaxRunners)
+	if ss.MinRunners > ss.MaxRunners {
+		return fmt.Errorf("min-runners (%d) must be <= max-runners (%d)", ss.MinRunners, ss.MaxRunners)
 	}
 	return nil
 }
@@ -59,14 +111,14 @@ func (c *Config) Validate() error {
 // ScalesetClient creates a scaleset.Client using PAT authentication.
 // A custom retryablehttp client is used to override its default logger,
 // which otherwise prints unformatted [DEBUG] lines to stderr.
-func (c *Config) ScalesetClient(logger *slog.Logger) (*scaleset.Client, error) {
+func (ss *ScaleSetConfig) ScalesetClient(logger *slog.Logger) (*scaleset.Client, error) {
 	httpClient := retryablehttp.NewClient()
 	httpClient.Logger = nil // suppress noisy "performing request" debug lines
 
 	client, err := scaleset.NewClientWithPersonalAccessToken(
 		scaleset.NewClientWithPersonalAccessTokenConfig{
-			GitHubConfigURL:     c.RegistrationURL,
-			PersonalAccessToken: c.Token,
+			GitHubConfigURL:     ss.RegistrationURL,
+			PersonalAccessToken: ss.Token,
 		},
 		scaleset.WithLogger(logger),
 		scaleset.WithRetryableHTTPClint(httpClient),
@@ -113,10 +165,10 @@ func (c *Config) Logger() *slog.Logger {
 
 // BuildLabels converts string labels to scaleset.Label slice.
 // If no labels are provided, uses the scale set name as default.
-func (c *Config) BuildLabels() []scaleset.Label {
-	labels := c.Labels
+func (ss *ScaleSetConfig) BuildLabels() []scaleset.Label {
+	labels := ss.Labels
 	if len(labels) == 0 {
-		labels = []string{c.ScaleSetName}
+		labels = []string{ss.ScaleSetName}
 	}
 
 	result := make([]scaleset.Label, len(labels))

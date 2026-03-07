@@ -154,12 +154,25 @@ func (s *Scaler) startRunner(ctx context.Context) (string, error) {
 		binds = append(binds, fmt.Sprintf("%s:%s", workDir, workDir))
 	}
 
+	// Build command — fix shared volume ownership before starting runner.
+	// The runner image runs as UID 1001 (runner) with GID 123 (docker).
+	// Named volumes are created as root, so we use sudo chown to fix ownership.
+	// This matches the official ARC initContainer pattern.
+	var cmd []string
+	if s.sharedVolume != "" {
+		cmd = []string{"sh", "-c",
+			fmt.Sprintf("sudo chown -R 1001:123 %s && /home/runner/run.sh", s.sharedVolume),
+		}
+	} else {
+		cmd = []string{"/home/runner/run.sh"}
+	}
+
 	c, err := s.dockerClient.ContainerCreate(
 		ctx,
 		&container.Config{
 			Image: s.runnerImage,
 			User:  "runner",
-			Cmd:   []string{"/home/runner/run.sh"},
+			Cmd:   cmd,
 			Env: []string{
 				fmt.Sprintf("ACTIONS_RUNNER_INPUT_JITCONFIG=%s", jit.EncodedJITConfig),
 			},

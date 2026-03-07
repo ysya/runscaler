@@ -135,23 +135,38 @@ func run(ctx context.Context, c Config) error {
 		runnerGroupID = runnerGroup.ID
 	}
 
-	// Create runner scale set
-	scaleSet, err := scalesetClient.CreateRunnerScaleSet(ctx, &scaleset.RunnerScaleSet{
+	// Get or create runner scale set
+	desired := &scaleset.RunnerScaleSet{
 		Name:          c.ScaleSetName,
 		RunnerGroupID: runnerGroupID,
 		Labels:        c.BuildLabels(),
 		RunnerSetting: scaleset.RunnerSetting{
 			DisableUpdate: true,
 		},
-	})
-	if err != nil {
-		return fmt.Errorf("failed to create runner scale set: %w", err)
 	}
 
-	logger.Info("Scale set created",
-		slog.Int("scaleSetID", scaleSet.ID),
-		slog.String("name", scaleSet.Name),
-	)
+	scaleSet, err := scalesetClient.GetRunnerScaleSet(ctx, runnerGroupID, c.ScaleSetName)
+	if err != nil || scaleSet == nil {
+		// Not found — create new
+		scaleSet, err = scalesetClient.CreateRunnerScaleSet(ctx, desired)
+		if err != nil {
+			return fmt.Errorf("failed to create runner scale set: %w", err)
+		}
+		logger.Info("Scale set created",
+			slog.Int("scaleSetID", scaleSet.ID),
+			slog.String("name", scaleSet.Name),
+		)
+	} else {
+		// Found — update labels and settings
+		scaleSet, err = scalesetClient.UpdateRunnerScaleSet(ctx, scaleSet.ID, desired)
+		if err != nil {
+			return fmt.Errorf("failed to update runner scale set: %w", err)
+		}
+		logger.Info("Scale set reused",
+			slog.Int("scaleSetID", scaleSet.ID),
+			slog.String("name", scaleSet.Name),
+		)
+	}
 
 	// Set user agent info
 	scalesetClient.SetSystemInfo(systemInfo(scaleSet.ID))

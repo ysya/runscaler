@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 
@@ -12,21 +13,31 @@ import (
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/image"
+	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/api/types/network"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
 // --- Mocks ---
 
-type mockDocker struct {
-	created []string // container names
-	started []string // container IDs
-	removed []string // container IDs
+type createCall struct {
+	name       string
+	config     *container.Config
+	hostConfig *container.HostConfig
 }
 
-func (m *mockDocker) ContainerCreate(_ context.Context, _ *container.Config, _ *container.HostConfig, _ *network.NetworkingConfig, _ *ocispec.Platform, name string) (container.CreateResponse, error) {
+type mockDocker struct {
+	created    []string     // container names
+	createCalls []createCall // full create args
+	started    []string     // container IDs
+	removed    []string     // container IDs
+	volumesRemoved []string // volume names
+}
+
+func (m *mockDocker) ContainerCreate(_ context.Context, cfg *container.Config, hcfg *container.HostConfig, _ *network.NetworkingConfig, _ *ocispec.Platform, name string) (container.CreateResponse, error) {
 	id := "sha256-" + name
 	m.created = append(m.created, name)
+	m.createCalls = append(m.createCalls, createCall{name: name, config: cfg, hostConfig: hcfg})
 	return container.CreateResponse{ID: id}, nil
 }
 
@@ -48,7 +59,8 @@ func (m *mockDocker) BuildCachePrune(_ context.Context, _ build.CachePruneOption
 	return &build.CachePruneReport{}, nil
 }
 
-func (m *mockDocker) VolumeRemove(_ context.Context, _ string, _ bool) error {
+func (m *mockDocker) VolumeRemove(_ context.Context, volumeID string, _ bool) error {
+	m.volumesRemoved = append(m.volumesRemoved, volumeID)
 	return nil
 }
 
@@ -355,3 +367,92 @@ func TestShutdown(t *testing.T) {
 	}
 }
 
+// --- Shared volume tests ---
+
+func TestStartRunner_WithSharedVolume(t *testing.T) {
+	s, md, _ := newTestScaler(0, 10)
+	s.sharedVolume = "/shared"
+	ctx := context.Background()
+
+	_, err := s.HandleDesiredRunnerCount(ctx, 1)
+	if err != nil {
+		t.Fatalf("HandleDesiredRunnerCount() error: %v", err)
+	}
+
+	if len(md.createCalls) != 1 {
+		t.Fatalf("expected 1 create call, got %d", len(md.createCalls))
+	}
+	call := md.createCalls[0]
+
+	// Verify named volume mount
+	if len(call.hostConfig.Mounts) != 1 {
+		t.Fatalf("expected 1 mount, got %d", len(call.hostConfig.Mounts))
+	}
+	m := call.hostConfig.Mounts[0]
+	if m.Type != mount.TypeVolume {
+		t.Errorf("mount type = %v, want %v", m.Type, mount.TypeVolume)
+	}
+	if m.Source != "runscaler-shared" {
+		t.Errorf("mount source = %q, want %q", m.Source, "runscaler-shared")
+	}
+	if m.Target != "/shared" {
+		t.Errorf("mount target = %q, want %q", m.Target, "/shared")
+	}
+
+	// Verify command wraps with chown
+	cmd := strings.Join(call.config.Cmd, " ")
+	if !strings.Contains(cmd, "sudo chown") {
+		t.Errorf("cmd should contain sudo chown, got: %v", call.config.Cmd)
+	}
+	if !strings.Contains(cmd, "/home/runner/run.sh") {
+		t.Errorf("cmd should contain run.sh, got: %v", call.config.Cmd)
+	}
+}
+
+func TestStartRunner_WithoutSharedVolume(t *testing.T) {
+	s, md, _ := newTestScaler(0, 10)
+	ctx := context.Background()
+
+	_, err := s.HandleDesiredRunnerCount(ctx, 1)
+	if err != nil {
+		t.Fatalf("HandleDesiredRunnerCount() error: %v", err)
+	}
+
+	call := md.createCalls[0]
+
+	// No mounts when shared volume is not configured
+	if len(call.hostConfig.Mounts) != 0 {
+		t.Errorf("expected 0 mounts, got %d", len(call.hostConfig.Mounts))
+	}
+
+	// Direct run.sh command without chown wrapper
+	if len(call.config.Cmd) != 1 || call.config.Cmd[0] != "/home/runner/run.sh" {
+		t.Errorf("cmd = %v, want [/home/runner/run.sh]", call.config.Cmd)
+	}
+}
+
+func TestShutdown_RemovesSharedVolume(t *testing.T) {
+	s, md, _ := newTestScaler(0, 10)
+	s.sharedVolume = "/shared"
+	ctx := context.Background()
+
+	s.shutdown(ctx)
+
+	if len(md.volumesRemoved) != 1 {
+		t.Fatalf("expected 1 volume removed, got %d", len(md.volumesRemoved))
+	}
+	if md.volumesRemoved[0] != "runscaler-shared" {
+		t.Errorf("volume removed = %q, want %q", md.volumesRemoved[0], "runscaler-shared")
+	}
+}
+
+func TestShutdown_SkipsVolumeRemoveWhenNotConfigured(t *testing.T) {
+	s, md, _ := newTestScaler(0, 10)
+	ctx := context.Background()
+
+	s.shutdown(ctx)
+
+	if len(md.volumesRemoved) != 0 {
+		t.Errorf("should not remove volumes when shared-volume not configured, removed %d", len(md.volumesRemoved))
+	}
+}

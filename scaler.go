@@ -166,9 +166,7 @@ func (s *Scaler) startRunner(ctx context.Context) (string, error) {
 			Image: s.runnerImage,
 			User:  "runner",
 			Cmd:   cmd,
-			Env: []string{
-				fmt.Sprintf("ACTIONS_RUNNER_INPUT_JITCONFIG=%s", jit.EncodedJITConfig),
-			},
+			Env: s.buildContainerEnv(jit.EncodedJITConfig),
 		},
 		&container.HostConfig{
 			Binds:       binds,
@@ -192,6 +190,17 @@ func (s *Scaler) startRunner(ctx context.Context) (string, error) {
 	s.logger.Info("Runner started", slog.String("name", name), slog.String("containerID", c.ID))
 	s.runners.addIdle(name, c.ID)
 	return name, nil
+}
+
+// buildContainerEnv returns the environment variables for a runner container.
+func (s *Scaler) buildContainerEnv(jitConfig string) []string {
+	env := []string{
+		fmt.Sprintf("ACTIONS_RUNNER_INPUT_JITCONFIG=%s", jitConfig),
+	}
+	if s.sharedVolume != "" {
+		env = append(env, fmt.Sprintf("SHARED_DIR=%s", s.sharedVolume))
+	}
+	return env
 }
 
 // shutdown force-removes all managed runner containers.

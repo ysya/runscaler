@@ -407,6 +407,18 @@ func TestStartRunner_WithSharedVolume(t *testing.T) {
 	if !strings.Contains(cmd, "/home/runner/run.sh") {
 		t.Errorf("cmd should contain run.sh, got: %v", call.config.Cmd)
 	}
+
+	// Verify SHARED_DIR environment variable is set
+	foundSharedDir := false
+	for _, env := range call.config.Env {
+		if env == "SHARED_DIR=/shared" {
+			foundSharedDir = true
+			break
+		}
+	}
+	if !foundSharedDir {
+		t.Errorf("env should contain SHARED_DIR=/shared, got: %v", call.config.Env)
+	}
 }
 
 func TestStartRunner_WithoutSharedVolume(t *testing.T) {
@@ -428,6 +440,76 @@ func TestStartRunner_WithoutSharedVolume(t *testing.T) {
 	// Direct run.sh command without chown wrapper
 	if len(call.config.Cmd) != 1 || call.config.Cmd[0] != "/home/runner/run.sh" {
 		t.Errorf("cmd = %v, want [/home/runner/run.sh]", call.config.Cmd)
+	}
+
+	// SHARED_DIR should not be set when shared volume is not configured
+	for _, env := range call.config.Env {
+		if strings.HasPrefix(env, "SHARED_DIR=") {
+			t.Errorf("env should not contain SHARED_DIR when shared volume is not configured, got: %v", call.config.Env)
+		}
+	}
+}
+
+func TestBuildContainerEnv(t *testing.T) {
+	tests := []struct {
+		name         string
+		sharedVolume string
+		wantShared   bool
+		wantPath     string
+	}{
+		{
+			name:         "with shared volume",
+			sharedVolume: "/shared",
+			wantShared:   true,
+			wantPath:     "/shared",
+		},
+		{
+			name:         "with custom shared volume path",
+			sharedVolume: "/data/shared",
+			wantShared:   true,
+			wantPath:     "/data/shared",
+		},
+		{
+			name:         "without shared volume",
+			sharedVolume: "",
+			wantShared:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s, _, _ := newTestScaler(0, 10)
+			s.sharedVolume = tt.sharedVolume
+
+			env := s.buildContainerEnv("test-jit-config")
+
+			// Always contains JIT config
+			foundJIT := false
+			for _, e := range env {
+				if e == "ACTIONS_RUNNER_INPUT_JITCONFIG=test-jit-config" {
+					foundJIT = true
+				}
+			}
+			if !foundJIT {
+				t.Errorf("env should contain ACTIONS_RUNNER_INPUT_JITCONFIG, got: %v", env)
+			}
+
+			// Check SHARED_DIR presence
+			foundShared := ""
+			for _, e := range env {
+				if strings.HasPrefix(e, "SHARED_DIR=") {
+					foundShared = e
+				}
+			}
+			if tt.wantShared {
+				want := fmt.Sprintf("SHARED_DIR=%s", tt.wantPath)
+				if foundShared != want {
+					t.Errorf("env SHARED_DIR = %q, want %q", foundShared, want)
+				}
+			} else if foundShared != "" {
+				t.Errorf("env should not contain SHARED_DIR, got: %v", env)
+			}
+		})
 	}
 }
 

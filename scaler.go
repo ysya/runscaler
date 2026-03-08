@@ -129,17 +129,23 @@ func (s *Scaler) startRunner(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("failed to generate JIT config: %w", err)
 	}
 
-	// Build volume binds and group membership
-	var binds []string
+	// Build mounts and group membership.
+	// Use Mounts (not Binds) for all volumes to avoid mixing legacy and new APIs,
+	// which can cause mounts to be silently ignored on some Docker versions.
+	var mounts []mount.Mount
 	var groupAdd []string
 	if s.dind {
-		binds = append(binds, fmt.Sprintf("%s:/var/run/docker.sock", s.dockerSocket))
+		mounts = append(mounts, mount.Mount{
+			Type:     mount.TypeBind,
+			Source:   s.dockerSocket,
+			Target:   "/var/run/docker.sock",
+			ReadOnly: false,
+		})
 		// Add the docker.sock owning group so the runner user can access it
 		if gid, err := socketGroupID(s.dockerSocket); err == nil {
 			groupAdd = append(groupAdd, strconv.Itoa(gid))
 		}
 	}
-	var mounts []mount.Mount
 	if s.sharedVolume != "" {
 		mounts = append(mounts, mount.Mount{
 			Type:   mount.TypeVolume,
@@ -169,7 +175,6 @@ func (s *Scaler) startRunner(ctx context.Context) (string, error) {
 			Env: s.buildContainerEnv(jit.EncodedJITConfig),
 		},
 		&container.HostConfig{
-			Binds:       binds,
 			Mounts:      mounts,
 			GroupAdd:    groupAdd,
 			SecurityOpt: []string{"label:disable"},
@@ -187,7 +192,12 @@ func (s *Scaler) startRunner(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("failed to start runner container: %w", err)
 	}
 
-	s.logger.Info("Runner started", slog.String("name", name), slog.String("containerID", c.ID))
+	s.logger.Info("Runner started",
+		slog.String("name", name),
+		slog.String("containerID", c.ID),
+		slog.Int("mounts", len(mounts)),
+		slog.String("sharedVolume", s.sharedVolume),
+	)
 	s.runners.addIdle(name, c.ID)
 	return name, nil
 }

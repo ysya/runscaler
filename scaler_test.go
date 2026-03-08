@@ -86,6 +86,7 @@ func newTestScaler(minRunners, maxRunners int) (*Scaler, *mockDocker, *mockScale
 		minRunners:     minRunners,
 		maxRunners:     maxRunners,
 		dockerSocket:   "/var/run/docker.sock",
+		dind:           true,
 		logger:         slog.New(slog.DiscardHandler),
 		runners: runnerState{
 			idle: make(map[string]string),
@@ -369,6 +370,16 @@ func TestShutdown(t *testing.T) {
 
 // --- Shared volume tests ---
 
+// findMountByTarget returns the mount with the given target, or nil if not found.
+func findMountByTarget(mounts []mount.Mount, target string) *mount.Mount {
+	for i := range mounts {
+		if mounts[i].Target == target {
+			return &mounts[i]
+		}
+	}
+	return nil
+}
+
 func TestStartRunner_WithSharedVolume(t *testing.T) {
 	s, md, _ := newTestScaler(0, 10)
 	s.sharedVolume = "/shared"
@@ -384,19 +395,25 @@ func TestStartRunner_WithSharedVolume(t *testing.T) {
 	}
 	call := md.createCalls[0]
 
-	// Verify named volume mount
-	if len(call.hostConfig.Mounts) != 1 {
-		t.Fatalf("expected 1 mount, got %d", len(call.hostConfig.Mounts))
+	// Verify docker socket bind mount (dind=true by default)
+	dockerMount := findMountByTarget(call.hostConfig.Mounts, "/var/run/docker.sock")
+	if dockerMount == nil {
+		t.Fatal("docker socket mount not found")
 	}
-	m := call.hostConfig.Mounts[0]
-	if m.Type != mount.TypeVolume {
-		t.Errorf("mount type = %v, want %v", m.Type, mount.TypeVolume)
+	if dockerMount.Type != mount.TypeBind {
+		t.Errorf("docker mount type = %v, want %v", dockerMount.Type, mount.TypeBind)
 	}
-	if m.Source != "runscaler-shared" {
-		t.Errorf("mount source = %q, want %q", m.Source, "runscaler-shared")
+
+	// Verify shared named volume mount
+	sharedMount := findMountByTarget(call.hostConfig.Mounts, "/shared")
+	if sharedMount == nil {
+		t.Fatal("shared volume mount not found")
 	}
-	if m.Target != "/shared" {
-		t.Errorf("mount target = %q, want %q", m.Target, "/shared")
+	if sharedMount.Type != mount.TypeVolume {
+		t.Errorf("mount type = %v, want %v", sharedMount.Type, mount.TypeVolume)
+	}
+	if sharedMount.Source != "runscaler-shared" {
+		t.Errorf("mount source = %q, want %q", sharedMount.Source, "runscaler-shared")
 	}
 
 	// Verify command wraps with chown
@@ -432,9 +449,16 @@ func TestStartRunner_WithoutSharedVolume(t *testing.T) {
 
 	call := md.createCalls[0]
 
-	// No mounts when shared volume is not configured
-	if len(call.hostConfig.Mounts) != 0 {
-		t.Errorf("expected 0 mounts, got %d", len(call.hostConfig.Mounts))
+	// Docker socket mount should still be present (dind=true by default)
+	dockerMount := findMountByTarget(call.hostConfig.Mounts, "/var/run/docker.sock")
+	if dockerMount == nil {
+		t.Fatal("docker socket mount not found")
+	}
+
+	// No shared volume mount
+	sharedMount := findMountByTarget(call.hostConfig.Mounts, "/shared")
+	if sharedMount != nil {
+		t.Errorf("shared volume mount should not be present when shared volume is not configured")
 	}
 
 	// Direct run.sh command without chown wrapper
@@ -446,6 +470,36 @@ func TestStartRunner_WithoutSharedVolume(t *testing.T) {
 	for _, env := range call.config.Env {
 		if strings.HasPrefix(env, "SHARED_DIR=") {
 			t.Errorf("env should not contain SHARED_DIR when shared volume is not configured, got: %v", call.config.Env)
+		}
+	}
+}
+
+func TestStartRunner_MultipleRunnersShareVolume(t *testing.T) {
+	s, md, _ := newTestScaler(0, 10)
+	s.sharedVolume = "/shared"
+	ctx := context.Background()
+
+	// Start 3 runners
+	_, err := s.HandleDesiredRunnerCount(ctx, 3)
+	if err != nil {
+		t.Fatalf("HandleDesiredRunnerCount() error: %v", err)
+	}
+
+	if len(md.createCalls) != 3 {
+		t.Fatalf("expected 3 create calls, got %d", len(md.createCalls))
+	}
+
+	// Verify all runners share the same named volume
+	for i, call := range md.createCalls {
+		m := findMountByTarget(call.hostConfig.Mounts, "/shared")
+		if m == nil {
+			t.Fatalf("runner %d: shared volume mount not found", i)
+		}
+		if m.Source != "runscaler-shared" {
+			t.Errorf("runner %d: mount source = %q, want %q", i, m.Source, "runscaler-shared")
+		}
+		if m.Type != mount.TypeVolume {
+			t.Errorf("runner %d: mount type = %v, want %v", i, m.Type, mount.TypeVolume)
 		}
 	}
 }

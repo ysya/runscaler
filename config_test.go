@@ -134,6 +134,9 @@ func TestResolveScaleSets_Legacy(t *testing.T) {
 		Token:           "ghp_test",
 		MaxRunners:      10,
 		RunnerImage:     "ghcr.io/actions/actions-runner:latest",
+		SharedVolume:    "/shared",
+		DockerSocket:    "/var/run/docker.sock",
+		DinD:            true,
 	}
 
 	sets := c.ResolveScaleSets()
@@ -146,13 +149,26 @@ func TestResolveScaleSets_Legacy(t *testing.T) {
 	if sets[0].MaxRunners != 10 {
 		t.Errorf("max-runners = %d, want 10", sets[0].MaxRunners)
 	}
+	if sets[0].SharedVolume != "/shared" {
+		t.Errorf("shared-volume = %q, want %q", sets[0].SharedVolume, "/shared")
+	}
+	if sets[0].DockerSocket != "/var/run/docker.sock" {
+		t.Errorf("docker-socket = %q, want %q", sets[0].DockerSocket, "/var/run/docker.sock")
+	}
+	if !sets[0].IsDinD() {
+		t.Error("IsDinD() = false, want true")
+	}
 }
 
 func TestResolveScaleSets_Multi(t *testing.T) {
+	dindFalse := false
 	c := Config{
-		RunnerImage: "default-image:latest",
-		RunnerGroup: "default",
-		MaxRunners:  5,
+		RunnerImage:  "default-image:latest",
+		RunnerGroup:  "default",
+		MaxRunners:   5,
+		SharedVolume: "/shared",
+		DockerSocket: "/var/run/docker.sock",
+		DinD:         true,
 		ScaleSets: []ScaleSetConfig{
 			{
 				RegistrationURL: "https://github.com/org-a",
@@ -165,6 +181,9 @@ func TestResolveScaleSets_Multi(t *testing.T) {
 				Token:           "token-b",
 				RunnerImage:     "custom-image:latest",
 				MaxRunners:      20,
+				SharedVolume:    "/data",
+				DockerSocket:    "/run/podman/podman.sock",
+				DinD:            &dindFalse,
 			},
 		},
 	}
@@ -174,7 +193,7 @@ func TestResolveScaleSets_Multi(t *testing.T) {
 		t.Fatalf("expected 2 scale sets, got %d", len(sets))
 	}
 
-	// First should inherit defaults
+	// First should inherit all defaults
 	if sets[0].RunnerImage != "default-image:latest" {
 		t.Errorf("sets[0].RunnerImage = %q, want default", sets[0].RunnerImage)
 	}
@@ -184,6 +203,15 @@ func TestResolveScaleSets_Multi(t *testing.T) {
 	if sets[0].RunnerGroup != "default" {
 		t.Errorf("sets[0].RunnerGroup = %q, want default (inherited)", sets[0].RunnerGroup)
 	}
+	if sets[0].SharedVolume != "/shared" {
+		t.Errorf("sets[0].SharedVolume = %q, want /shared (inherited)", sets[0].SharedVolume)
+	}
+	if sets[0].DockerSocket != "/var/run/docker.sock" {
+		t.Errorf("sets[0].DockerSocket = %q, want /var/run/docker.sock (inherited)", sets[0].DockerSocket)
+	}
+	if !sets[0].IsDinD() {
+		t.Error("sets[0].IsDinD() = false, want true (inherited)")
+	}
 
 	// Second should keep its own values
 	if sets[1].RunnerImage != "custom-image:latest" {
@@ -191,6 +219,15 @@ func TestResolveScaleSets_Multi(t *testing.T) {
 	}
 	if sets[1].MaxRunners != 20 {
 		t.Errorf("sets[1].MaxRunners = %d, want 20", sets[1].MaxRunners)
+	}
+	if sets[1].SharedVolume != "/data" {
+		t.Errorf("sets[1].SharedVolume = %q, want /data (per-scaleset override)", sets[1].SharedVolume)
+	}
+	if sets[1].DockerSocket != "/run/podman/podman.sock" {
+		t.Errorf("sets[1].DockerSocket = %q, want podman socket (per-scaleset override)", sets[1].DockerSocket)
+	}
+	if sets[1].IsDinD() {
+		t.Error("sets[1].IsDinD() = true, want false (per-scaleset override)")
 	}
 }
 

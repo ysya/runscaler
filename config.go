@@ -37,6 +37,7 @@ type Config struct {
 }
 
 // ScaleSetConfig holds per-scale-set configuration.
+// Fields left at their zero value inherit from the global Config.
 type ScaleSetConfig struct {
 	RegistrationURL string   `mapstructure:"url"`
 	ScaleSetName    string   `mapstructure:"name"`
@@ -46,6 +47,9 @@ type ScaleSetConfig struct {
 	Labels          []string `mapstructure:"labels"`
 	RunnerGroup     string   `mapstructure:"runner-group"`
 	RunnerImage     string   `mapstructure:"runner-image"`
+	SharedVolume    string   `mapstructure:"shared-volume"`
+	DockerSocket    string   `mapstructure:"docker-socket"`
+	DinD            *bool    `mapstructure:"dind"` // pointer to distinguish "not set" from "false"
 }
 
 // ResolveScaleSets returns the list of scale set configs to run.
@@ -65,6 +69,15 @@ func (c *Config) ResolveScaleSets() []ScaleSetConfig {
 			if ss.MaxRunners == 0 {
 				ss.MaxRunners = c.MaxRunners
 			}
+			if ss.SharedVolume == "" {
+				ss.SharedVolume = c.SharedVolume
+			}
+			if ss.DockerSocket == "" {
+				ss.DockerSocket = c.DockerSocket
+			}
+			if ss.DinD == nil {
+				ss.DinD = &c.DinD
+			}
 			ss.resolveEnvToken()
 		}
 		return c.ScaleSets
@@ -80,9 +93,20 @@ func (c *Config) ResolveScaleSets() []ScaleSetConfig {
 		Labels:          c.Labels,
 		RunnerGroup:     c.RunnerGroup,
 		RunnerImage:     c.RunnerImage,
+		SharedVolume:    c.SharedVolume,
+		DockerSocket:    c.DockerSocket,
+		DinD:            &c.DinD,
 	}
 	ss.resolveEnvToken()
 	return []ScaleSetConfig{ss}
+}
+
+// IsDinD returns whether Docker-in-Docker is enabled for this scale set.
+func (ss *ScaleSetConfig) IsDinD() bool {
+	if ss.DinD != nil {
+		return *ss.DinD
+	}
+	return true // default
 }
 
 // resolveEnvToken resolves the token value from environment variables.

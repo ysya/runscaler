@@ -211,7 +211,7 @@ func run(ctx context.Context, c Config, dryRun bool, healthPort int) error {
 		go func(ss ScaleSetConfig) {
 			defer wg.Done()
 			ssLogger := logger.WithGroup("[" + ss.ScaleSetName + "]")
-			if err := runScaleSet(ctx, c, ss, dockerClient, ssLogger, healthServer); err != nil {
+			if err := runScaleSet(ctx, ss, dockerClient, ssLogger, healthServer); err != nil {
 				errs <- fmt.Errorf("scaleset %q: %w", ss.ScaleSetName, err)
 			}
 		}(scaleSets[i])
@@ -232,7 +232,7 @@ func run(ctx context.Context, c Config, dryRun bool, healthPort int) error {
 }
 
 // runScaleSet manages the lifecycle of a single scale set.
-func runScaleSet(ctx context.Context, global Config, ss ScaleSetConfig, dockerClient *dockerclient.Client, logger *slog.Logger, health *HealthServer) error {
+func runScaleSet(ctx context.Context, ss ScaleSetConfig, dockerClient *dockerclient.Client, logger *slog.Logger, health *HealthServer) error {
 	// Create scaleset client
 	scalesetClient, err := ss.ScalesetClient(logger)
 	if err != nil {
@@ -326,15 +326,22 @@ func runScaleSet(ctx context.Context, global Config, ss ScaleSetConfig, dockerCl
 		scalesetClient: scalesetClient,
 		minRunners:     ss.MinRunners,
 		maxRunners:     ss.MaxRunners,
-		dockerSocket:   global.DockerSocket,
-		dind:           global.DinD,
-		sharedVolume:   global.SharedVolume,
+		dockerSocket:   ss.DockerSocket,
+		dind:           ss.IsDinD(),
+		sharedVolume:   ss.SharedVolume,
 		runners: runnerState{
 			idle: make(map[string]string),
 			busy: make(map[string]string),
 		},
 	}
 	defer scaler.shutdown(context.WithoutCancel(ctx))
+
+	if ss.SharedVolume != "" {
+		logger.Info("Shared volume enabled",
+			slog.String("path", ss.SharedVolume),
+			slog.Bool("dind", ss.IsDinD()),
+		)
+	}
 
 	// Register with health server
 	if health != nil {

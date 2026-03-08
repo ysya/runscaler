@@ -30,6 +30,7 @@ func init() {
 	flags.String("token", "", "Personal access token")
 	flags.Int("max-runners", 10, "Maximum concurrent runners")
 	flags.Bool("dind", true, "Enable Docker-in-Docker")
+	flags.String("shared-volume", "", "Shared volume path (e.g. /shared)")
 	flags.String("output", "config.toml", "Output file path")
 }
 
@@ -86,6 +87,16 @@ func runInit(cmd *cobra.Command, args []string) error {
 			return err
 		}
 	}
+	sharedVolume, _ := cmd.Flags().GetString("shared-volume")
+	if !cmd.Flags().Changed("shared-volume") {
+		enableShared, err := promptYN("Enable shared volume for cross-job data sharing?", false)
+		if err != nil {
+			return err
+		}
+		if enableShared {
+			sharedVolume = "/shared"
+		}
+	}
 
 	config := fmt.Sprintf(`# runscaler configuration
 # See: https://github.com/ysya/runscaler
@@ -113,8 +124,8 @@ dind = %v
 # Docker socket path
 docker-socket = "/var/run/docker.sock"
 
-# Shared volume for cross-runner caching (optional)
-# shared-volume = "/shared"
+# Shared volume for cross-job data sharing (optional)
+shared-volume = %q
 
 # Logging
 log-level = "info"
@@ -136,7 +147,7 @@ log-format = "text"
 # url = "https://github.com/org-b"
 # name = "runners-b"
 # token = "env:TOKEN_ORG_B"
-`, url, name, token, maxRunners, dind)
+`, url, name, token, maxRunners, dind, sharedVolume)
 
 	if err := os.WriteFile(output, []byte(config), 0600); err != nil {
 		return fmt.Errorf("failed to write %s: %w", output, err)

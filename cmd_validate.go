@@ -78,6 +78,13 @@ func runValidate(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Printf("  ✓ Docker is reachable at %s\n", c.DockerSocket)
 
+	// Show shared volume status
+	if c.SharedVolume != "" {
+		fmt.Printf("  ✓ Shared volume enabled at %s\n", c.SharedVolume)
+	} else {
+		fmt.Println("  - Shared volume: not configured (cross-job sharing will not work)")
+	}
+
 	// Test GitHub API connectivity for each scale set
 	for i, ss := range scaleSets {
 		logger := c.Logger()

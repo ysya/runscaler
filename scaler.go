@@ -170,9 +170,8 @@ func (s *Scaler) startRunner(ctx context.Context) (string, error) {
 		ctx,
 		&container.Config{
 			Image: s.runnerImage,
-			User:  "runner",
 			Cmd:   cmd,
-			Env: s.buildContainerEnv(jit.EncodedJITConfig),
+			Env:   s.buildContainerEnv(jit.EncodedJITConfig),
 		},
 		&container.HostConfig{
 			Mounts:      mounts,

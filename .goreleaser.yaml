@@ -1,37 +1,11 @@
 version: 2
-project_name: runscaler
-
 builds:
-  - main: .
-    binary: runscaler
-    env:
-      - CGO_ENABLED=0
-    flags:
-      - -trimpath
+  - main: ./cmd/runscaler
     ldflags:
       - -s -w
-      - -X main.version={{.Version}}
-      - -X main.commit={{.Commit}}
-      - -X main.date={{.Date}}
     goos:
       - linux
       - darwin
     goarch:
       - amd64
       - arm64
-
-archives:
-  - formats:
-      - tar.gz
-    name_template: "{{ .ProjectName }}-{{ .Os }}-{{ .Arch }}"
-
-checksum:
-  name_template: checksums.txt
-
-changelog:
-  sort: asc
-  filters:
-    exclude:
-      - "^docs:"
-      - "^test:"
-      - "^ci:"

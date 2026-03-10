@@ -15,11 +15,11 @@ PLATFORMS := \
 
 ## dev: Run locally with debug logging (requires config.toml)
 dev:
-	go run . --log-level debug
+	go run ./cmd/runscaler --log-level debug
 
 ## build: Build for current platform
 build:
-	go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BINARY_NAME) .
+	go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BINARY_NAME) ./cmd/runscaler
 
 ## test: Run tests
 test:
@@ -36,7 +36,7 @@ $(PLATFORMS):
 	@mkdir -p dist
 	GOOS=$(OS) GOARCH=$(ARCH) go build \
 		$(GOFLAGS) -ldflags "$(LDFLAGS)" \
-		-o dist/$(BINARY_NAME)-$(OS)-$(ARCH)$(EXT) .
+		-o dist/$(BINARY_NAME)-$(OS)-$(ARCH)$(EXT) ./cmd/runscaler
 
 ## clean: Remove build artifacts
 clean:

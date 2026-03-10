@@ -1,4 +1,4 @@
-package main
+package config
 
 import (
 	"testing"
@@ -231,8 +231,135 @@ func TestResolveScaleSets_Multi(t *testing.T) {
 	}
 }
 
+// --- Tart backend validation tests ---
+
+func TestScaleSetConfigValidate_TartBackend(t *testing.T) {
+	tests := []struct {
+		name    string
+		modify  func(*ScaleSetConfig)
+		wantErr string
+	}{
+		{
+			name: "valid tart config",
+			modify: func(c *ScaleSetConfig) {
+				c.Backend = "tart"
+				c.TartImage = "macos-base:latest"
+			},
+		},
+		{
+			name: "tart missing image",
+			modify: func(c *ScaleSetConfig) {
+				c.Backend = "tart"
+			},
+			wantErr: "tart-image is required",
+		},
+		{
+			name: "unsupported backend",
+			modify: func(c *ScaleSetConfig) {
+				c.Backend = "podman"
+			},
+			wantErr: "unsupported backend",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := validScaleSetConfig()
+			tt.modify(&c)
+			err := c.Validate()
+
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Errorf("Validate() unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Errorf("Validate() expected error containing %q, got nil", tt.wantErr)
+				return
+			}
+			if !contains(err.Error(), tt.wantErr) {
+				t.Errorf("Validate() error = %q, want containing %q", err.Error(), tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestTartDefaults(t *testing.T) {
+	c := Config{
+		RegistrationURL: "https://github.com/test-org",
+		ScaleSetName:    "macos-runners",
+		Token:           "ghp_test",
+		MaxRunners:      2,
+		Backend:         "tart",
+		TartImage:       "macos-base:latest",
+	}
+
+	sets := c.ResolveScaleSets()
+	if len(sets) != 1 {
+		t.Fatalf("expected 1 scale set, got %d", len(sets))
+	}
+
+	ss := sets[0]
+	if ss.TartSSHUser != "admin" {
+		t.Errorf("TartSSHUser = %q, want %q", ss.TartSSHUser, "admin")
+	}
+	if ss.TartSSHPass != "admin" {
+		t.Errorf("TartSSHPass = %q, want %q", ss.TartSSHPass, "admin")
+	}
+	if ss.TartRunnerDir != "/Users/admin/actions-runner" {
+		t.Errorf("TartRunnerDir = %q, want %q", ss.TartRunnerDir, "/Users/admin/actions-runner")
+	}
+	if !ss.IsTart() {
+		t.Error("IsTart() = false, want true")
+	}
+}
+
+func TestResolveScaleSets_MixedBackends(t *testing.T) {
+	c := Config{
+		MaxRunners: 5,
+		TartImage:  "global-macos:latest",
+		ScaleSets: []ScaleSetConfig{
+			{
+				RegistrationURL: "https://github.com/org",
+				ScaleSetName:    "linux-runners",
+				Token:           "token-a",
+			},
+			{
+				RegistrationURL: "https://github.com/org",
+				ScaleSetName:    "macos-runners",
+				Token:           "token-b",
+				Backend:         "tart",
+				TartImage:       "custom-macos:latest",
+			},
+		},
+	}
+
+	sets := c.ResolveScaleSets()
+	if len(sets) != 2 {
+		t.Fatalf("expected 2 scale sets, got %d", len(sets))
+	}
+
+	// First: Docker (default)
+	if sets[0].IsTart() {
+		t.Error("sets[0] should not be tart")
+	}
+
+	// Second: Tart with custom image
+	if !sets[1].IsTart() {
+		t.Error("sets[1] should be tart")
+	}
+	if sets[1].TartImage != "custom-macos:latest" {
+		t.Errorf("sets[1].TartImage = %q, want custom", sets[1].TartImage)
+	}
+	// Should have defaults applied
+	if sets[1].TartSSHUser != "admin" {
+		t.Errorf("sets[1].TartSSHUser = %q, want admin (default)", sets[1].TartSSHUser)
+	}
+}
+
 func TestSystemInfo(t *testing.T) {
-	info := systemInfo(42)
+	info := SystemInfo(42)
 	if info.ScaleSetID != 42 {
 		t.Errorf("ScaleSetID = %d, want 42", info.ScaleSetID)
 	}
@@ -240,30 +367,7 @@ func TestSystemInfo(t *testing.T) {
 		t.Errorf("System = %q, want %q", info.System, "dockerscaleset")
 	}
 	if info == (scaleset.SystemInfo{}) {
-		t.Error("systemInfo() returned zero value")
-	}
-}
-
-func TestFormatBytes(t *testing.T) {
-	tests := []struct {
-		input uint64
-		want  string
-	}{
-		{0, "0 B"},
-		{512, "512 B"},
-		{1024, "1.0 KiB"},
-		{1536, "1.5 KiB"},
-		{1048576, "1.0 MiB"},
-		{1073741824, "1.0 GiB"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.want, func(t *testing.T) {
-			got := formatBytes(tt.input)
-			if got != tt.want {
-				t.Errorf("formatBytes(%d) = %q, want %q", tt.input, got, tt.want)
-			}
-		})
+		t.Error("SystemInfo() returned zero value")
 	}
 }
 

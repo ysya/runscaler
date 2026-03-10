@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"sync"
 	"syscall"
@@ -20,6 +21,11 @@ import (
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+
+	"github.com/ysya/runscaler/internal/backend"
+	"github.com/ysya/runscaler/internal/config"
+	"github.com/ysya/runscaler/internal/health"
+	"github.com/ysya/runscaler/internal/scaler"
 )
 
 var (
@@ -28,7 +34,7 @@ var (
 	date    = ""
 )
 
-var cfg Config
+var cfg config.Config
 
 func init() {
 	flags := cmd.Flags()
@@ -129,7 +135,7 @@ or a single scale set via CLI flags.`,
 	},
 }
 
-func run(ctx context.Context, c Config, dryRun bool, healthPort int) error {
+func run(ctx context.Context, c config.Config, dryRun bool, healthPort int) error {
 	logger := c.Logger()
 
 	scaleSets := c.ResolveScaleSets()
@@ -139,54 +145,101 @@ func run(ctx context.Context, c Config, dryRun bool, healthPort int) error {
 		}
 	}
 
-	// Create shared Docker client and verify connectivity
-	dockerClient, err := dockerclient.NewClientWithOpts(
-		dockerclient.FromEnv,
-		dockerclient.WithAPIVersionNegotiation(),
-	)
-	if err != nil {
-		return fmt.Errorf("failed to create docker client: %w", err)
-	}
-
-	if _, err := dockerClient.Ping(ctx); err != nil {
-		return fmt.Errorf("cannot connect to Docker at %s: %w\n\n"+
-			"  Possible fixes:\n"+
-			"  1. Ensure Docker is running\n"+
-			"  2. Add your user to the docker group: sudo usermod -aG docker $USER\n"+
-			"  3. Re-login or run: newgrp docker\n"+
-			"  4. Or check the docker-socket path in your config",
-			c.DockerSocket, err)
-	}
-
-	// Pull unique runner images
-	pulled := make(map[string]bool)
+	// Check which backends are needed
+	needsDocker := false
+	needsTart := false
 	for _, ss := range scaleSets {
-		if pulled[ss.RunnerImage] {
-			continue
+		if ss.IsTart() {
+			needsTart = true
+		} else {
+			needsDocker = true
 		}
-		logger.Info("Pulling runner image", slog.String("image", ss.RunnerImage))
-		pull, err := dockerClient.ImagePull(ctx, ss.RunnerImage, image.PullOptions{})
+	}
+
+	// Create shared Docker client if any scaleset uses Docker backend
+	var dockerClient *dockerclient.Client
+	if needsDocker {
+		var err error
+		dockerClient, err = dockerclient.NewClientWithOpts(
+			dockerclient.FromEnv,
+			dockerclient.WithAPIVersionNegotiation(),
+		)
 		if err != nil {
-			return fmt.Errorf("failed to pull runner image %s: %w", ss.RunnerImage, err)
+			return fmt.Errorf("failed to create docker client: %w", err)
 		}
-		if _, err := io.ReadAll(pull); err != nil {
-			return fmt.Errorf("failed to read image pull response: %w", err)
+
+		if _, err := dockerClient.Ping(ctx); err != nil {
+			return fmt.Errorf("cannot connect to Docker at %s: %w\n\n"+
+				"  Possible fixes:\n"+
+				"  1. Ensure Docker is running\n"+
+				"  2. Add your user to the docker group: sudo usermod -aG docker $USER\n"+
+				"  3. Re-login or run: newgrp docker\n"+
+				"  4. Or check the docker-socket path in your config",
+				c.DockerSocket, err)
 		}
-		pull.Close()
-		pulled[ss.RunnerImage] = true
+
+		// Pull unique runner images for Docker scalesets
+		pulled := make(map[string]bool)
+		for _, ss := range scaleSets {
+			if ss.IsTart() || pulled[ss.RunnerImage] {
+				continue
+			}
+			logger.Info("Pulling runner image", slog.String("image", ss.RunnerImage))
+			pull, err := dockerClient.ImagePull(ctx, ss.RunnerImage, image.PullOptions{})
+			if err != nil {
+				return fmt.Errorf("failed to pull runner image %s: %w", ss.RunnerImage, err)
+			}
+			if _, err := io.ReadAll(pull); err != nil {
+				return fmt.Errorf("failed to read image pull response: %w", err)
+			}
+			pull.Close()
+			pulled[ss.RunnerImage] = true
+		}
+	}
+
+	// Verify Tart binary exists if any scaleset uses Tart backend
+	if needsTart {
+		if _, err := exec.LookPath("tart"); err != nil {
+			return fmt.Errorf("tart binary not found in PATH: %w\n\n"+
+				"  Install Tart: brew install cirruslabs/cli/tart", err)
+		}
+		logger.Info("Tart backend enabled")
+
+		// Ensure Tart images are available locally (auto-pull if missing)
+		pulled := make(map[string]bool)
+		for _, ss := range scaleSets {
+			if !ss.IsTart() || pulled[ss.TartImage] {
+				continue
+			}
+			tb := backend.NewTartBackend(ss, logger)
+			if err := tb.EnsureImage(ctx); err != nil {
+				return err
+			}
+			pulled[ss.TartImage] = true
+		}
+
+		// Warn about the 2-VM macOS limit
+		for _, ss := range scaleSets {
+			if ss.IsTart() && ss.MaxRunners > 2 {
+				logger.Warn("macOS VMs are limited to 2 concurrent per host by Apple",
+					slog.String("scaleset", ss.ScaleSetName),
+					slog.Int("maxRunners", ss.MaxRunners),
+				)
+			}
+		}
 	}
 
 	if dryRun {
-		logger.Info("Dry run complete — configuration, Docker, and images are all valid",
+		logger.Info("Dry run complete — configuration and connectivity are valid",
 			slog.Int("scaleSetCount", len(scaleSets)),
 		)
 		return nil
 	}
 
 	// Start health check server
-	var healthServer *HealthServer
+	var healthServer *health.HealthServer
 	if healthPort > 0 {
-		healthServer = NewHealthServer(healthPort)
+		healthServer = health.NewHealthServer(healthPort, version)
 		ln, err := net.Listen("tcp", fmt.Sprintf(":%d", healthPort))
 		if err != nil {
 			return fmt.Errorf("failed to start health server on port %d: %w", healthPort, err)
@@ -208,7 +261,7 @@ func run(ctx context.Context, c Config, dryRun bool, healthPort int) error {
 
 	for i := range scaleSets {
 		wg.Add(1)
-		go func(ss ScaleSetConfig) {
+		go func(ss config.ScaleSetConfig) {
 			defer wg.Done()
 			ssLogger := logger.WithGroup("[" + ss.ScaleSetName + "]")
 			if err := runScaleSet(ctx, ss, dockerClient, ssLogger, healthServer); err != nil {
@@ -232,7 +285,7 @@ func run(ctx context.Context, c Config, dryRun bool, healthPort int) error {
 }
 
 // runScaleSet manages the lifecycle of a single scale set.
-func runScaleSet(ctx context.Context, ss ScaleSetConfig, dockerClient *dockerclient.Client, logger *slog.Logger, health *HealthServer) error {
+func runScaleSet(ctx context.Context, ss config.ScaleSetConfig, dockerClient *dockerclient.Client, logger *slog.Logger, h *health.HealthServer) error {
 	// Create scaleset client
 	scalesetClient, err := ss.ScalesetClient(logger)
 	if err != nil {
@@ -284,7 +337,7 @@ func runScaleSet(ctx context.Context, ss ScaleSetConfig, dockerClient *dockercli
 	}
 
 	// Set user agent info
-	scalesetClient.SetSystemInfo(systemInfo(scaleSet.ID))
+	scalesetClient.SetSystemInfo(config.SystemInfo(scaleSet.ID))
 
 	// Delete scale set on exit
 	defer func() {
@@ -317,24 +370,18 @@ func runScaleSet(ctx context.Context, ss ScaleSetConfig, dockerClient *dockercli
 		return fmt.Errorf("failed to create listener: %w", err)
 	}
 
-	// Create scaler
-	scaler := &Scaler{
-		logger:         logger,
-		runnerImage:    ss.RunnerImage,
-		scaleSetID:     scaleSet.ID,
-		dockerClient:   dockerClient,
-		scalesetClient: scalesetClient,
-		minRunners:     ss.MinRunners,
-		maxRunners:     ss.MaxRunners,
-		dockerSocket:   ss.DockerSocket,
-		dind:           ss.IsDinD(),
-		sharedVolume:   ss.SharedVolume,
-		runners: runnerState{
-			idle: make(map[string]string),
-			busy: make(map[string]string),
-		},
+	// Create backend based on config
+	var b backend.RunnerBackend
+	if ss.IsTart() {
+		tb := backend.NewTartBackend(ss, logger)
+		tb.StartPool(ctx) // starts warm pool if tart-pool-size > 0
+		b = tb
+	} else {
+		b = backend.NewDockerBackend(ss, dockerClient, logger)
 	}
-	defer scaler.shutdown(context.WithoutCancel(ctx))
+
+	s := scaler.NewScaler(scaleSet.ID, ss.MinRunners, ss.MaxRunners, b, scalesetClient, logger)
+	defer s.Shutdown(context.WithoutCancel(ctx))
 
 	if ss.SharedVolume != "" {
 		logger.Info("Shared volume enabled",
@@ -344,9 +391,9 @@ func runScaleSet(ctx context.Context, ss ScaleSetConfig, dockerClient *dockercli
 	}
 
 	// Register with health server
-	if health != nil {
-		health.RegisterScaler(ss.ScaleSetName, scaler)
-		defer health.UnregisterScaler(ss.ScaleSetName)
+	if h != nil {
+		h.RegisterScaler(ss.ScaleSetName, s)
+		defer h.UnregisterScaler(ss.ScaleSetName)
 	}
 
 	// Start listening
@@ -355,7 +402,7 @@ func runScaleSet(ctx context.Context, ss ScaleSetConfig, dockerClient *dockercli
 		slog.Int("minRunners", ss.MinRunners),
 	)
 
-	if err := l.Run(ctx, scaler); !errors.Is(err, context.Canceled) {
+	if err := l.Run(ctx, s); !errors.Is(err, context.Canceled) {
 		return fmt.Errorf("listener failed: %w", err)
 	}
 

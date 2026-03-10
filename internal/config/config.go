@@ -1,4 +1,4 @@
-package main
+package config
 
 import (
 	"fmt"
@@ -21,6 +21,17 @@ type Config struct {
 	SharedVolume string `mapstructure:"shared-volume"`
 	LogLevel     string `mapstructure:"log-level"`
 	LogFormat    string `mapstructure:"log-format"`
+
+	// Backend selection: "docker" (default) or "tart"
+	Backend string `mapstructure:"backend"`
+
+	// Tart backend settings (global defaults)
+	TartImage     string `mapstructure:"tart-image"`
+	TartSSHUser   string `mapstructure:"tart-ssh-user"`
+	TartSSHPass   string `mapstructure:"tart-ssh-pass"`
+	TartRunnerDir string `mapstructure:"tart-runner-dir"`
+	TartSoftnet   bool   `mapstructure:"tart-softnet"`
+	TartPoolSize  int    `mapstructure:"tart-pool-size"`
 
 	// Scale sets (multi-org support)
 	ScaleSets []ScaleSetConfig `mapstructure:"scaleset"`
@@ -50,6 +61,17 @@ type ScaleSetConfig struct {
 	SharedVolume    string   `mapstructure:"shared-volume"`
 	DockerSocket    string   `mapstructure:"docker-socket"`
 	DinD            *bool    `mapstructure:"dind"` // pointer to distinguish "not set" from "false"
+
+	// Backend selection: "docker" (default) or "tart"
+	Backend string `mapstructure:"backend"`
+
+	// Tart backend settings
+	TartImage     string `mapstructure:"tart-image"`      // Base VM image (e.g. "ghcr.io/cirruslabs/macos-sequoia-xcode:latest")
+	TartSSHUser   string `mapstructure:"tart-ssh-user"`   // SSH user in VM (default: "admin")
+	TartSSHPass   string `mapstructure:"tart-ssh-pass"`   // SSH password in VM (default: "admin")
+	TartRunnerDir string `mapstructure:"tart-runner-dir"` // Runner binary path in VM (default: "/Users/admin/actions-runner")
+	TartSoftnet   bool   `mapstructure:"tart-softnet"`    // Use --net-softnet for network isolation & DHCP lease management
+	TartPoolSize  int    `mapstructure:"tart-pool-size"`  // Number of pre-warmed VMs to keep ready (0 = disabled)
 }
 
 // ResolveScaleSets returns the list of scale set configs to run.
@@ -78,7 +100,29 @@ func (c *Config) ResolveScaleSets() []ScaleSetConfig {
 			if ss.DinD == nil {
 				ss.DinD = &c.DinD
 			}
-			ss.resolveEnvToken()
+			if ss.Backend == "" {
+				ss.Backend = c.Backend
+			}
+			if ss.TartImage == "" {
+				ss.TartImage = c.TartImage
+			}
+			if ss.TartSSHUser == "" {
+				ss.TartSSHUser = c.TartSSHUser
+			}
+			if ss.TartSSHPass == "" {
+				ss.TartSSHPass = c.TartSSHPass
+			}
+			if ss.TartRunnerDir == "" {
+				ss.TartRunnerDir = c.TartRunnerDir
+			}
+			if !ss.TartSoftnet {
+				ss.TartSoftnet = c.TartSoftnet
+			}
+			if ss.TartPoolSize == 0 {
+				ss.TartPoolSize = c.TartPoolSize
+			}
+			ss.ApplyTartDefaults()
+			ss.ResolveEnvToken()
 		}
 		return c.ScaleSets
 	}
@@ -96,8 +140,16 @@ func (c *Config) ResolveScaleSets() []ScaleSetConfig {
 		SharedVolume:    c.SharedVolume,
 		DockerSocket:    c.DockerSocket,
 		DinD:            &c.DinD,
+		Backend:         c.Backend,
+		TartImage:       c.TartImage,
+		TartSSHUser:     c.TartSSHUser,
+		TartSSHPass:     c.TartSSHPass,
+		TartRunnerDir:   c.TartRunnerDir,
+		TartSoftnet:     c.TartSoftnet,
+		TartPoolSize:    c.TartPoolSize,
 	}
-	ss.resolveEnvToken()
+	ss.ApplyTartDefaults()
+	ss.ResolveEnvToken()
 	return []ScaleSetConfig{ss}
 }
 
@@ -109,11 +161,32 @@ func (ss *ScaleSetConfig) IsDinD() bool {
 	return true // default
 }
 
-// resolveEnvToken resolves the token value from environment variables.
+// ApplyTartDefaults fills in default values for Tart backend settings.
+func (ss *ScaleSetConfig) ApplyTartDefaults() {
+	if ss.Backend != "tart" {
+		return
+	}
+	if ss.TartSSHUser == "" {
+		ss.TartSSHUser = "admin"
+	}
+	if ss.TartSSHPass == "" {
+		ss.TartSSHPass = "admin"
+	}
+	if ss.TartRunnerDir == "" {
+		ss.TartRunnerDir = "/Users/admin/actions-runner"
+	}
+}
+
+// IsTart returns whether this scale set uses the Tart VM backend.
+func (ss *ScaleSetConfig) IsTart() bool {
+	return ss.Backend == "tart"
+}
+
+// ResolveEnvToken resolves the token value from environment variables.
 // Supports two patterns:
 //   - token = "env:VARIABLE_NAME" — reads from the named env var
 //   - Empty token with RUNSCALER_TOKEN env var set — uses that as fallback
-func (ss *ScaleSetConfig) resolveEnvToken() {
+func (ss *ScaleSetConfig) ResolveEnvToken() {
 	if strings.HasPrefix(ss.Token, "env:") {
 		envName := strings.TrimPrefix(ss.Token, "env:")
 		ss.Token = os.Getenv(envName)
@@ -149,6 +222,18 @@ func (ss *ScaleSetConfig) Validate() error {
 	if ss.MinRunners > ss.MaxRunners {
 		return fmt.Errorf("min-runners (%d) must be <= max-runners (%d)", ss.MinRunners, ss.MaxRunners)
 	}
+
+	switch ss.Backend {
+	case "", "docker":
+		// Docker backend: no additional validation
+	case "tart":
+		if ss.TartImage == "" {
+			return fmt.Errorf("tart-image is required when backend is \"tart\"")
+		}
+	default:
+		return fmt.Errorf("unsupported backend %q (must be \"docker\" or \"tart\")", ss.Backend)
+	}
+
 	return nil
 }
 
@@ -225,8 +310,8 @@ func (ss *ScaleSetConfig) BuildLabels() []scaleset.Label {
 	return result
 }
 
-// systemInfo returns metadata for the scaleset client user agent.
-func systemInfo(scaleSetID int) scaleset.SystemInfo {
+// SystemInfo returns metadata for the scaleset client user agent.
+func SystemInfo(scaleSetID int) scaleset.SystemInfo {
 	return scaleset.SystemInfo{
 		System:     "dockerscaleset",
 		Version:    "0.1.0",

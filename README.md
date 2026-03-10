@@ -5,9 +5,9 @@
 [![License](https://img.shields.io/github/license/ysya/runscaler)](LICENSE)
 [![Go Report Card](https://goreportcard.com/badge/github.com/ysya/runscaler)](https://goreportcard.com/report/github.com/ysya/runscaler)
 
-Auto-scale GitHub Actions self-hosted runners as Docker containers. Powered by [actions/scaleset](https://github.com/actions/scaleset).
+Auto-scale GitHub Actions self-hosted runners as Docker containers or macOS VMs. Powered by [actions/scaleset](https://github.com/actions/scaleset).
 
-Runners are **ephemeral** — each container handles exactly one job and is removed upon completion. No Kubernetes required.
+Runners are **ephemeral** — each container/VM handles exactly one job and is removed upon completion. No Kubernetes required.
 
 ## How It Works
 
@@ -15,35 +15,49 @@ Runners are **ephemeral** — each container handles exactly one job and is remo
 flowchart LR
     A["GitHub Actions<br/>(job queue)"] -- long poll --> B["runscaler<br/>(this tool)"]
     B -- Docker API --> C["Runner Containers<br/>(ephemeral)"]
+    B -- Tart CLI --> D["macOS VMs<br/>(ephemeral)"]
 ```
 
 1. Registers a [runner scale set](https://docs.github.com/en/actions/hosting-your-own-runners/managing-self-hosted-runners-with-actions-runner-controller/about-actions-runner-controller) with GitHub
 2. Long-polls for job assignments via the scaleset API
-3. Spins up Docker containers with JIT (just-in-time) runner configs
-4. Removes containers automatically when jobs complete
-5. Cleans up all containers and the scale set on shutdown
+3. Spins up Docker containers or macOS VMs with JIT (just-in-time) runner configs
+4. Removes containers/VMs automatically when jobs complete
+5. Cleans up all resources and the scale set on shutdown
 
 ## Features
 
-- **Zero Kubernetes** — runs directly on any Docker host
-- **Ephemeral runners** — each job gets a fresh container, no state leakage
+- **Zero Kubernetes** — runs directly on any Docker host or Apple Silicon Mac
+- **Ephemeral runners** — each job gets a fresh container/VM, no state leakage
 - **Auto-scaling** — scales from 0 to N based on job demand via long-poll (no cron, no polling delay)
 - **Docker-in-Docker** — optional DinD support for workflows that build containers
+- **macOS VMs via Tart** — native Apple Virtualization.framework with APFS Copy-on-Write cloning
+- **VM warm pool** — pre-boot macOS VMs for instant job pickup (~2s vs ~30s cold boot)
 - **Shared volumes** — cross-runner caching via named Docker volumes
-- **Multi-org support** — manage multiple scale sets from a single process
-- **Single binary** — no runtime dependencies beyond Docker
+- **Multi-org support** — manage multiple scale sets from a single process, mix Docker and Tart backends
+- **Single binary** — no runtime dependencies beyond Docker (or Tart for macOS)
 - **Config file or flags** — TOML config with CLI flag overrides
 
 ## Quick Start
 
 ### Prerequisites
 
-- Docker running on the host
+- **Docker backend:** Docker running on the host
+- **Tart backend (macOS):** Apple Silicon Mac with [Tart](https://tart.run/) installed:
+
+  ```bash
+  brew install cirruslabs/cli/tart
+
+  # Pull a macOS runner image (pre-installed with Xcode and runner dependencies)
+  tart pull ghcr.io/cirruslabs/macos-tahoe-xcode:latest
+  ```
+
+  > **Note:** Apple's Virtualization.framework limits each host to **2 concurrent macOS VMs**. Set `max-runners` accordingly.
+
 - A GitHub **Personal Access Token** — required scopes depend on token type and runner level:
 
-  | Token type | Organization runners | Repository runners |
-  |---|---|---|
-  | **Classic PAT** | `admin:org` | `repo` |
+  | Token type           | Organization runners                                               | Repository runners                 |
+  | -------------------- | ------------------------------------------------------------------ | ---------------------------------- |
+  | **Classic PAT**      | `admin:org`                                                        | `repo`                             |
   | **Fine-grained PAT** | Self-hosted runners: **Read and write** + Administration: **Read** | Administration: **Read and write** |
 
   > **Note:** The token owner must be an **org owner** (for org runners) or have **admin access** to the repo (for repo runners). Fine-grained PATs targeting an organization may also require [admin approval](https://docs.github.com/en/organizations/managing-programmatic-access-to-your-organization/setting-a-personal-access-token-policy-for-your-organization) depending on org policy.
@@ -108,12 +122,12 @@ jobs:
 
 ## Commands
 
-| Command | Description |
-|---------|-------------|
-| `runscaler` | Start the auto-scaler (default) |
-| `runscaler init` | Generate a config file interactively |
-| `runscaler validate` | Validate configuration and connectivity |
-| `runscaler status` | Show current runner status via health endpoint |
+| Command              | Description                                    |
+| -------------------- | ---------------------------------------------- |
+| `runscaler`          | Start the auto-scaler (default)                |
+| `runscaler init`     | Generate a config file interactively           |
+| `runscaler validate` | Validate configuration and connectivity        |
+| `runscaler status`   | Show current runner status via health endpoint |
 
 ## Configuration
 
@@ -121,7 +135,7 @@ Configuration can be provided via a TOML config file (`--config`) or CLI flags. 
 
 ### Config File (TOML)
 
-**Single scale set:**
+**Docker backend (default):**
 
 ```toml
 # config.toml
@@ -138,6 +152,25 @@ dind = true
 shared-volume = "/shared"
 log-level = "info"
 log-format = "text"
+```
+
+**Tart backend (macOS):**
+
+```toml
+# config.toml
+backend = "tart"
+url = "https://github.com/your-org"
+name = "macos-runners"
+token = "ghp_xxx"
+max-runners = 2          # Apple limits 2 concurrent macOS VMs per host
+labels = ["self-hosted", "macOS"]
+tart-image = "ghcr.io/cirruslabs/macos-tahoe-xcode:latest"
+tart-ssh-user = "admin"  # default
+tart-ssh-pass = "admin"  # default
+tart-runner-dir = "/Users/admin/actions-runner"  # default
+tart-pool-size = 2       # pre-warm 2 VMs for instant job pickup (~2s vs ~30s cold boot)
+# tart-softnet = true    # requires: sudo chmod u+s $(which softnet)
+log-level = "info"
 ```
 
 ### Token Security
@@ -159,55 +192,63 @@ token = "env:GITHUB_TOKEN"  # reads from $GITHUB_TOKEN at startup
 
 Priority: `--token` flag > `RUNSCALER_TOKEN` env var > config file value (including `env:` resolution).
 
-**Multiple scale sets (multi-org):**
+**Multiple scale sets (mixed Docker + Tart):**
 
 ```toml
 # Global settings
-docker-socket = "/var/run/docker.sock"
-dind = true
-shared-volume = "/shared"
 runner-image = "ghcr.io/actions/actions-runner:latest"
 runner-group = "default"
 max-runners = 10
 log-level = "info"
 
 # Each [[scaleset]] runs independently.
-# runner-image, runner-group, and max-runners inherit from global if omitted.
+# Inherits global settings if omitted.
 
 [[scaleset]]
-url = "https://github.com/org-a"
-name = "runners-a"
+url = "https://github.com/your-org"
+name = "linux-runners"
 token = "ghp_aaa"
-max-runners = 5
+docker-socket = "/var/run/docker.sock"
+dind = true
 
 [[scaleset]]
-url = "https://github.com/org-b"
-name = "runners-b"
+backend = "tart"
+url = "https://github.com/your-org"
+name = "macos-runners"
 token = "ghp_bbb"
-runner-image = "custom-runner:latest"
-labels = ["linux", "gpu"]
+tart-image = "ghcr.io/cirruslabs/macos-tahoe-xcode:latest"
+max-runners = 2
+labels = ["self-hosted", "macOS"]
+tart-pool-size = 2
 ```
 
 ### CLI Flags
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--config` | | Path to TOML config file |
-| `--url` | (required) | Registration URL (org or repo) |
-| `--name` | (required) | Scale set name (used as `runs-on` label) |
-| `--token` | (required) | GitHub Personal Access Token |
-| `--max-runners` | `10` | Maximum concurrent runners |
-| `--min-runners` | `0` | Minimum runners to keep warm |
-| `--labels` | `<name>` | Runner labels (comma-separated) |
-| `--runner-group` | `default` | Runner group name |
-| `--runner-image` | `ghcr.io/actions/actions-runner:latest` | Docker image |
-| `--docker-socket` | `/var/run/docker.sock` | Docker socket path |
-| `--dind` | `true` | Mount Docker socket into runners (Docker-in-Docker) |
-| `--shared-volume` | | Shared Docker volume path in runners (e.g. `/shared`) |
-| `--log-level` | `info` | Log level (debug/info/warn/error) |
-| `--log-format` | `text` | Log format (text/json) |
-| `--dry-run` | `false` | Validate everything without starting listeners |
-| `--health-port` | `8080` | Health check HTTP port (0 to disable) |
+| Flag                | Default                                 | Description                                       |
+| ------------------- | --------------------------------------- | ------------------------------------------------- |
+| `--config`          |                                         | Path to TOML config file                          |
+| `--url`             | (required)                              | Registration URL (org or repo)                    |
+| `--name`            | (required)                              | Scale set name (used as `runs-on` label)          |
+| `--token`           | (required)                              | GitHub Personal Access Token                      |
+| `--backend`         | `docker`                                | Runner backend (`docker` or `tart`)               |
+| `--max-runners`     | `10`                                    | Maximum concurrent runners                        |
+| `--min-runners`     | `0`                                     | Minimum runners to keep warm                      |
+| `--labels`          | `<name>`                                | Runner labels (comma-separated)                   |
+| `--runner-group`    | `default`                               | Runner group name                                 |
+| `--runner-image`    | `ghcr.io/actions/actions-runner:latest` | Docker image (Docker backend)                     |
+| `--docker-socket`   | `/var/run/docker.sock`                  | Docker socket path (Docker backend)               |
+| `--dind`            | `true`                                  | Mount Docker socket into runners (Docker backend) |
+| `--shared-volume`   |                                         | Shared Docker volume path (Docker backend)        |
+| `--tart-image`      |                                         | Tart VM image name (Tart backend, required)       |
+| `--tart-ssh-user`   | `admin`                                 | SSH user for Tart VMs                             |
+| `--tart-ssh-pass`   | `admin`                                 | SSH password for Tart VMs                         |
+| `--tart-runner-dir` | `/Users/admin/actions-runner`           | Runner install directory inside Tart VM           |
+| `--tart-softnet`    | `false`                                 | Use softnet for network isolation (Tart backend)  |
+| `--tart-pool-size`  | `0`                                     | Number of pre-warmed VMs for instant job pickup   |
+| `--log-level`       | `info`                                  | Log level (debug/info/warn/error)                 |
+| `--log-format`      | `text`                                  | Log format (text/json)                            |
+| `--dry-run`         | `false`                                 | Validate everything without starting listeners    |
+| `--health-port`     | `8080`                                  | Health check HTTP port (0 to disable)             |
 
 ## Deployment
 
@@ -245,15 +286,25 @@ Built on top of [actions/scaleset](https://github.com/actions/scaleset), the off
 
 Key components:
 
-- **`main.go`** — CLI entry point, initialization, and graceful shutdown
-- **`config.go`** — Configuration management with Viper (flags + TOML config file)
-- **`scaler.go`** — Implements `listener.Scaler` interface for Docker container lifecycle
+```
+cmd/runscaler/       CLI entry point, commands (init, validate, status)
+internal/
+  config/            Configuration management with Viper (flags + TOML)
+  backend/           RunnerBackend interface + Docker/Tart implementations
+  scaler/            Implements listener.Scaler for runner lifecycle
+  health/            Health check HTTP server
+```
+
+The `RunnerBackend` interface abstracts container/VM lifecycle:
+
+- **`DockerBackend`** — manages runner containers via Docker API
+- **`TartBackend`** — manages macOS VMs via Tart CLI (clone → run → SSH → stop → delete)
 
 The scaler implements three methods from the scaleset `Scaler` interface:
 
-- `HandleDesiredRunnerCount` — Scales up containers to match job demand
+- `HandleDesiredRunnerCount` — Scales up runners to match job demand
 - `HandleJobStarted` — Marks runners as busy
-- `HandleJobCompleted` — Removes finished containers
+- `HandleJobCompleted` — Removes finished runners
 
 ## License
 

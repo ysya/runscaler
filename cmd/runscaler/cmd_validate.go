@@ -3,17 +3,20 @@ package main
 import (
 	"context"
 	"fmt"
+	"os/exec"
 	"time"
 
 	dockerclient "github.com/docker/docker/client"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+
+	"github.com/ysya/runscaler/internal/config"
 )
 
 var validateCmd = &cobra.Command{
 	Use:   "validate",
 	Short: "Validate configuration and connectivity",
-	Long:  "Check that the config file is valid, Docker is reachable, and GitHub tokens work.",
+	Long:  "Check that the config file is valid, Docker/Tart is reachable, and GitHub tokens work.",
 	Example: `  runscaler validate --config config.toml
   runscaler validate --url https://github.com/org --name test --token ghp_xxx`,
 	RunE: runValidate,
@@ -33,7 +36,7 @@ func runValidate(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	var c Config
+	var c config.Config
 	if err := viper.Unmarshal(&c); err != nil {
 		return fmt.Errorf("failed to parse configuration: %w", err)
 	}
@@ -49,39 +52,73 @@ func runValidate(cmd *cobra.Command, args []string) error {
 			fmt.Printf("  ✗ scaleset[%d] %q: %s\n", i, scaleSets[i].ScaleSetName, err)
 			return fmt.Errorf("validation failed")
 		}
-		fmt.Printf("  ✓ scaleset[%d] %q — url=%s max=%d min=%d\n",
-			i, scaleSets[i].ScaleSetName, scaleSets[i].RegistrationURL,
+		b := scaleSets[i].Backend
+		if b == "" {
+			b = "docker"
+		}
+		fmt.Printf("  ✓ scaleset[%d] %q — backend=%s url=%s max=%d min=%d\n",
+			i, scaleSets[i].ScaleSetName, b, scaleSets[i].RegistrationURL,
 			scaleSets[i].MaxRunners, scaleSets[i].MinRunners,
 		)
 	}
 
-	// Test Docker connectivity
+	// Check which backends are needed
+	needsDocker := false
+	needsTart := false
+	for _, ss := range scaleSets {
+		if ss.IsTart() {
+			needsTart = true
+		} else {
+			needsDocker = true
+		}
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	dockerClient, err := dockerclient.NewClientWithOpts(
-		dockerclient.FromEnv,
-		dockerclient.WithAPIVersionNegotiation(),
-	)
-	if err != nil {
-		fmt.Printf("  ✗ Docker client: %s\n", err)
-		return fmt.Errorf("validation failed")
+	// Test Docker connectivity (only if needed)
+	if needsDocker {
+		dockerClient, err := dockerclient.NewClientWithOpts(
+			dockerclient.FromEnv,
+			dockerclient.WithAPIVersionNegotiation(),
+		)
+		if err != nil {
+			fmt.Printf("  ✗ Docker client: %s\n", err)
+			return fmt.Errorf("validation failed")
+		}
+
+		if _, err := dockerClient.Ping(ctx); err != nil {
+			fmt.Printf("  ✗ Docker connectivity: %s\n", err)
+			fmt.Println("\n  Possible fixes:")
+			fmt.Println("  1. Ensure Docker is running")
+			fmt.Println("  2. Add your user to the docker group: sudo usermod -aG docker $USER")
+			fmt.Println("  3. Re-login or run: newgrp docker")
+			return fmt.Errorf("validation failed")
+		}
+		fmt.Printf("  ✓ Docker is reachable at %s\n", c.DockerSocket)
 	}
 
-	if _, err := dockerClient.Ping(ctx); err != nil {
-		fmt.Printf("  ✗ Docker connectivity: %s\n", err)
-		fmt.Println("\n  Possible fixes:")
-		fmt.Println("  1. Ensure Docker is running")
-		fmt.Println("  2. Add your user to the docker group: sudo usermod -aG docker $USER")
-		fmt.Println("  3. Re-login or run: newgrp docker")
-		return fmt.Errorf("validation failed")
+	// Test Tart binary (only if needed)
+	if needsTart {
+		if _, err := exec.LookPath("tart"); err != nil {
+			fmt.Println("  ✗ Tart binary not found in PATH")
+			fmt.Println("\n  Install Tart: brew install cirruslabs/cli/tart")
+			return fmt.Errorf("validation failed")
+		}
+		fmt.Println("  ✓ Tart binary found")
+
+		for _, ss := range scaleSets {
+			if ss.IsTart() && ss.MaxRunners > 2 {
+				fmt.Printf("  ⚠ scaleset %q: max-runners=%d exceeds macOS 2-VM-per-host limit\n",
+					ss.ScaleSetName, ss.MaxRunners)
+			}
+		}
 	}
-	fmt.Printf("  ✓ Docker is reachable at %s\n", c.DockerSocket)
 
 	// Show shared volume status
 	if c.SharedVolume != "" {
 		fmt.Printf("  ✓ Shared volume enabled at %s\n", c.SharedVolume)
-	} else {
+	} else if needsDocker {
 		fmt.Println("  - Shared volume: not configured (cross-job sharing will not work)")
 	}
 
@@ -93,7 +130,6 @@ func runValidate(cmd *cobra.Command, args []string) error {
 			fmt.Printf("  ✗ scaleset[%d] %q GitHub API: %s\n", i, ss.ScaleSetName, err)
 			return fmt.Errorf("validation failed")
 		}
-		// Try to resolve runner group as a connectivity test
 		_, err = client.GetRunnerGroupByName(ctx, "default")
 		if err != nil {
 			fmt.Printf("  ✗ scaleset[%d] %q GitHub API: %s\n", i, ss.ScaleSetName, err)

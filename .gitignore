@@ -7,7 +7,7 @@ compose.yaml
 runner/
 
 # Build output
-runscaler
+/runscaler
 dist/
 
 # IDE

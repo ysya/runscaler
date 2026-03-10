@@ -1,4 +1,4 @@
-package main
+package health
 
 import (
 	"context"
@@ -9,12 +9,18 @@ import (
 	"time"
 )
 
+// RunnerCounter provides runner count information.
+type RunnerCounter interface {
+	RunnerCounts() (idle, busy int)
+}
+
 // HealthServer provides /healthz and /readyz endpoints for monitoring.
 type HealthServer struct {
 	server    *http.Server
 	startTime time.Time
+	version   string
 	mu        sync.RWMutex
-	scalers   map[string]*Scaler
+	scalers   map[string]RunnerCounter
 }
 
 // ScaleSetStatus represents the status of a single scale set.
@@ -33,10 +39,11 @@ type HealthResponse struct {
 }
 
 // NewHealthServer creates a new health check HTTP server.
-func NewHealthServer(port int) *HealthServer {
+func NewHealthServer(port int, version string) *HealthServer {
 	h := &HealthServer{
 		startTime: time.Now(),
-		scalers:   make(map[string]*Scaler),
+		version:   version,
+		scalers:   make(map[string]RunnerCounter),
 	}
 
 	mux := http.NewServeMux()
@@ -60,7 +67,7 @@ func (h *HealthServer) Shutdown(ctx context.Context) error {
 }
 
 // RegisterScaler adds a scaler to be reported in health checks.
-func (h *HealthServer) RegisterScaler(name string, s *Scaler) {
+func (h *HealthServer) RegisterScaler(name string, s RunnerCounter) {
 	h.mu.Lock()
 	h.scalers[name] = s
 	h.mu.Unlock()
@@ -79,7 +86,7 @@ func (h *HealthServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
 
 	resp := HealthResponse{
 		Status:    "ok",
-		Version:   version,
+		Version:   h.version,
 		Uptime:    time.Since(h.startTime).Truncate(time.Second).String(),
 		ScaleSets: make([]ScaleSetStatus, 0, len(h.scalers)),
 	}

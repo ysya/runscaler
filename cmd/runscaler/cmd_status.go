@@ -9,6 +9,8 @@ import (
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
+
+	"github.com/ysya/runscaler/internal/health"
 )
 
 var statusCmd = &cobra.Command{
@@ -51,21 +53,21 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	var health HealthResponse
-	if err := json.Unmarshal(body, &health); err != nil {
+	var h health.HealthResponse
+	if err := json.Unmarshal(body, &h); err != nil {
 		return fmt.Errorf("failed to parse response: %w", err)
 	}
 
-	fmt.Printf("runscaler %s (uptime: %s)\n\n", health.Version, health.Uptime)
+	fmt.Printf("runscaler %s (uptime: %s)\n\n", h.Version, h.Uptime)
 
-	if len(health.ScaleSets) == 0 {
+	if len(h.ScaleSets) == 0 {
 		fmt.Println("No scale sets registered yet.")
 		return nil
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(w, "SCALE SET\tIDLE\tBUSY\tTOTAL")
-	for _, ss := range health.ScaleSets {
+	for _, ss := range h.ScaleSets {
 		fmt.Fprintf(w, "%s\t%d\t%d\t%d\n", ss.Name, ss.Idle, ss.Busy, ss.Idle+ss.Busy)
 	}
 	w.Flush()

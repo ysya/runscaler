@@ -59,11 +59,13 @@ type warmVM struct {
 // TartBackend runs GitHub Actions runners as ephemeral Tart macOS VMs.
 //
 // Lifecycle per runner:
-//  1. tart clone <baseImage> <name>   — APFS CoW clone (< 1 sec)
-//  2. tart run <name> --no-graphics   — boot VM in background goroutine
-//  3. tart exec <name> true           — poll until Guest Agent is ready
-//  4. tart exec <name> ... run.sh     — start runner with JIT config
-//  5. tart stop + tart delete on removal
+//  1. tart clone <baseImage> <name>       — APFS CoW clone (< 1 sec)
+//  2. tart set <name> --cpu/--memory      — configure VM resources (if specified)
+//  3. Set deterministic MAC address       — prevent DHCP lease exhaustion
+//  4. tart run <name> --no-graphics       — boot VM in background goroutine
+//  5. tart exec <name> true               — poll until Guest Agent is ready
+//  6. tart exec <name> ... run.sh         — start runner with JIT config
+//  7. tart stop + tart delete on removal
 //
 // When poolSize > 0, VMs are pre-booted and kept ready in a pool.
 // StartRunner picks a warm VM from the pool (near-instant) instead of
@@ -71,6 +73,8 @@ type warmVM struct {
 type TartBackend struct {
 	baseImage  string
 	runnerDir  string
+	cpu        int // 0 = use image default
+	memory     int // MB, 0 = use image default
 	poolSize   int
 	maxRunners int
 	logger     *slog.Logger
@@ -94,6 +98,8 @@ func NewTartBackend(ss config.ScaleSetConfig, logger *slog.Logger) *TartBackend 
 	b := &TartBackend{
 		baseImage:  ss.TartImage,
 		runnerDir:  ss.TartRunnerDir,
+		cpu:        ss.TartCPU,
+		memory:     ss.TartMemory,
 		poolSize:   ss.TartPoolSize,
 		maxRunners: ss.MaxRunners,
 		logger:     logger,
@@ -207,14 +213,29 @@ func (b *TartBackend) bootVM(ctx context.Context, name string) (*warmVM, error) 
 		return nil, fmt.Errorf("failed to clone VM: %w", err)
 	}
 
-	// 2. Set deterministic MAC address to prevent DHCP lease exhaustion.
+	// 2. Configure VM resources (CPU/memory) if specified
+	if b.cpu > 0 || b.memory > 0 {
+		args := []string{"set", name}
+		if b.cpu > 0 {
+			args = append(args, "--cpu", fmt.Sprintf("%d", b.cpu))
+		}
+		if b.memory > 0 {
+			args = append(args, "--memory", fmt.Sprintf("%d", b.memory))
+		}
+		if _, err := b.cmd.Run(ctx, "tart", args...); err != nil {
+			releaseSlot()
+			return nil, fmt.Errorf("failed to configure VM resources: %w", err)
+		}
+	}
+
+	// 3. Set deterministic MAC address to prevent DHCP lease exhaustion.
 	//    Each slot always gets the same MAC → same DHCP lease → no IP waste.
 	if err := b.setVMMAC(name, slotIdx); err != nil {
 		b.logger.Warn("Failed to set fixed MAC (will use random)",
 			slog.String("name", name), slog.String("error", err.Error()))
 	}
 
-	// 3. Start VM in background (tart run blocks until VM shuts down)
+	// 4. Start VM in background (tart run blocks until VM shuts down)
 	vmCtx, vmCancel := context.WithCancel(ctx)
 	go func() {
 		defer vmCancel()
@@ -225,7 +246,7 @@ func (b *TartBackend) bootVM(ctx context.Context, name string) (*warmVM, error) 
 		}
 	}()
 
-	// 4. Wait for Guest Agent to be ready (tart exec <name> true)
+	// 5. Wait for Guest Agent to be ready (tart exec <name> true)
 	if err := b.waitForExec(ctx, name); err != nil {
 		vmCancel()
 		_, _ = b.cmd.Run(context.WithoutCancel(ctx), "tart", "stop", name)

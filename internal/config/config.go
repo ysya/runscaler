@@ -28,7 +28,8 @@ type Config struct {
 	// Tart backend settings (global defaults)
 	TartImage     string `mapstructure:"tart-image"`
 	TartRunnerDir string `mapstructure:"tart-runner-dir"`
-
+	TartCPU       int    `mapstructure:"tart-cpu"`
+	TartMemory    int    `mapstructure:"tart-memory"`
 	TartPoolSize  int    `mapstructure:"tart-pool-size"`
 
 	// Scale sets (multi-org support)
@@ -66,6 +67,8 @@ type ScaleSetConfig struct {
 	// Tart backend settings
 	TartImage     string `mapstructure:"tart-image"`      // Base VM image (e.g. "ghcr.io/cirruslabs/macos-sequoia-xcode:latest")
 	TartRunnerDir string `mapstructure:"tart-runner-dir"` // Runner binary path in VM (default: "/Users/admin/actions-runner")
+	TartCPU       int    `mapstructure:"tart-cpu"`        // Number of CPU cores for each VM (0 = use image default)
+	TartMemory    int    `mapstructure:"tart-memory"`     // Memory in MB for each VM (0 = use image default)
 	TartPoolSize  int    `mapstructure:"tart-pool-size"`  // Number of pre-warmed VMs to keep ready (0 = disabled)
 }
 
@@ -104,6 +107,12 @@ func (c *Config) ResolveScaleSets() []ScaleSetConfig {
 			if ss.TartRunnerDir == "" {
 				ss.TartRunnerDir = c.TartRunnerDir
 			}
+			if ss.TartCPU == 0 {
+				ss.TartCPU = c.TartCPU
+			}
+			if ss.TartMemory == 0 {
+				ss.TartMemory = c.TartMemory
+			}
 			if ss.TartPoolSize == 0 {
 				ss.TartPoolSize = c.TartPoolSize
 			}
@@ -129,6 +138,8 @@ func (c *Config) ResolveScaleSets() []ScaleSetConfig {
 		Backend:         c.Backend,
 		TartImage:       c.TartImage,
 		TartRunnerDir:   c.TartRunnerDir,
+		TartCPU:         c.TartCPU,
+		TartMemory:      c.TartMemory,
 		TartPoolSize:    c.TartPoolSize,
 	}
 	ss.ApplyTartDefaults()

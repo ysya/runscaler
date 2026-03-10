@@ -183,6 +183,8 @@ token = "ghp_xxx"
 max-runners = 2          # Apple limits 2 concurrent macOS VMs per host
 labels = ["self-hosted", "macOS"]
 tart-image = "ghcr.io/cirruslabs/macos-tahoe-xcode:latest"
+tart-cpu = 4             # CPU cores per VM (0 = use image default)
+tart-memory = 8192       # Memory in MB per VM (0 = use image default)
 tart-runner-dir = "/Users/admin/actions-runner"  # default
 tart-pool-size = 2       # pre-warm 2 VMs for instant job pickup (~2s vs ~30s cold boot)
 log-level = "info"
@@ -255,6 +257,8 @@ tart-pool-size = 2
 | `--dind`            | `true`                                  | Mount Docker socket into runners (Docker backend) |
 | `--shared-volume`   |                                         | Shared Docker volume path (Docker backend)        |
 | `--tart-image`      |                                         | Tart VM image name (Tart backend, required)       |
+| `--tart-cpu`        | `0` (image default)                     | CPU cores per VM (Tart backend)                   |
+| `--tart-memory`     | `0` (image default)                     | Memory in MB per VM (Tart backend)                |
 | `--tart-runner-dir` | `/Users/admin/actions-runner`           | Runner install directory inside Tart VM           |
 | `--tart-pool-size`  | `0`                                     | Number of pre-warmed VMs for instant job pickup   |
 | `--log-level`       | `info`                                  | Log level (debug/info/warn/error)                 |

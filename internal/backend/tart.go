@@ -226,6 +226,11 @@ func (b *TartBackend) bootVM(ctx context.Context, name string) (*warmVM, error) 
 			releaseSlot()
 			return nil, fmt.Errorf("failed to configure VM resources: %w", err)
 		}
+		b.logger.Debug("Configured VM resources",
+			slog.String("name", name),
+			slog.Int("cpu", b.cpu),
+			slog.Int("memory", b.memory),
+		)
 	}
 
 	// 3. Set deterministic MAC address to prevent DHCP lease exhaustion.

@@ -71,6 +71,15 @@ flowchart LR
 
   > **Note:** Apple's Virtualization.framework limits each host to **2 concurrent macOS VMs**. Set `max-runners` accordingly. Each VM slot is assigned a deterministic MAC address to prevent DHCP lease exhaustion — no sudo required.
 
+  The default VM resources from Cirrus Labs images:
+
+  | Image | CPU | Memory | Disk |
+  | ----- | --- | ------ | ---- |
+  | `ghcr.io/cirruslabs/macos-tahoe-xcode:latest` | 4 cores | 8 GB (8192 MB) | 120 GB |
+  | `ghcr.io/cirruslabs/macos-sequoia-xcode:latest` | 4 cores | 8 GB (8192 MB) | 120 GB |
+
+  Override per VM with `tart-cpu` and `tart-memory` in config. For iOS builds (Xcode), 8 GB+ is recommended.
+
 - A GitHub **Personal Access Token** — required scopes depend on token type and runner level:
 
   | Token type           | Organization runners                                               | Repository runners                 |

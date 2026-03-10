@@ -134,10 +134,6 @@ backend = "tart"
 # Base Tart VM image (must have GitHub Actions runner pre-installed)
 tart-image = %q
 
-# SSH credentials for the VM (Tart default: admin/admin)
-tart-ssh-user = "admin"
-tart-ssh-pass = "admin"
-
 # Path to the runner binary inside the VM
 tart-runner-dir = "/Users/admin/actions-runner"
 

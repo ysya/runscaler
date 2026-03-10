@@ -27,8 +27,6 @@ type Config struct {
 
 	// Tart backend settings (global defaults)
 	TartImage     string `mapstructure:"tart-image"`
-	TartSSHUser   string `mapstructure:"tart-ssh-user"`
-	TartSSHPass   string `mapstructure:"tart-ssh-pass"`
 	TartRunnerDir string `mapstructure:"tart-runner-dir"`
 
 	TartPoolSize  int    `mapstructure:"tart-pool-size"`
@@ -67,10 +65,7 @@ type ScaleSetConfig struct {
 
 	// Tart backend settings
 	TartImage     string `mapstructure:"tart-image"`      // Base VM image (e.g. "ghcr.io/cirruslabs/macos-sequoia-xcode:latest")
-	TartSSHUser   string `mapstructure:"tart-ssh-user"`   // SSH user in VM (default: "admin")
-	TartSSHPass   string `mapstructure:"tart-ssh-pass"`   // SSH password in VM (default: "admin")
 	TartRunnerDir string `mapstructure:"tart-runner-dir"` // Runner binary path in VM (default: "/Users/admin/actions-runner")
-
 	TartPoolSize  int    `mapstructure:"tart-pool-size"`  // Number of pre-warmed VMs to keep ready (0 = disabled)
 }
 
@@ -106,12 +101,6 @@ func (c *Config) ResolveScaleSets() []ScaleSetConfig {
 			if ss.TartImage == "" {
 				ss.TartImage = c.TartImage
 			}
-			if ss.TartSSHUser == "" {
-				ss.TartSSHUser = c.TartSSHUser
-			}
-			if ss.TartSSHPass == "" {
-				ss.TartSSHPass = c.TartSSHPass
-			}
 			if ss.TartRunnerDir == "" {
 				ss.TartRunnerDir = c.TartRunnerDir
 			}
@@ -139,8 +128,6 @@ func (c *Config) ResolveScaleSets() []ScaleSetConfig {
 		DinD:            &c.DinD,
 		Backend:         c.Backend,
 		TartImage:       c.TartImage,
-		TartSSHUser:     c.TartSSHUser,
-		TartSSHPass:     c.TartSSHPass,
 		TartRunnerDir:   c.TartRunnerDir,
 		TartPoolSize:    c.TartPoolSize,
 	}
@@ -161,12 +148,6 @@ func (ss *ScaleSetConfig) IsDinD() bool {
 func (ss *ScaleSetConfig) ApplyTartDefaults() {
 	if ss.Backend != "tart" {
 		return
-	}
-	if ss.TartSSHUser == "" {
-		ss.TartSSHUser = "admin"
-	}
-	if ss.TartSSHPass == "" {
-		ss.TartSSHPass = "admin"
 	}
 	if ss.TartRunnerDir == "" {
 		ss.TartRunnerDir = "/Users/admin/actions-runner"

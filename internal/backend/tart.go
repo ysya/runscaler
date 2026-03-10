@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,7 +14,6 @@ import (
 	"time"
 
 	"github.com/ysya/runscaler/internal/config"
-	"golang.org/x/crypto/ssh"
 )
 
 // CommandRunner abstracts shell command execution for testability.
@@ -54,7 +52,6 @@ func (execCommandRunner) RunStreaming(ctx context.Context, name string, args ...
 // warmVM represents a pre-booted VM ready to accept a runner.
 type warmVM struct {
 	name    string
-	ip      string
 	cancel  context.CancelFunc // cancels the `tart run` goroutine
 	slotIdx int                // index into vmSlots for deterministic MAC assignment
 }
@@ -64,23 +61,20 @@ type warmVM struct {
 // Lifecycle per runner:
 //  1. tart clone <baseImage> <name>   — APFS CoW clone (< 1 sec)
 //  2. tart run <name> --no-graphics   — boot VM in background goroutine
-//  3. tart ip <name>                  — poll until VM gets an IP
-//  4. ssh into VM and start runner with JIT config
+//  3. tart exec <name> true           — poll until Guest Agent is ready
+//  4. tart exec <name> ... run.sh     — start runner with JIT config
 //  5. tart stop + tart delete on removal
 //
 // When poolSize > 0, VMs are pre-booted and kept ready in a pool.
 // StartRunner picks a warm VM from the pool (near-instant) instead of
 // cold-starting one (~30s). The pool is refilled in the background.
 type TartBackend struct {
-	baseImage   string
-	sshUser     string
-	sshPassword string
+	baseImage  string
 	runnerDir  string
 	poolSize   int
-	maxRunners  int
-	logger      *slog.Logger
-	cmd         CommandRunner
-	ssh         sshDialer
+	maxRunners int
+	logger     *slog.Logger
+	cmd        CommandRunner
 
 	// VM pool
 	pool     chan *warmVM
@@ -98,16 +92,13 @@ type TartBackend struct {
 // NewTartBackend creates a TartBackend from scale set config.
 func NewTartBackend(ss config.ScaleSetConfig, logger *slog.Logger) *TartBackend {
 	b := &TartBackend{
-		baseImage:   ss.TartImage,
-		sshUser:     ss.TartSSHUser,
-		sshPassword: ss.TartSSHPass,
-		runnerDir:   ss.TartRunnerDir,
-		poolSize:    ss.TartPoolSize,
-		maxRunners:  ss.MaxRunners,
-		logger:      logger,
-		cmd:     execCommandRunner{},
-		ssh:     realSSHDialer{},
-		vmSlots: make(chan int, ss.MaxRunners),
+		baseImage:  ss.TartImage,
+		runnerDir:  ss.TartRunnerDir,
+		poolSize:   ss.TartPoolSize,
+		maxRunners: ss.MaxRunners,
+		logger:     logger,
+		cmd:        execCommandRunner{},
+		vmSlots:    make(chan int, ss.MaxRunners),
 	}
 	// Pre-fill slot indices: each slot gets a deterministic MAC address
 	for i := 0; i < ss.MaxRunners; i++ {
@@ -162,7 +153,6 @@ func (b *TartBackend) fillPool(slot int) {
 
 		b.logger.Info("Warm VM ready",
 			slog.String("name", vm.name),
-			slog.String("ip", vm.ip),
 			slog.Int("slot", slot),
 		)
 
@@ -198,8 +188,8 @@ func (b *TartBackend) EnsureImage(ctx context.Context) error {
 	return nil
 }
 
-// bootVM clones and boots a Tart VM, waits for IP and SSH readiness.
-// Returns a warmVM that is ready for runner injection.
+// bootVM clones and boots a Tart VM, waits for Guest Agent readiness.
+// Returns a warmVM that is ready for runner injection via `tart exec`.
 func (b *TartBackend) bootVM(ctx context.Context, name string) (*warmVM, error) {
 	// 0. Acquire a VM slot (blocks if all slots are in use)
 	var slotIdx int
@@ -226,36 +216,25 @@ func (b *TartBackend) bootVM(ctx context.Context, name string) (*warmVM, error) 
 
 	// 3. Start VM in background (tart run blocks until VM shuts down)
 	vmCtx, vmCancel := context.WithCancel(ctx)
-	runArgs := []string{"run", name, "--no-graphics"}
 	go func() {
 		defer vmCancel()
-		if _, err := b.cmd.Run(vmCtx, "tart", runArgs...); err != nil {
+		if _, err := b.cmd.Run(vmCtx, "tart", "run", name, "--no-graphics"); err != nil {
 			if vmCtx.Err() == nil {
 				b.logger.Error("VM exited unexpectedly", slog.String("name", name), slog.String("error", err.Error()))
 			}
 		}
 	}()
 
-	// 4. Wait for VM to get an IP
-	ip, err := b.waitForIP(ctx, name)
-	if err != nil {
+	// 4. Wait for Guest Agent to be ready (tart exec <name> true)
+	if err := b.waitForExec(ctx, name); err != nil {
 		vmCancel()
 		_, _ = b.cmd.Run(context.WithoutCancel(ctx), "tart", "stop", name)
 		_, _ = b.cmd.Run(context.WithoutCancel(ctx), "tart", "delete", name)
 		releaseSlot()
-		return nil, fmt.Errorf("failed to get VM IP: %w", err)
+		return nil, fmt.Errorf("guest agent not ready on %s: %w", name, err)
 	}
 
-	// 5. Wait for SSH to be ready (just dial, don't run anything)
-	if err := b.waitForSSH(ctx, ip, name); err != nil {
-		vmCancel()
-		_, _ = b.cmd.Run(context.WithoutCancel(ctx), "tart", "stop", name)
-		_, _ = b.cmd.Run(context.WithoutCancel(ctx), "tart", "delete", name)
-		releaseSlot()
-		return nil, fmt.Errorf("SSH not ready on %s: %w", ip, err)
-	}
-
-	return &warmVM{name: name, ip: ip, cancel: vmCancel, slotIdx: slotIdx}, nil
+	return &warmVM{name: name, cancel: vmCancel, slotIdx: slotIdx}, nil
 }
 
 // setVMMAC writes a deterministic MAC address to the VM's config.json.
@@ -311,28 +290,20 @@ func (b *TartBackend) destroyVM(vm *warmVM) {
 // If a warm pool is available, picks a pre-booted VM (near-instant).
 // Otherwise, cold-starts a new VM (~30s).
 func (b *TartBackend) StartRunner(ctx context.Context, name string, jitConfig string) (string, error) {
-	var ip string
-
 	// Try to get a warm VM from the pool
 	if b.pool != nil {
 		select {
 		case vm := <-b.pool:
 			b.logger.Info("Using warm VM from pool",
 				slog.String("vmName", vm.name),
-				slog.String("ip", vm.ip),
 				slog.String("runner", name),
 			)
-			ip = vm.ip
-			// Start runner via SSH on the warm VM
-			if err := b.runRunnerViaSSH(ctx, ip, vm.name, jitConfig); err != nil {
+			if err := b.runRunner(ctx, vm.name, jitConfig); err != nil {
 				b.destroyVM(vm)
-				return "", fmt.Errorf("failed to start runner via SSH: %w", err)
+				return "", fmt.Errorf("failed to start runner: %w", err)
 			}
 			b.activeSlots.Store(vm.name, vm.slotIdx)
-			b.logger.Info("Runner started (warm)",
-				slog.String("name", vm.name),
-				slog.String("ip", ip),
-			)
+			b.logger.Info("Runner started (warm)", slog.String("name", vm.name))
 			return vm.name, nil
 		default:
 			b.logger.Warn("VM pool empty, cold-starting VM", slog.String("runner", name))
@@ -345,15 +316,14 @@ func (b *TartBackend) StartRunner(ctx context.Context, name string, jitConfig st
 		return "", err
 	}
 
-	if err := b.runRunnerViaSSH(ctx, vm.ip, name, jitConfig); err != nil {
+	if err := b.runRunner(ctx, vm.name, jitConfig); err != nil {
 		b.destroyVM(vm)
-		return "", fmt.Errorf("failed to start runner via SSH: %w", err)
+		return "", fmt.Errorf("failed to start runner: %w", err)
 	}
 
 	b.activeSlots.Store(name, vm.slotIdx)
 	b.logger.Info("Runner started (cold)",
 		slog.String("name", name),
-		slog.String("ip", vm.ip),
 		slog.String("baseImage", b.baseImage),
 	)
 	return name, nil
@@ -395,103 +365,26 @@ func (b *TartBackend) Shutdown(ctx context.Context) {
 	}
 }
 
-// waitForIP polls `tart ip` until the VM has a DHCP-assigned IP address.
-func (b *TartBackend) waitForIP(ctx context.Context, name string) (string, error) {
+// waitForExec polls `tart exec <name> true` until the Guest Agent is ready.
+// This replaces the old waitForIP + waitForSSH flow — tart exec uses Virtio
+// gRPC, bypassing the network stack entirely.
+func (b *TartBackend) waitForExec(ctx context.Context, name string) error {
 	timeout := 2 * time.Minute
 	deadline := time.Now().Add(timeout)
 	wait := 1 * time.Second
 
 	for {
-		if time.Now().After(deadline) {
-			return "", fmt.Errorf("timeout after %s waiting for VM %s to get an IP", timeout, name)
-		}
-
-		out, err := b.cmd.Run(ctx, "tart", "ip", name)
-		if err == nil {
-			ip := strings.TrimSpace(string(out))
-			if ip != "" {
-				return ip, nil
-			}
-		}
-
-		select {
-		case <-ctx.Done():
-			return "", ctx.Err()
-		case <-time.After(wait):
-		}
-
-		// Exponential backoff: 1s, 2s, 4s, cap at 5s
-		wait = min(wait*2, 5*time.Second)
-	}
-}
-
-// sshDialer abstracts SSH connections for testability.
-type sshDialer interface {
-	DialAndRun(ctx context.Context, addr, user, password, command string) error
-}
-
-// realSSHDialer connects via golang.org/x/crypto/ssh.
-type realSSHDialer struct{}
-
-func (realSSHDialer) DialAndRun(ctx context.Context, addr, user, password, command string) error {
-	config := &ssh.ClientConfig{
-		User: user,
-		Auth: []ssh.AuthMethod{
-			ssh.Password(password),
-		},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-		Timeout:         5 * time.Second,
-	}
-
-	// Respect context cancellation during dial
-	var d net.Dialer
-	conn, err := d.DialContext(ctx, "tcp", addr+":22")
-	if err != nil {
-		return fmt.Errorf("dial: %w", err)
-	}
-
-	sshConn, chans, reqs, err := ssh.NewClientConn(conn, addr+":22", config)
-	if err != nil {
-		conn.Close()
-		return fmt.Errorf("ssh handshake: %w", err)
-	}
-	client := ssh.NewClient(sshConn, chans, reqs)
-	defer client.Close()
-
-	session, err := client.NewSession()
-	if err != nil {
-		return fmt.Errorf("ssh session: %w", err)
-	}
-	defer session.Close()
-
-	// Start the command without waiting for it to finish (runner runs as daemon)
-	if err := session.Start(command); err != nil {
-		return fmt.Errorf("ssh start command: %w", err)
-	}
-
-	return nil
-}
-
-// waitForSSH polls until SSH is reachable on the VM.
-func (b *TartBackend) waitForSSH(ctx context.Context, ip, name string) error {
-	timeout := 60 * time.Second
-	deadline := time.Now().Add(timeout)
-	wait := 1 * time.Second
-
-	for {
-		// Try a simple SSH connection (run "true" as a no-op)
-		err := b.ssh.DialAndRun(ctx, ip, b.sshUser, b.sshPassword, "true")
+		_, err := b.cmd.Run(ctx, "tart", "exec", name, "true")
 		if err == nil {
 			return nil
 		}
 
 		if time.Now().After(deadline) {
-			return fmt.Errorf("timeout after %s waiting for SSH on %s: %w", timeout, ip, err)
+			return fmt.Errorf("timeout after %s waiting for guest agent on %s: %w", timeout, name, err)
 		}
 
-		b.logger.Debug("SSH not ready, retrying",
+		b.logger.Debug("Guest agent not ready, retrying",
 			slog.String("name", name),
-			slog.String("ip", ip),
 			slog.Duration("retry_in", wait),
 		)
 
@@ -505,41 +398,17 @@ func (b *TartBackend) waitForSSH(ctx context.Context, ip, name string) error {
 	}
 }
 
-// runRunnerViaSSH connects to the VM and starts the GitHub Actions runner.
-// Assumes SSH is already reachable (use waitForSSH first or retry internally).
-func (b *TartBackend) runRunnerViaSSH(ctx context.Context, ip, name, jitConfig string) error {
+// runRunner starts the GitHub Actions runner inside the VM via `tart exec`.
+// Uses Virtio gRPC (Guest Agent) instead of SSH — no network dependency.
+func (b *TartBackend) runRunner(ctx context.Context, vmName, jitConfig string) error {
 	remoteCmd := fmt.Sprintf(
 		"ACTIONS_RUNNER_INPUT_JITCONFIG=%s nohup %s/run.sh &",
 		jitConfig, b.runnerDir,
 	)
 
-	// SSH should be ready (either from pool or waitForSSH), but retry briefly just in case
-	timeout := 15 * time.Second
-	deadline := time.Now().Add(timeout)
-	wait := 1 * time.Second
-
-	for {
-		err := b.ssh.DialAndRun(ctx, ip, b.sshUser, b.sshPassword, remoteCmd)
-		if err == nil {
-			return nil
-		}
-
-		if time.Now().After(deadline) {
-			return fmt.Errorf("failed to start runner on %s: %w", ip, err)
-		}
-
-		b.logger.Debug("SSH retry for runner start",
-			slog.String("name", name),
-			slog.String("ip", ip),
-			slog.Duration("retry_in", wait),
-		)
-
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(wait):
-		}
-
-		wait = min(wait*2, 5*time.Second)
+	_, err := b.cmd.Run(ctx, "tart", "exec", vmName, "sh", "-c", remoteCmd)
+	if err != nil {
+		return fmt.Errorf("failed to start runner on %s: %w", vmName, err)
 	}
+	return nil
 }

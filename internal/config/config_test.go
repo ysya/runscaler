@@ -301,12 +301,6 @@ func TestTartDefaults(t *testing.T) {
 	}
 
 	ss := sets[0]
-	if ss.TartSSHUser != "admin" {
-		t.Errorf("TartSSHUser = %q, want %q", ss.TartSSHUser, "admin")
-	}
-	if ss.TartSSHPass != "admin" {
-		t.Errorf("TartSSHPass = %q, want %q", ss.TartSSHPass, "admin")
-	}
 	if ss.TartRunnerDir != "/Users/admin/actions-runner" {
 		t.Errorf("TartRunnerDir = %q, want %q", ss.TartRunnerDir, "/Users/admin/actions-runner")
 	}
@@ -351,10 +345,6 @@ func TestResolveScaleSets_MixedBackends(t *testing.T) {
 	}
 	if sets[1].TartImage != "custom-macos:latest" {
 		t.Errorf("sets[1].TartImage = %q, want custom", sets[1].TartImage)
-	}
-	// Should have defaults applied
-	if sets[1].TartSSHUser != "admin" {
-		t.Errorf("sets[1].TartSSHUser = %q, want admin (default)", sets[1].TartSSHUser)
 	}
 }
 

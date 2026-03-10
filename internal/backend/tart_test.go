@@ -73,46 +73,17 @@ func (m *mockCommandRunner) callCount(prefix string) int {
 	return count
 }
 
-// mockSSHDialer records SSH calls for testing.
-type mockSSHDialer struct {
-	mu    sync.Mutex
-	calls []sshCall
-	err   error
-}
-
-type sshCall struct {
-	addr, user, password, command string
-}
-
-func (m *mockSSHDialer) DialAndRun(_ context.Context, addr, user, password, command string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.calls = append(m.calls, sshCall{addr: addr, user: user, password: password, command: command})
-	return m.err
-}
-
-func (m *mockSSHDialer) getCalls() []sshCall {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	cp := make([]sshCall, len(m.calls))
-	copy(cp, m.calls)
-	return cp
-}
-
-func newTestTartBackend(cmd *mockCommandRunner, sshMock *mockSSHDialer) *TartBackend {
+func newTestTartBackend(cmd *mockCommandRunner) *TartBackend {
 	slots := make(chan int, 10)
 	for i := 0; i < 10; i++ {
 		slots <- i
 	}
 	return &TartBackend{
-		baseImage:   "macos-base:latest",
-		sshUser:     "admin",
-		sshPassword: "admin",
-		runnerDir:   "/Users/admin/actions-runner",
-		logger:      slog.New(slog.DiscardHandler),
-		cmd:         cmd,
-		ssh:         sshMock,
-		vmSlots:     slots,
+		baseImage: "macos-base:latest",
+		runnerDir: "/Users/admin/actions-runner",
+		logger:    slog.New(slog.DiscardHandler),
+		cmd:       cmd,
+		vmSlots:   slots,
 	}
 }
 
@@ -121,11 +92,10 @@ func TestTartBackend_StartRunner_Success(t *testing.T) {
 		results: map[string]cmdResult{
 			"tart clone": {output: nil, err: nil},
 			"tart run":   {output: nil, err: nil},
-			"tart ip":    {output: []byte("192.168.64.5\n"), err: nil},
+			"tart exec":  {output: nil, err: nil},
 		},
 	}
-	sshMock := &mockSSHDialer{}
-	b := newTestTartBackend(cmd, sshMock)
+	b := newTestTartBackend(cmd)
 	ctx := context.Background()
 
 	resourceID, err := b.StartRunner(ctx, "runner-abc", "mock-jit-config")
@@ -152,25 +122,10 @@ func TestTartBackend_StartRunner_Success(t *testing.T) {
 		t.Error("tart clone was not called")
 	}
 
-	// Verify SSH was called: first waitForSSH ("true"), then runRunnerViaSSH (JIT config)
-	sshCalls := sshMock.getCalls()
-	if len(sshCalls) != 2 {
-		t.Fatalf("expected 2 SSH calls, got %d", len(sshCalls))
-	}
-	// First call: SSH readiness check
-	if sshCalls[0].command != "true" {
-		t.Errorf("first SSH call should be readiness check, got: %s", sshCalls[0].command)
-	}
-	// Second call: runner start
-	sc := sshCalls[1]
-	if sc.addr != "192.168.64.5" {
-		t.Errorf("SSH addr = %q, want %q", sc.addr, "192.168.64.5")
-	}
-	if sc.user != "admin" {
-		t.Errorf("SSH user = %q, want %q", sc.user, "admin")
-	}
-	if !strings.Contains(sc.command, "ACTIONS_RUNNER_INPUT_JITCONFIG=mock-jit-config") {
-		t.Errorf("SSH command should contain JIT config, got: %s", sc.command)
+	// Verify tart exec was called: first readiness check ("true"), then runner start
+	execCount := cmd.callCount("tart exec")
+	if execCount != 2 {
+		t.Fatalf("expected 2 tart exec calls (readiness + runner), got %d", execCount)
 	}
 }
 
@@ -180,7 +135,7 @@ func TestTartBackend_StartRunner_CloneFails(t *testing.T) {
 			"tart clone": {err: fmt.Errorf("tart clone: image not found")},
 		},
 	}
-	b := newTestTartBackend(cmd, &mockSSHDialer{})
+	b := newTestTartBackend(cmd)
 	ctx := context.Background()
 
 	_, err := b.StartRunner(ctx, "runner-abc", "jit")
@@ -199,7 +154,7 @@ func TestTartBackend_RemoveRunner(t *testing.T) {
 			"tart delete": {output: nil, err: nil},
 		},
 	}
-	b := newTestTartBackend(cmd, &mockSSHDialer{})
+	b := newTestTartBackend(cmd)
 	ctx := context.Background()
 
 	err := b.RemoveRunner(ctx, "runner-abc")
@@ -222,7 +177,7 @@ func TestTartBackend_RemoveRunner_StopFails(t *testing.T) {
 			"tart delete": {output: nil, err: nil},
 		},
 	}
-	b := newTestTartBackend(cmd, &mockSSHDialer{})
+	b := newTestTartBackend(cmd)
 	ctx := context.Background()
 
 	// Should succeed even if stop fails (VM may already be stopped)
@@ -239,7 +194,7 @@ func TestTartBackend_RemoveRunner_DeleteFails(t *testing.T) {
 			"tart delete": {err: fmt.Errorf("permission denied")},
 		},
 	}
-	b := newTestTartBackend(cmd, &mockSSHDialer{})
+	b := newTestTartBackend(cmd)
 	ctx := context.Background()
 
 	err := b.RemoveRunner(ctx, "runner-abc")
@@ -250,7 +205,7 @@ func TestTartBackend_RemoveRunner_DeleteFails(t *testing.T) {
 
 func TestTartBackend_Shutdown_IsNoop(t *testing.T) {
 	cmd := &mockCommandRunner{}
-	b := newTestTartBackend(cmd, &mockSSHDialer{})
+	b := newTestTartBackend(cmd)
 	ctx := context.Background()
 
 	// Should not panic or call any commands

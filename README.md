@@ -9,6 +9,24 @@ Auto-scale GitHub Actions self-hosted runners as Docker containers or macOS VMs.
 
 Runners are **ephemeral** — each container/VM handles exactly one job and is removed upon completion. No Kubernetes required.
 
+## Table of Contents
+
+- [How It Works](#how-it-works)
+- [Features](#features)
+- [Quick Start](#quick-start)
+  - [Prerequisites](#prerequisites)
+  - [Install](#install)
+  - [Run](#run)
+- [Commands](#commands)
+- [Configuration](#configuration)
+  - [Config File (TOML)](#config-file-toml)
+  - [Token Security](#token-security)
+  - [CLI Flags](#cli-flags)
+- [Deployment](#deployment)
+- [Building](#building)
+- [Architecture](#architecture)
+- [License](#license)
+
 ## How It Works
 
 ```mermaid

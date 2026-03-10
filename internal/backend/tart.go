@@ -3,11 +3,13 @@ package backend
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -51,9 +53,10 @@ func (execCommandRunner) RunStreaming(ctx context.Context, name string, args ...
 
 // warmVM represents a pre-booted VM ready to accept a runner.
 type warmVM struct {
-	name   string
-	ip     string
-	cancel context.CancelFunc // cancels the `tart run` goroutine
+	name    string
+	ip      string
+	cancel  context.CancelFunc // cancels the `tart run` goroutine
+	slotIdx int                // index into vmSlots for deterministic MAC assignment
 }
 
 // TartBackend runs GitHub Actions runners as ephemeral Tart macOS VMs.
@@ -72,9 +75,8 @@ type TartBackend struct {
 	baseImage   string
 	sshUser     string
 	sshPassword string
-	runnerDir   string
-	softnet     bool
-	poolSize    int
+	runnerDir  string
+	poolSize   int
 	maxRunners  int
 	logger      *slog.Logger
 	cmd         CommandRunner
@@ -86,9 +88,11 @@ type TartBackend struct {
 	poolStop context.CancelFunc
 	poolWg   sync.WaitGroup
 
-	// vmSlots is a semaphore limiting total concurrent VMs (pool + active runners).
+	// vmSlots is a pool of slot indices limiting total concurrent VMs.
+	// Each slot has a deterministic MAC address to prevent DHCP lease exhaustion.
 	// Apple Silicon enforces a max of 2 concurrent macOS VMs per host.
-	vmSlots chan struct{}
+	vmSlots     chan int
+	activeSlots sync.Map // resourceID -> slotIdx, for releasing on RemoveRunner
 }
 
 // NewTartBackend creates a TartBackend from scale set config.
@@ -98,13 +102,16 @@ func NewTartBackend(ss config.ScaleSetConfig, logger *slog.Logger) *TartBackend 
 		sshUser:     ss.TartSSHUser,
 		sshPassword: ss.TartSSHPass,
 		runnerDir:   ss.TartRunnerDir,
-		softnet:     ss.TartSoftnet,
 		poolSize:    ss.TartPoolSize,
 		maxRunners:  ss.MaxRunners,
 		logger:      logger,
-		cmd:         execCommandRunner{},
-		ssh:         realSSHDialer{},
-		vmSlots:     make(chan struct{}, ss.MaxRunners),
+		cmd:     execCommandRunner{},
+		ssh:     realSSHDialer{},
+		vmSlots: make(chan int, ss.MaxRunners),
+	}
+	// Pre-fill slot indices: each slot gets a deterministic MAC address
+	for i := 0; i < ss.MaxRunners; i++ {
+		b.vmSlots <- i
 	}
 	return b
 }
@@ -194,25 +201,32 @@ func (b *TartBackend) EnsureImage(ctx context.Context) error {
 // bootVM clones and boots a Tart VM, waits for IP and SSH readiness.
 // Returns a warmVM that is ready for runner injection.
 func (b *TartBackend) bootVM(ctx context.Context, name string) (*warmVM, error) {
-	// 0. Acquire a VM slot (blocks if max concurrent VMs reached)
+	// 0. Acquire a VM slot (blocks if all slots are in use)
+	var slotIdx int
 	select {
-	case b.vmSlots <- struct{}{}:
+	case slotIdx = <-b.vmSlots:
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
 
+	releaseSlot := func() { b.vmSlots <- slotIdx }
+
 	// 1. Clone base image (APFS copy-on-write, near-instant)
 	if _, err := b.cmd.Run(ctx, "tart", "clone", b.baseImage, name); err != nil {
-		<-b.vmSlots // release slot on failure
+		releaseSlot()
 		return nil, fmt.Errorf("failed to clone VM: %w", err)
 	}
 
-	// 2. Start VM in background (tart run blocks until VM shuts down)
+	// 2. Set deterministic MAC address to prevent DHCP lease exhaustion.
+	//    Each slot always gets the same MAC → same DHCP lease → no IP waste.
+	if err := b.setVMMAC(name, slotIdx); err != nil {
+		b.logger.Warn("Failed to set fixed MAC (will use random)",
+			slog.String("name", name), slog.String("error", err.Error()))
+	}
+
+	// 3. Start VM in background (tart run blocks until VM shuts down)
 	vmCtx, vmCancel := context.WithCancel(ctx)
 	runArgs := []string{"run", name, "--no-graphics"}
-	if b.softnet {
-		runArgs = append(runArgs, "--net-softnet")
-	}
 	go func() {
 		defer vmCancel()
 		if _, err := b.cmd.Run(vmCtx, "tart", runArgs...); err != nil {
@@ -222,26 +236,66 @@ func (b *TartBackend) bootVM(ctx context.Context, name string) (*warmVM, error) 
 		}
 	}()
 
-	// 3. Wait for VM to get an IP
+	// 4. Wait for VM to get an IP
 	ip, err := b.waitForIP(ctx, name)
 	if err != nil {
 		vmCancel()
 		_, _ = b.cmd.Run(context.WithoutCancel(ctx), "tart", "stop", name)
 		_, _ = b.cmd.Run(context.WithoutCancel(ctx), "tart", "delete", name)
-		<-b.vmSlots // release slot on failure
+		releaseSlot()
 		return nil, fmt.Errorf("failed to get VM IP: %w", err)
 	}
 
-	// 4. Wait for SSH to be ready (just dial, don't run anything)
+	// 5. Wait for SSH to be ready (just dial, don't run anything)
 	if err := b.waitForSSH(ctx, ip, name); err != nil {
 		vmCancel()
 		_, _ = b.cmd.Run(context.WithoutCancel(ctx), "tart", "stop", name)
 		_, _ = b.cmd.Run(context.WithoutCancel(ctx), "tart", "delete", name)
-		<-b.vmSlots // release slot on failure
+		releaseSlot()
 		return nil, fmt.Errorf("SSH not ready on %s: %w", ip, err)
 	}
 
-	return &warmVM{name: name, ip: ip, cancel: vmCancel}, nil
+	return &warmVM{name: name, ip: ip, cancel: vmCancel, slotIdx: slotIdx}, nil
+}
+
+// setVMMAC writes a deterministic MAC address to the VM's config.json.
+// Uses locally administered unicast addresses (02:00:00:00:00:XX) so
+// the DHCP server always assigns the same IP to the same slot index.
+func (b *TartBackend) setVMMAC(name string, slotIdx int) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("get home dir: %w", err)
+	}
+	configPath := filepath.Join(home, ".tart", "vms", name, "config.json")
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return fmt.Errorf("read VM config: %w", err)
+	}
+
+	var cfg map[string]any
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return fmt.Errorf("parse VM config: %w", err)
+	}
+
+	mac := fmt.Sprintf("02:00:00:00:00:%02x", slotIdx+1)
+	cfg["macAddress"] = mac
+
+	out, err := json.MarshalIndent(cfg, "", "    ")
+	if err != nil {
+		return fmt.Errorf("marshal VM config: %w", err)
+	}
+
+	if err := os.WriteFile(configPath, out, 0644); err != nil {
+		return fmt.Errorf("write VM config: %w", err)
+	}
+
+	b.logger.Debug("Set fixed MAC address",
+		slog.String("name", name),
+		slog.String("mac", mac),
+		slog.Int("slot", slotIdx),
+	)
+	return nil
 }
 
 // destroyVM stops and deletes a warm VM, releasing its VM slot.
@@ -250,10 +304,7 @@ func (b *TartBackend) destroyVM(vm *warmVM) {
 	cleanCtx := context.Background()
 	_, _ = b.cmd.Run(cleanCtx, "tart", "stop", vm.name)
 	_, _ = b.cmd.Run(cleanCtx, "tart", "delete", vm.name)
-	select {
-	case <-b.vmSlots:
-	default:
-	}
+	b.vmSlots <- vm.slotIdx
 }
 
 // StartRunner starts a GitHub Actions runner in a Tart VM.
@@ -271,13 +322,13 @@ func (b *TartBackend) StartRunner(ctx context.Context, name string, jitConfig st
 				slog.String("ip", vm.ip),
 				slog.String("runner", name),
 			)
-			// Rename the VM in our tracking (the tart VM name stays as pool-*)
 			ip = vm.ip
 			// Start runner via SSH on the warm VM
 			if err := b.runRunnerViaSSH(ctx, ip, vm.name, jitConfig); err != nil {
 				b.destroyVM(vm)
 				return "", fmt.Errorf("failed to start runner via SSH: %w", err)
 			}
+			b.activeSlots.Store(vm.name, vm.slotIdx)
 			b.logger.Info("Runner started (warm)",
 				slog.String("name", vm.name),
 				slog.String("ip", ip),
@@ -299,6 +350,7 @@ func (b *TartBackend) StartRunner(ctx context.Context, name string, jitConfig st
 		return "", fmt.Errorf("failed to start runner via SSH: %w", err)
 	}
 
+	b.activeSlots.Store(name, vm.slotIdx)
 	b.logger.Info("Runner started (cold)",
 		slog.String("name", name),
 		slog.String("ip", vm.ip),
@@ -318,10 +370,9 @@ func (b *TartBackend) RemoveRunner(ctx context.Context, resourceID string) error
 	if _, err := b.cmd.Run(cleanCtx, "tart", "delete", resourceID); err != nil {
 		return fmt.Errorf("failed to delete VM %s: %w", resourceID, err)
 	}
-	// Release VM slot (non-blocking in case VM wasn't tracked via bootVM)
-	select {
-	case <-b.vmSlots:
-	default:
+	// Release VM slot back to the pool
+	if idx, ok := b.activeSlots.LoadAndDelete(resourceID); ok {
+		b.vmSlots <- idx.(int)
 	}
 	return nil
 }

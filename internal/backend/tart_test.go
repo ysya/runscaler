@@ -100,6 +100,10 @@ func (m *mockSSHDialer) getCalls() []sshCall {
 }
 
 func newTestTartBackend(cmd *mockCommandRunner, sshMock *mockSSHDialer) *TartBackend {
+	slots := make(chan int, 10)
+	for i := 0; i < 10; i++ {
+		slots <- i
+	}
 	return &TartBackend{
 		baseImage:   "macos-base:latest",
 		sshUser:     "admin",
@@ -108,7 +112,7 @@ func newTestTartBackend(cmd *mockCommandRunner, sshMock *mockSSHDialer) *TartBac
 		logger:      slog.New(slog.DiscardHandler),
 		cmd:         cmd,
 		ssh:         sshMock,
-		vmSlots:     make(chan struct{}, 10), // generous limit for tests
+		vmSlots:     slots,
 	}
 }
 

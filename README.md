@@ -51,7 +51,7 @@ flowchart LR
   tart pull ghcr.io/cirruslabs/macos-tahoe-xcode:latest
   ```
 
-  > **Note:** Apple's Virtualization.framework limits each host to **2 concurrent macOS VMs**. Set `max-runners` accordingly.
+  > **Note:** Apple's Virtualization.framework limits each host to **2 concurrent macOS VMs**. Set `max-runners` accordingly. Each VM slot is assigned a deterministic MAC address to prevent DHCP lease exhaustion — no sudo required.
 
 - A GitHub **Personal Access Token** — required scopes depend on token type and runner level:
 
@@ -169,7 +169,6 @@ tart-ssh-user = "admin"  # default
 tart-ssh-pass = "admin"  # default
 tart-runner-dir = "/Users/admin/actions-runner"  # default
 tart-pool-size = 2       # pre-warm 2 VMs for instant job pickup (~2s vs ~30s cold boot)
-# tart-softnet = true    # requires: sudo chmod u+s $(which softnet)
 log-level = "info"
 ```
 
@@ -243,7 +242,6 @@ tart-pool-size = 2
 | `--tart-ssh-user`   | `admin`                                 | SSH user for Tart VMs                             |
 | `--tart-ssh-pass`   | `admin`                                 | SSH password for Tart VMs                         |
 | `--tart-runner-dir` | `/Users/admin/actions-runner`           | Runner install directory inside Tart VM           |
-| `--tart-softnet`    | `false`                                 | Use softnet for network isolation (Tart backend)  |
 | `--tart-pool-size`  | `0`                                     | Number of pre-warmed VMs for instant job pickup   |
 | `--log-level`       | `info`                                  | Log level (debug/info/warn/error)                 |
 | `--log-format`      | `text`                                  | Log format (text/json)                            |

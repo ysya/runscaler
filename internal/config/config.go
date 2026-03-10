@@ -30,7 +30,7 @@ type Config struct {
 	TartSSHUser   string `mapstructure:"tart-ssh-user"`
 	TartSSHPass   string `mapstructure:"tart-ssh-pass"`
 	TartRunnerDir string `mapstructure:"tart-runner-dir"`
-	TartSoftnet   bool   `mapstructure:"tart-softnet"`
+
 	TartPoolSize  int    `mapstructure:"tart-pool-size"`
 
 	// Scale sets (multi-org support)
@@ -70,7 +70,7 @@ type ScaleSetConfig struct {
 	TartSSHUser   string `mapstructure:"tart-ssh-user"`   // SSH user in VM (default: "admin")
 	TartSSHPass   string `mapstructure:"tart-ssh-pass"`   // SSH password in VM (default: "admin")
 	TartRunnerDir string `mapstructure:"tart-runner-dir"` // Runner binary path in VM (default: "/Users/admin/actions-runner")
-	TartSoftnet   bool   `mapstructure:"tart-softnet"`    // Use --net-softnet for network isolation & DHCP lease management
+
 	TartPoolSize  int    `mapstructure:"tart-pool-size"`  // Number of pre-warmed VMs to keep ready (0 = disabled)
 }
 
@@ -115,9 +115,6 @@ func (c *Config) ResolveScaleSets() []ScaleSetConfig {
 			if ss.TartRunnerDir == "" {
 				ss.TartRunnerDir = c.TartRunnerDir
 			}
-			if !ss.TartSoftnet {
-				ss.TartSoftnet = c.TartSoftnet
-			}
 			if ss.TartPoolSize == 0 {
 				ss.TartPoolSize = c.TartPoolSize
 			}
@@ -145,7 +142,6 @@ func (c *Config) ResolveScaleSets() []ScaleSetConfig {
 		TartSSHUser:     c.TartSSHUser,
 		TartSSHPass:     c.TartSSHPass,
 		TartRunnerDir:   c.TartRunnerDir,
-		TartSoftnet:     c.TartSoftnet,
 		TartPoolSize:    c.TartPoolSize,
 	}
 	ss.ApplyTartDefaults()

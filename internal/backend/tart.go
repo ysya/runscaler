@@ -147,7 +147,7 @@ func (b *TartBackend) fillPool(slot int) {
 			}
 			b.logger.Warn("Failed to create warm VM, retrying in 5s",
 				slog.Int("slot", slot),
-				slog.String("error", err.Error()),
+				slog.Any("error", err),
 			)
 			select {
 			case <-b.poolCtx.Done():
@@ -157,7 +157,7 @@ func (b *TartBackend) fillPool(slot int) {
 			continue
 		}
 
-		b.logger.Info("Warm VM ready",
+		b.logger.Debug("Warm VM ready",
 			slog.String("name", vm.name),
 			slog.Int("slot", slot),
 		)
@@ -180,7 +180,7 @@ func (b *TartBackend) EnsureImage(ctx context.Context) error {
 	out, err := b.cmd.Run(ctx, "tart", "list", "--format", "json")
 	if err != nil {
 		// If list fails, try pulling anyway
-		b.logger.Warn("Failed to list local images, will attempt pull", slog.String("error", err.Error()))
+		b.logger.Warn("Failed to list local images, will attempt pull", slog.Any("error", err))
 	} else if strings.Contains(string(out), b.baseImage) {
 		b.logger.Debug("Base image already exists locally", slog.String("image", b.baseImage))
 		return nil
@@ -237,7 +237,7 @@ func (b *TartBackend) bootVM(ctx context.Context, name string) (*warmVM, error) 
 	//    Each slot always gets the same MAC → same DHCP lease → no IP waste.
 	if err := b.setVMMAC(name, slotIdx); err != nil {
 		b.logger.Warn("Failed to set fixed MAC (will use random)",
-			slog.String("name", name), slog.String("error", err.Error()))
+			slog.String("name", name), slog.Any("error", err))
 	}
 
 	// 4. Start VM in background (tart run blocks until VM shuts down)
@@ -246,7 +246,7 @@ func (b *TartBackend) bootVM(ctx context.Context, name string) (*warmVM, error) 
 		defer vmCancel()
 		if _, err := b.cmd.Run(vmCtx, "tart", "run", name, "--no-graphics"); err != nil {
 			if vmCtx.Err() == nil {
-				b.logger.Error("VM exited unexpectedly", slog.String("name", name), slog.String("error", err.Error()))
+				b.logger.Error("VM exited unexpectedly", slog.String("name", name), slog.Any("error", err))
 			}
 		}
 	}()
@@ -320,7 +320,7 @@ func (b *TartBackend) StartRunner(ctx context.Context, name string, jitConfig st
 	if b.pool != nil {
 		select {
 		case vm := <-b.pool:
-			b.logger.Info("Using warm VM from pool",
+			b.logger.Debug("Using warm VM from pool",
 				slog.String("vmName", vm.name),
 				slog.String("runner", name),
 			)
@@ -329,7 +329,7 @@ func (b *TartBackend) StartRunner(ctx context.Context, name string, jitConfig st
 				return "", fmt.Errorf("failed to start runner: %w", err)
 			}
 			b.activeSlots.Store(vm.name, vm.slotIdx)
-			b.logger.Info("Runner started (warm)", slog.String("name", vm.name))
+			b.logger.Debug("Runner started (warm)", slog.String("name", vm.name))
 			return vm.name, nil
 		default:
 			b.logger.Warn("VM pool empty, cold-starting VM", slog.String("runner", name))
@@ -348,7 +348,7 @@ func (b *TartBackend) StartRunner(ctx context.Context, name string, jitConfig st
 	}
 
 	b.activeSlots.Store(name, vm.slotIdx)
-	b.logger.Info("Runner started (cold)",
+	b.logger.Debug("Runner started (cold)",
 		slog.String("name", name),
 		slog.String("baseImage", b.baseImage),
 	)
@@ -361,7 +361,7 @@ func (b *TartBackend) RemoveRunner(ctx context.Context, resourceID string) error
 	cleanCtx := context.WithoutCancel(ctx)
 
 	if _, err := b.cmd.Run(cleanCtx, "tart", "stop", resourceID); err != nil {
-		b.logger.Warn("Failed to stop VM (may already be stopped)", slog.String("name", resourceID), slog.String("error", err.Error()))
+		b.logger.Warn("Failed to stop VM (may already be stopped)", slog.String("name", resourceID), slog.Any("error", err))
 	}
 	if _, err := b.cmd.Run(cleanCtx, "tart", "delete", resourceID); err != nil {
 		return fmt.Errorf("failed to delete VM %s: %w", resourceID, err)

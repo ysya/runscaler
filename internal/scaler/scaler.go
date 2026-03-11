@@ -80,7 +80,7 @@ func (s *Scaler) HandleDesiredRunnerCount(ctx context.Context, count int) (int, 
 
 // HandleJobStarted marks a runner as busy when a job is assigned.
 func (s *Scaler) HandleJobStarted(ctx context.Context, jobInfo *scaleset.JobStarted) error {
-	s.logger.Info(
+	s.logger.Debug(
 		"Job started",
 		slog.Int64("runnerRequestId", jobInfo.RunnerRequestID),
 		slog.String("jobId", jobInfo.JobID),
@@ -92,7 +92,7 @@ func (s *Scaler) HandleJobStarted(ctx context.Context, jobInfo *scaleset.JobStar
 
 // HandleJobCompleted removes the runner after job finishes.
 func (s *Scaler) HandleJobCompleted(ctx context.Context, jobInfo *scaleset.JobCompleted) error {
-	s.logger.Info(
+	s.logger.Debug(
 		"Job completed",
 		slog.Int64("runnerRequestId", jobInfo.RunnerRequestID),
 		slog.String("jobId", jobInfo.JobID),
@@ -138,17 +138,17 @@ func (s *Scaler) Shutdown(ctx context.Context) {
 	defer s.runners.mu.Unlock()
 
 	for name, resourceID := range s.runners.idle {
-		s.logger.Info("Removing idle runner", slog.String("name", name))
+		s.logger.Debug("Removing idle runner", slog.String("name", name))
 		if err := s.backend.RemoveRunner(ctx, resourceID); err != nil {
-			s.logger.Error("Failed to remove idle runner", slog.String("name", name), slog.String("error", err.Error()))
+			s.logger.Error("Failed to remove idle runner", slog.String("name", name), slog.Any("error", err))
 		}
 	}
 	clear(s.runners.idle)
 
 	for name, resourceID := range s.runners.busy {
-		s.logger.Info("Removing busy runner", slog.String("name", name))
+		s.logger.Debug("Removing busy runner", slog.String("name", name))
 		if err := s.backend.RemoveRunner(ctx, resourceID); err != nil {
-			s.logger.Error("Failed to remove busy runner", slog.String("name", name), slog.String("error", err.Error()))
+			s.logger.Error("Failed to remove busy runner", slog.String("name", name), slog.Any("error", err))
 		}
 	}
 	clear(s.runners.busy)

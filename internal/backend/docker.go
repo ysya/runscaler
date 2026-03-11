@@ -111,11 +111,10 @@ func (b *DockerBackend) StartRunner(ctx context.Context, name string, jitConfig 
 		return "", fmt.Errorf("failed to start runner container: %w", err)
 	}
 
-	b.logger.Info("Runner started",
+	b.logger.Debug("Runner started",
 		slog.String("name", name),
 		slog.String("containerID", c.ID),
 		slog.Int("mounts", len(mounts)),
-		slog.String("sharedVolume", b.sharedVolume),
 	)
 	return c.ID, nil
 }
@@ -131,9 +130,9 @@ func (b *DockerBackend) RemoveRunner(ctx context.Context, resourceID string) err
 // Shutdown removes the shared Docker volume and prunes dangling resources.
 func (b *DockerBackend) Shutdown(ctx context.Context) {
 	if b.sharedVolume != "" {
-		b.logger.Info("Removing shared volume", slog.String("volume", "runscaler-shared"))
+		b.logger.Debug("Removing shared volume", slog.String("volume", "runscaler-shared"))
 		if err := b.dockerClient.VolumeRemove(ctx, "runscaler-shared", true); err != nil {
-			b.logger.Error("Failed to remove shared volume", slog.String("error", err.Error()))
+			b.logger.Error("Failed to remove shared volume", slog.Any("error", err))
 		}
 	}
 	b.pruneDocker(ctx)
@@ -152,14 +151,14 @@ func (b *DockerBackend) buildContainerEnv(jitConfig string) []string {
 
 // pruneDocker removes dangling images and build cache.
 func (b *DockerBackend) pruneDocker(ctx context.Context) {
-	b.logger.Info("Pruning Docker resources")
+	b.logger.Debug("Pruning Docker resources")
 
 	pruneFilters := filters.NewArgs(filters.Arg("dangling", "true"))
 	imagesReport, err := b.dockerClient.ImagesPrune(ctx, pruneFilters)
 	if err != nil {
-		b.logger.Error("Failed to prune images", slog.String("error", err.Error()))
+		b.logger.Error("Failed to prune images", slog.Any("error", err))
 	} else if imagesReport.SpaceReclaimed > 0 {
-		b.logger.Info("Pruned dangling images",
+		b.logger.Debug("Pruned dangling images",
 			slog.Int("count", len(imagesReport.ImagesDeleted)),
 			slog.String("reclaimed", FormatBytes(imagesReport.SpaceReclaimed)),
 		)
@@ -167,9 +166,9 @@ func (b *DockerBackend) pruneDocker(ctx context.Context) {
 
 	buildReport, err := b.dockerClient.BuildCachePrune(ctx, build.CachePruneOptions{All: true})
 	if err != nil {
-		b.logger.Error("Failed to prune build cache", slog.String("error", err.Error()))
+		b.logger.Error("Failed to prune build cache", slog.Any("error", err))
 	} else if buildReport.SpaceReclaimed > 0 {
-		b.logger.Info("Pruned build cache",
+		b.logger.Debug("Pruned build cache",
 			slog.String("reclaimed", FormatBytes(buildReport.SpaceReclaimed)),
 		)
 	}

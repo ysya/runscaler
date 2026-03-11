@@ -220,25 +220,27 @@ func (ss *ScaleSetConfig) Validate() error {
 
 // --- Standalone utility functions (not struct methods) ---
 
+// parseLogLevel converts a log level string to a charmlog.Level.
+func parseLogLevel(level string) charmlog.Level {
+	switch strings.ToLower(level) {
+	case "debug":
+		return charmlog.DebugLevel
+	case "warn":
+		return charmlog.WarnLevel
+	case "error":
+		return charmlog.ErrorLevel
+	default:
+		return charmlog.InfoLevel
+	}
+}
+
 // NewLogger creates a structured logger with the given level and format,
 // and sets it as the process-wide default.
 func NewLogger(level, format string) *slog.Logger {
-	var lvl charmlog.Level
-	switch strings.ToLower(level) {
-	case "debug":
-		lvl = charmlog.DebugLevel
-	case "warn":
-		lvl = charmlog.WarnLevel
-	case "error":
-		lvl = charmlog.ErrorLevel
-	default:
-		lvl = charmlog.InfoLevel
-	}
-
 	opts := charmlog.Options{
 		ReportTimestamp: true,
 		TimeFormat:      time.DateTime,
-		Level:           lvl,
+		Level:           parseLogLevel(level),
 	}
 
 	if strings.ToLower(format) == "json" {
@@ -264,22 +266,10 @@ var scaleSetColors = []lipgloss.Color{
 // NewScaleSetLogger creates a logger with a colored prefix for the given scale set.
 // The color is determined by the index, cycling through the palette.
 func NewScaleSetLogger(level, format string, name string, index int) *slog.Logger {
-	var lvl charmlog.Level
-	switch strings.ToLower(level) {
-	case "debug":
-		lvl = charmlog.DebugLevel
-	case "warn":
-		lvl = charmlog.WarnLevel
-	case "error":
-		lvl = charmlog.ErrorLevel
-	default:
-		lvl = charmlog.InfoLevel
-	}
-
 	opts := charmlog.Options{
 		ReportTimestamp: true,
 		TimeFormat:      time.DateTime,
-		Level:           lvl,
+		Level:           parseLogLevel(level),
 		Prefix:          name,
 	}
 

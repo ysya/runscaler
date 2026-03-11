@@ -262,7 +262,7 @@ func run(ctx context.Context, cfg config.Config) error {
 		}
 		go func() {
 			if err := healthServer.Serve(ln); err != nil && err != http.ErrServerClosed {
-				logger.Error("Health server error", slog.String("error", err.Error()))
+				logger.Error("Health server error", slog.Any("error", err))
 			}
 		}()
 		defer healthServer.Shutdown(context.WithoutCancel(ctx))
@@ -359,7 +359,7 @@ func runScaleSet(ctx context.Context, ss config.ScaleSetConfig, dockerClient *do
 	defer func() {
 		logger.Info("Deleting runner scale set", slog.Int("scaleSetID", scaleSet.ID))
 		if err := scalesetClient.DeleteRunnerScaleSet(context.WithoutCancel(ctx), scaleSet.ID); err != nil {
-			logger.Error("Failed to delete runner scale set", slog.String("error", err.Error()))
+			logger.Error("Failed to delete runner scale set", slog.Any("error", err))
 		}
 	}()
 

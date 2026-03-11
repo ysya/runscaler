@@ -277,13 +277,13 @@ func run(ctx context.Context, cfg config.Config) error {
 
 	for i := range scaleSets {
 		wg.Add(1)
-		go func(ss config.ScaleSetConfig) {
+		go func(idx int, ss config.ScaleSetConfig) {
 			defer wg.Done()
-			ssLogger := logger.WithGroup("[" + ss.ScaleSetName + "]")
+			ssLogger := config.NewScaleSetLogger(cfg.LogLevel, cfg.LogFormat, ss.ScaleSetName, idx)
 			if err := runScaleSet(ctx, ss, dockerClient, ssLogger, healthServer); err != nil {
 				errs <- fmt.Errorf("scaleset %q: %w", ss.ScaleSetName, err)
 			}
-		}(scaleSets[i])
+		}(i, scaleSets[i])
 	}
 
 	wg.Wait()

@@ -10,6 +10,7 @@ import (
 
 	"github.com/actions/scaleset"
 	charmlog "github.com/charmbracelet/log"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/hashicorp/go-retryablehttp"
 )
 
@@ -247,6 +248,56 @@ func NewLogger(level, format string) *slog.Logger {
 	logger := slog.New(charmlog.NewWithOptions(os.Stdout, opts))
 	slog.SetDefault(logger)
 	return logger
+}
+
+// scaleSetColors is a 5-color palette for distinguishing scale sets in logs.
+// Red is excluded to avoid confusion with error output (same rationale as stern).
+// Black/white excluded for readability on dark/light terminal backgrounds.
+var scaleSetColors = []lipgloss.Color{
+	lipgloss.Color("6"), // cyan
+	lipgloss.Color("3"), // yellow
+	lipgloss.Color("2"), // green
+	lipgloss.Color("5"), // magenta
+	lipgloss.Color("4"), // blue
+}
+
+// NewScaleSetLogger creates a logger with a colored prefix for the given scale set.
+// The color is determined by the index, cycling through the palette.
+func NewScaleSetLogger(level, format string, name string, index int) *slog.Logger {
+	var lvl charmlog.Level
+	switch strings.ToLower(level) {
+	case "debug":
+		lvl = charmlog.DebugLevel
+	case "warn":
+		lvl = charmlog.WarnLevel
+	case "error":
+		lvl = charmlog.ErrorLevel
+	default:
+		lvl = charmlog.InfoLevel
+	}
+
+	opts := charmlog.Options{
+		ReportTimestamp: true,
+		TimeFormat:      time.DateTime,
+		Level:           lvl,
+		Prefix:          name,
+	}
+
+	if strings.ToLower(format) == "json" {
+		opts.Formatter = charmlog.JSONFormatter
+	}
+
+	handler := charmlog.NewWithOptions(os.Stdout, opts)
+
+	// Apply color only for text format (not JSON)
+	if strings.ToLower(format) != "json" {
+		styles := charmlog.DefaultStyles()
+		color := scaleSetColors[index%len(scaleSetColors)]
+		styles.Prefix = lipgloss.NewStyle().Foreground(color).Bold(true)
+		handler.SetStyles(styles)
+	}
+
+	return slog.New(handler)
 }
 
 // NewScalesetClient creates a scaleset.Client using PAT authentication.

@@ -3,6 +3,9 @@ builds:
   - main: ./cmd/runscaler
     ldflags:
       - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.ShortCommit}}
+      - -X main.date={{.Date}}
     goos:
       - linux
       - darwin

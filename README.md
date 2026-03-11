@@ -149,13 +149,15 @@ jobs:
 
 ## Commands
 
-| Command              | Description                                            |
-| -------------------- | ------------------------------------------------------ |
-| `runscaler`          | Start the auto-scaler (default)                        |
-| `runscaler init`     | Generate a config file interactively                   |
-| `runscaler validate` | Validate configuration and connectivity                |
-| `runscaler status`   | Show current runner status via health endpoint         |
-| `runscaler doctor`   | Diagnose and clean up orphaned containers/VMs          |
+| Command                    | Description                                            |
+| -------------------------- | ------------------------------------------------------ |
+| `runscaler`                | Start the auto-scaler (default)                        |
+| `runscaler init`           | Generate a config file interactively                   |
+| `runscaler validate`       | Validate configuration and connectivity                |
+| `runscaler status`         | Show current runner status via health endpoint         |
+| `runscaler doctor`         | Diagnose and clean up orphaned containers/VMs          |
+| `runscaler version`        | Show version, commit, build date, and runtime info     |
+| `runscaler version --check`| Check GitHub for newer releases                        |
 
 ### Troubleshooting with `doctor`
 
@@ -334,12 +336,13 @@ Built on top of [actions/scaleset](https://github.com/actions/scaleset), the off
 Key components:
 
 ```
-cmd/runscaler/       CLI entry point, commands (init, validate, status, doctor)
+cmd/runscaler/       CLI entry point, commands (init, validate, status, doctor, version)
 internal/
   config/            Configuration management with Viper (flags + TOML)
   backend/           RunnerBackend interface + Docker/Tart implementations
   scaler/            Implements listener.Scaler for runner lifecycle
   health/            Health check HTTP server
+  versioncheck/      GitHub releases API client for update notifications
 ```
 
 The `RunnerBackend` interface abstracts container/VM lifecycle:

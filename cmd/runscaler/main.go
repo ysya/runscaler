@@ -26,6 +26,7 @@ import (
 	"github.com/ysya/runscaler/internal/config"
 	"github.com/ysya/runscaler/internal/health"
 	"github.com/ysya/runscaler/internal/scaler"
+	"github.com/ysya/runscaler/internal/versioncheck"
 )
 
 var (
@@ -98,7 +99,7 @@ func init() {
 	viper.BindPFlag("tart.pool-size", flags.Lookup("tart-pool-size"))
 
 	// Register subcommands
-	cmd.AddCommand(initCmd, validateCmd, statusCmd, doctorCmd)
+	cmd.AddCommand(initCmd, validateCmd, statusCmd, doctorCmd, versionCmd)
 }
 
 func main() {
@@ -270,6 +271,20 @@ func run(ctx context.Context, cfg config.Config) error {
 	}
 
 	logger.Info("Starting scale sets", slog.Int("count", len(scaleSets)))
+
+	// Non-blocking version check at startup
+	go func() {
+		release, err := versioncheck.Latest(ctx)
+		if err != nil {
+			return
+		}
+		if versioncheck.IsNewer(version, release.TagName) {
+			logger.Warn("A newer version of runscaler is available",
+				slog.String("current", version),
+				slog.String("latest", release.TagName),
+			)
+		}
+	}()
 
 	// Run each scale set in its own goroutine
 	var wg sync.WaitGroup

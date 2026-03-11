@@ -323,7 +323,7 @@ internal/
 The `RunnerBackend` interface abstracts container/VM lifecycle:
 
 - **`DockerBackend`** — manages runner containers via Docker API
-- **`TartBackend`** — manages macOS VMs via Tart CLI (clone → run → SSH → stop → delete)
+- **`TartBackend`** — manages macOS VMs via Tart CLI (clone → run → exec → stop → delete)
 
 The scaler implements three methods from the scaleset `Scaler` interface:
 

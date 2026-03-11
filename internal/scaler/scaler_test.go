@@ -86,7 +86,10 @@ func TestRunnerStateLifecycle(t *testing.T) {
 		t.Error("runner-1 should be in busy after markBusy")
 	}
 
-	resourceID := rs.markDone("runner-1")
+	resourceID, ok := rs.markDone("runner-1")
+	if !ok {
+		t.Fatal("markDone should return ok=true for busy runner")
+	}
 	if resourceID != "resource-1" {
 		t.Errorf("markDone returned %q, want %q", resourceID, "resource-1")
 	}
@@ -95,7 +98,10 @@ func TestRunnerStateLifecycle(t *testing.T) {
 	}
 
 	// markDone on idle runner (no job started)
-	resourceID = rs.markDone("runner-2")
+	resourceID, ok = rs.markDone("runner-2")
+	if !ok {
+		t.Fatal("markDone should return ok=true for idle runner")
+	}
 	if resourceID != "resource-2" {
 		t.Errorf("markDone(idle) returned %q, want %q", resourceID, "resource-2")
 	}
@@ -104,32 +110,26 @@ func TestRunnerStateLifecycle(t *testing.T) {
 	}
 }
 
-func TestRunnerStateMarkBusyPanics(t *testing.T) {
+func TestRunnerStateMarkBusyReturnsFalse(t *testing.T) {
 	rs := runnerState{
 		idle: make(map[string]string),
 		busy: make(map[string]string),
 	}
 
-	defer func() {
-		if r := recover(); r == nil {
-			t.Error("markBusy on non-existent runner should panic")
-		}
-	}()
-	rs.markBusy("nonexistent")
+	if rs.markBusy("nonexistent") {
+		t.Error("markBusy on non-existent runner should return false")
+	}
 }
 
-func TestRunnerStateMarkDonePanics(t *testing.T) {
+func TestRunnerStateMarkDoneReturnsFalse(t *testing.T) {
 	rs := runnerState{
 		idle: make(map[string]string),
 		busy: make(map[string]string),
 	}
 
-	defer func() {
-		if r := recover(); r == nil {
-			t.Error("markDone on non-existent runner should panic")
-		}
-	}()
-	rs.markDone("nonexistent")
+	if _, ok := rs.markDone("nonexistent"); ok {
+		t.Error("markDone on non-existent runner should return ok=false")
+	}
 }
 
 func TestRunnerStateConcurrency(t *testing.T) {

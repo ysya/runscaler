@@ -86,7 +86,9 @@ func (s *Scaler) HandleJobStarted(ctx context.Context, jobInfo *scaleset.JobStar
 		slog.String("jobId", jobInfo.JobID),
 		slog.String("runnerName", jobInfo.RunnerName),
 	)
-	s.runners.markBusy(jobInfo.RunnerName)
+	if !s.runners.markBusy(jobInfo.RunnerName) {
+		s.logger.Warn("Job started for unknown runner (already removed?)", slog.String("runnerName", jobInfo.RunnerName))
+	}
 	return nil
 }
 
@@ -99,7 +101,11 @@ func (s *Scaler) HandleJobCompleted(ctx context.Context, jobInfo *scaleset.JobCo
 		slog.String("runnerName", jobInfo.RunnerName),
 	)
 
-	resourceID := s.runners.markDone(jobInfo.RunnerName)
+	resourceID, ok := s.runners.markDone(jobInfo.RunnerName)
+	if !ok {
+		s.logger.Warn("Job completed for unknown runner (already removed?)", slog.String("runnerName", jobInfo.RunnerName))
+		return nil
+	}
 	if err := s.backend.RemoveRunner(ctx, resourceID); err != nil {
 		return fmt.Errorf("failed to remove runner: %w", err)
 	}
@@ -192,28 +198,29 @@ func (r *runnerState) addIdle(name, resourceID string) {
 	r.mu.Unlock()
 }
 
-func (r *runnerState) markBusy(name string) {
+func (r *runnerState) markBusy(name string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	resourceID, ok := r.idle[name]
 	if !ok {
-		panic("marking non-existent runner busy")
+		return false
 	}
 	delete(r.idle, name)
 	r.busy[name] = resourceID
+	return true
 }
 
-func (r *runnerState) markDone(name string) string {
+func (r *runnerState) markDone(name string) (string, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	if resourceID, ok := r.busy[name]; ok {
 		delete(r.busy, name)
-		return resourceID
+		return resourceID, true
 	}
 	if resourceID, ok := r.idle[name]; ok {
 		delete(r.idle, name)
-		return resourceID
+		return resourceID, true
 	}
-	panic("marking non-existent runner done")
+	return "", false
 }

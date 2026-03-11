@@ -78,7 +78,7 @@ flowchart LR
   | `ghcr.io/cirruslabs/macos-tahoe-xcode:latest` | 4 cores | 8 GB (8192 MB) | 120 GB |
   | `ghcr.io/cirruslabs/macos-sequoia-xcode:latest` | 4 cores | 8 GB (8192 MB) | 120 GB |
 
-  Override per VM with `tart-cpu` and `tart-memory` in config. For iOS builds (Xcode), 8 GB+ is recommended.
+  Override per VM with `cpu` and `memory` under `[tart]` in config. For iOS builds (Xcode), 8 GB+ is recommended.
 
 - A GitHub **Personal Access Token** — required scopes depend on token type and runner level:
 
@@ -174,11 +174,13 @@ min-runners = 0
 labels = ["self-hosted", "linux"]
 runner-image = "ghcr.io/actions/actions-runner:latest"
 runner-group = "default"
-docker-socket = "/var/run/docker.sock"
-dind = true
-shared-volume = "/shared"
 log-level = "info"
 log-format = "text"
+
+[docker]
+socket = "/var/run/docker.sock"
+dind = true
+shared-volume = "/shared"
 ```
 
 **Tart backend (macOS):**
@@ -191,12 +193,14 @@ name = "macos-runners"
 token = "ghp_xxx"
 max-runners = 2          # Apple limits 2 concurrent macOS VMs per host
 labels = ["self-hosted", "macOS"]
-tart-image = "ghcr.io/cirruslabs/macos-tahoe-xcode:latest"
-tart-cpu = 4             # CPU cores per VM (0 = use image default)
-tart-memory = 8192       # Memory in MB per VM (0 = use image default)
-tart-runner-dir = "/Users/admin/actions-runner"  # default
-tart-pool-size = 2       # pre-warm 2 VMs for instant job pickup (~2s vs ~30s cold boot)
 log-level = "info"
+
+[tart]
+image = "ghcr.io/cirruslabs/macos-tahoe-xcode:latest"
+cpu = 4                  # CPU cores per VM (0 = use image default)
+memory = 8192            # Memory in MB per VM (0 = use image default)
+runner-dir = "/Users/admin/actions-runner"  # default
+pool-size = 2            # pre-warm 2 VMs for instant job pickup (~2s vs ~30s cold boot)
 ```
 
 ### Token Security
@@ -221,11 +225,15 @@ Priority: `--token` flag > `RUNSCALER_TOKEN` env var > config file value (includ
 **Multiple scale sets (mixed Docker + Tart):**
 
 ```toml
-# Global settings
+# Global defaults (inherited by all scale sets)
 runner-image = "ghcr.io/actions/actions-runner:latest"
 runner-group = "default"
 max-runners = 10
 log-level = "info"
+
+[docker]
+socket = "/var/run/docker.sock"
+dind = true
 
 # Each [[scaleset]] runs independently.
 # Inherits global settings if omitted.
@@ -234,46 +242,45 @@ log-level = "info"
 url = "https://github.com/your-org"
 name = "linux-runners"
 token = "ghp_aaa"
-docker-socket = "/var/run/docker.sock"
-dind = true
 
 [[scaleset]]
 backend = "tart"
 url = "https://github.com/your-org"
 name = "macos-runners"
 token = "ghp_bbb"
-tart-image = "ghcr.io/cirruslabs/macos-tahoe-xcode:latest"
 max-runners = 2
 labels = ["self-hosted", "macOS"]
-tart-pool-size = 2
+[scaleset.tart]
+image = "ghcr.io/cirruslabs/macos-tahoe-xcode:latest"
+pool-size = 2
 ```
 
 ### CLI Flags
 
-| Flag                | Default                                 | Description                                       |
-| ------------------- | --------------------------------------- | ------------------------------------------------- |
-| `--config`          |                                         | Path to TOML config file                          |
-| `--url`             | (required)                              | Registration URL (org or repo)                    |
-| `--name`            | (required)                              | Scale set name (used as `runs-on` label)          |
-| `--token`           | (required)                              | GitHub Personal Access Token                      |
-| `--backend`         | `docker`                                | Runner backend (`docker` or `tart`)               |
-| `--max-runners`     | `10`                                    | Maximum concurrent runners                        |
-| `--min-runners`     | `0`                                     | Minimum runners to keep warm                      |
-| `--labels`          | `<name>`                                | Runner labels (comma-separated)                   |
-| `--runner-group`    | `default`                               | Runner group name                                 |
-| `--runner-image`    | `ghcr.io/actions/actions-runner:latest` | Docker image (Docker backend)                     |
-| `--docker-socket`   | `/var/run/docker.sock`                  | Docker socket path (Docker backend)               |
-| `--dind`            | `true`                                  | Mount Docker socket into runners (Docker backend) |
-| `--shared-volume`   |                                         | Shared Docker volume path (Docker backend)        |
-| `--tart-image`      |                                         | Tart VM image name (Tart backend, required)       |
-| `--tart-cpu`        | `0` (image default)                     | CPU cores per VM (Tart backend)                   |
-| `--tart-memory`     | `0` (image default)                     | Memory in MB per VM (Tart backend)                |
-| `--tart-runner-dir` | `/Users/admin/actions-runner`           | Runner install directory inside Tart VM           |
-| `--tart-pool-size`  | `0`                                     | Number of pre-warmed VMs for instant job pickup   |
-| `--log-level`       | `info`                                  | Log level (debug/info/warn/error)                 |
-| `--log-format`      | `text`                                  | Log format (text/json)                            |
-| `--dry-run`         | `false`                                 | Validate everything without starting listeners    |
-| `--health-port`     | `8080`                                  | Health check HTTP port (0 to disable)             |
+| Flag                | TOML key             | Default                                 | Description                                       |
+| ------------------- | -------------------- | --------------------------------------- | ------------------------------------------------- |
+| `--config`          |                      |                                         | Path to TOML config file                          |
+| `--url`             | `url`                | (required)                              | Registration URL (org or repo)                    |
+| `--name`            | `name`               | (required)                              | Scale set name (used as `runs-on` label)          |
+| `--token`           | `token`              | (required)                              | GitHub Personal Access Token                      |
+| `--backend`         | `backend`            | `docker`                                | Runner backend (`docker` or `tart`)               |
+| `--max-runners`     | `max-runners`        | `10`                                    | Maximum concurrent runners                        |
+| `--min-runners`     | `min-runners`        | `0`                                     | Minimum runners to keep warm                      |
+| `--labels`          | `labels`             | `<name>`                                | Runner labels (comma-separated)                   |
+| `--runner-group`    | `runner-group`       | `default`                               | Runner group name                                 |
+| `--runner-image`    | `runner-image`       | `ghcr.io/actions/actions-runner:latest` | Docker image (Docker backend)                     |
+| `--docker-socket`   | `[docker] socket`    | `/var/run/docker.sock`                  | Docker socket path (Docker backend)               |
+| `--dind`            | `[docker] dind`      | `true`                                  | Mount Docker socket into runners (Docker backend) |
+| `--shared-volume`   | `[docker] shared-volume` |                                     | Shared Docker volume path (Docker backend)        |
+| `--tart-image`      | `[tart] image`       |                                         | Tart VM image name (Tart backend, required)       |
+| `--tart-cpu`        | `[tart] cpu`         | `0` (image default)                     | CPU cores per VM (Tart backend)                   |
+| `--tart-memory`     | `[tart] memory`      | `0` (image default)                     | Memory in MB per VM (Tart backend)                |
+| `--tart-runner-dir` | `[tart] runner-dir`  | `/Users/admin/actions-runner`           | Runner install directory inside Tart VM           |
+| `--tart-pool-size`  | `[tart] pool-size`   | `0`                                     | Number of pre-warmed VMs for instant job pickup   |
+| `--log-level`       | `log-level`          | `info`                                  | Log level (debug/info/warn/error)                 |
+| `--log-format`      | `log-format`         | `text`                                  | Log format (text/json)                            |
+| `--dry-run`         | `dry-run`            | `false`                                 | Validate everything without starting listeners    |
+| `--health-port`     | `health-port`        | `8080`                                  | Health check HTTP port (0 to disable)             |
 
 ## Deployment
 

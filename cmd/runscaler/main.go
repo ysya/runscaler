@@ -34,36 +34,68 @@ var (
 	date    = ""
 )
 
-var cfg config.Config
-
 func init() {
+	// Persistent flags — available to all subcommands
+	cmd.PersistentFlags().String("config", "", "Path to config file (TOML)")
+
 	flags := cmd.Flags()
 
 	// Per-scaleset (also used as legacy single mode)
-	flags.StringVar(&cfg.RegistrationURL, "url", "", "Registration URL (e.g. https://github.com/org)")
-	flags.StringVar(&cfg.ScaleSetName, "name", "", "Name of the scale set (also used as runs-on label)")
-	flags.StringVar(&cfg.Token, "token", "", "Personal access token")
-	flags.IntVar(&cfg.MaxRunners, "max-runners", 10, "Maximum number of runners")
-	flags.IntVar(&cfg.MinRunners, "min-runners", 0, "Minimum number of runners")
-	flags.StringSliceVar(&cfg.Labels, "labels", nil, "Runner labels (comma-separated)")
-	flags.StringVar(&cfg.RunnerGroup, "runner-group", scaleset.DefaultRunnerGroup, "Runner group name")
-	flags.StringVar(&cfg.RunnerImage, "runner-image", "ghcr.io/actions/actions-runner:latest", "Docker image for runners")
+	flags.String("url", "", "Registration URL (e.g. https://github.com/org)")
+	flags.String("name", "", "Name of the scale set (also used as runs-on label)")
+	flags.String("token", "", "Personal access token")
+	flags.Int("max-runners", config.DefaultMaxRunners, "Maximum number of runners")
+	flags.Int("min-runners", 0, "Minimum number of runners")
+	flags.StringSlice("labels", nil, "Runner labels (comma-separated)")
+	flags.String("runner-group", config.DefaultRunnerGroup, "Runner group name")
+	flags.String("runner-image", config.DefaultRunnerImage, "Docker image for runners")
+	flags.String("backend", config.DefaultBackend, "Runner backend (docker or tart)")
+
+	// Docker backend
+	flags.String("docker-socket", config.DefaultDockerSocket, "Path to Docker socket")
+	flags.Bool("dind", config.DefaultDinD, "Mount Docker socket into runner containers (Docker-in-Docker)")
+	flags.String("shared-volume", "", "Shared Docker volume mounted into all runners (container path, e.g. /shared)")
+
+	// Tart backend
+	flags.String("tart-image", "", "Base Tart VM image for macOS runners")
+	flags.String("tart-runner-dir", "", "Runner binary path inside VM")
+	flags.Int("tart-cpu", 0, "Number of CPU cores for each VM (0 = use image default)")
+	flags.Int("tart-memory", 0, "Memory in MB for each VM (0 = use image default)")
+	flags.Int("tart-pool-size", 0, "Number of pre-warmed VMs to keep ready (0 = disabled)")
 
 	// Global
-	flags.StringVar(&cfg.DockerSocket, "docker-socket", "/var/run/docker.sock", "Path to Docker socket")
-	flags.BoolVar(&cfg.DinD, "dind", true, "Mount Docker socket into runner containers (Docker-in-Docker)")
-	flags.StringVar(&cfg.SharedVolume, "shared-volume", "", "Shared Docker volume mounted into all runners (container path, e.g. /shared)")
-	flags.StringVar(&cfg.LogLevel, "log-level", "info", "Log level (debug, info, warn, error)")
-	flags.StringVar(&cfg.LogFormat, "log-format", "text", "Log format (text, json)")
-
-	// Config file
-	flags.String("config", "", "Path to config file (TOML)")
+	flags.String("log-level", config.DefaultLogLevel, "Log level (debug, info, warn, error)")
+	flags.String("log-format", config.DefaultLogFormat, "Log format (text, json)")
 
 	// Operational
 	flags.Bool("dry-run", false, "Validate everything without starting listeners")
-	flags.Int("health-port", 8080, "Health check HTTP port (0 to disable)")
+	flags.Int("health-port", config.DefaultHealthPort, "Health check HTTP port (0 to disable)")
 
-	viper.BindPFlags(flags)
+	// Bind flags to viper keys explicitly.
+	// Flat keys (flag name == viper key):
+	viper.BindPFlag("url", flags.Lookup("url"))
+	viper.BindPFlag("name", flags.Lookup("name"))
+	viper.BindPFlag("token", flags.Lookup("token"))
+	viper.BindPFlag("max-runners", flags.Lookup("max-runners"))
+	viper.BindPFlag("min-runners", flags.Lookup("min-runners"))
+	viper.BindPFlag("labels", flags.Lookup("labels"))
+	viper.BindPFlag("runner-group", flags.Lookup("runner-group"))
+	viper.BindPFlag("runner-image", flags.Lookup("runner-image"))
+	viper.BindPFlag("backend", flags.Lookup("backend"))
+	viper.BindPFlag("log-level", flags.Lookup("log-level"))
+	viper.BindPFlag("log-format", flags.Lookup("log-format"))
+	viper.BindPFlag("dry-run", flags.Lookup("dry-run"))
+	viper.BindPFlag("health-port", flags.Lookup("health-port"))
+
+	// Nested keys (flag name → nested viper key for backend sub-structs):
+	viper.BindPFlag("docker.socket", flags.Lookup("docker-socket"))
+	viper.BindPFlag("docker.dind", flags.Lookup("dind"))
+	viper.BindPFlag("docker.shared-volume", flags.Lookup("shared-volume"))
+	viper.BindPFlag("tart.image", flags.Lookup("tart-image"))
+	viper.BindPFlag("tart.runner-dir", flags.Lookup("tart-runner-dir"))
+	viper.BindPFlag("tart.cpu", flags.Lookup("tart-cpu"))
+	viper.BindPFlag("tart.memory", flags.Lookup("tart-memory"))
+	viper.BindPFlag("tart.pool-size", flags.Lookup("tart-pool-size"))
 
 	// Register subcommands
 	cmd.AddCommand(initCmd, validateCmd, statusCmd)
@@ -97,23 +129,9 @@ or a single scale set via CLI flags.`,
   # Dry run (validate everything without starting listeners)
   runscaler --dry-run --config config.toml`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		// Load config file: explicit --config flag, or search default paths
-		if configFile, _ := cmd.Flags().GetString("config"); configFile != "" {
-			viper.SetConfigFile(configFile)
-			if err := viper.ReadInConfig(); err != nil {
-				return fmt.Errorf("failed to read config file: %w", err)
-			}
-		} else {
-			viper.SetConfigName("config")
-			viper.SetConfigType("toml")
-			viper.AddConfigPath(".")
-			viper.AddConfigPath("/etc/runscaler")
-			viper.ReadInConfig() // ignore error — default paths are optional
-		}
-
-		// Unmarshal all sources (flag > config file > default) into cfg
-		if err := viper.Unmarshal(&cfg); err != nil {
-			return fmt.Errorf("failed to parse configuration: %w", err)
+		cfg, err := loadConfig(cmd)
+		if err != nil {
+			return err
 		}
 
 		ctx, cancel := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
@@ -129,16 +147,14 @@ or a single scale set via CLI flags.`,
 			os.Exit(1)
 		}()
 
-		dryRun, _ := cmd.Flags().GetBool("dry-run")
-		healthPort, _ := cmd.Flags().GetInt("health-port")
-		return run(ctx, cfg, dryRun, healthPort)
+		return run(ctx, cfg)
 	},
 }
 
-func run(ctx context.Context, c config.Config, dryRun bool, healthPort int) error {
-	logger := c.Logger()
+func run(ctx context.Context, cfg config.Config) error {
+	logger := config.NewLogger(cfg.LogLevel, cfg.LogFormat)
 
-	scaleSets := c.ResolveScaleSets()
+	scaleSets := cfg.ResolveScaleSets()
 	for i := range scaleSets {
 		if err := scaleSets[i].Validate(); err != nil {
 			return fmt.Errorf("scaleset[%d] %q: %w", i, scaleSets[i].ScaleSetName, err)
@@ -174,8 +190,8 @@ func run(ctx context.Context, c config.Config, dryRun bool, healthPort int) erro
 				"  1. Ensure Docker is running\n"+
 				"  2. Add your user to the docker group: sudo usermod -aG docker $USER\n"+
 				"  3. Re-login or run: newgrp docker\n"+
-				"  4. Or check the docker-socket path in your config",
-				c.DockerSocket, err)
+				"  4. Or check the docker socket path in your config",
+				cfg.Defaults.Docker.Socket, err)
 		}
 
 		// Pull unique runner images for Docker scalesets
@@ -208,14 +224,14 @@ func run(ctx context.Context, c config.Config, dryRun bool, healthPort int) erro
 		// Ensure Tart images are available locally (auto-pull if missing)
 		pulled := make(map[string]bool)
 		for _, ss := range scaleSets {
-			if !ss.IsTart() || pulled[ss.TartImage] {
+			if !ss.IsTart() || pulled[ss.Tart.Image] {
 				continue
 			}
 			tb := backend.NewTartBackend(ss, logger)
 			if err := tb.EnsureImage(ctx); err != nil {
 				return err
 			}
-			pulled[ss.TartImage] = true
+			pulled[ss.Tart.Image] = true
 		}
 
 		// Warn about the 2-VM macOS limit
@@ -229,7 +245,7 @@ func run(ctx context.Context, c config.Config, dryRun bool, healthPort int) erro
 		}
 	}
 
-	if dryRun {
+	if cfg.DryRun {
 		logger.Info("Dry run complete — configuration and connectivity are valid",
 			slog.Int("scaleSetCount", len(scaleSets)),
 		)
@@ -238,11 +254,11 @@ func run(ctx context.Context, c config.Config, dryRun bool, healthPort int) erro
 
 	// Start health check server
 	var healthServer *health.HealthServer
-	if healthPort > 0 {
-		healthServer = health.NewHealthServer(healthPort, version)
-		ln, err := net.Listen("tcp", fmt.Sprintf(":%d", healthPort))
+	if cfg.HealthPort > 0 {
+		healthServer = health.NewHealthServer(cfg.HealthPort, version)
+		ln, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.HealthPort))
 		if err != nil {
-			return fmt.Errorf("failed to start health server on port %d: %w", healthPort, err)
+			return fmt.Errorf("failed to start health server on port %d: %w", cfg.HealthPort, err)
 		}
 		go func() {
 			if err := healthServer.Serve(ln); err != nil && err != http.ErrServerClosed {
@@ -250,7 +266,7 @@ func run(ctx context.Context, c config.Config, dryRun bool, healthPort int) erro
 			}
 		}()
 		defer healthServer.Shutdown(context.WithoutCancel(ctx))
-		logger.Info("Health check server started", slog.Int("port", healthPort))
+		logger.Info("Health check server started", slog.Int("port", cfg.HealthPort))
 	}
 
 	logger.Info("Starting scale sets", slog.Int("count", len(scaleSets)))
@@ -287,7 +303,7 @@ func run(ctx context.Context, c config.Config, dryRun bool, healthPort int) erro
 // runScaleSet manages the lifecycle of a single scale set.
 func runScaleSet(ctx context.Context, ss config.ScaleSetConfig, dockerClient *dockerclient.Client, logger *slog.Logger, h *health.HealthServer) error {
 	// Create scaleset client
-	scalesetClient, err := ss.ScalesetClient(logger)
+	scalesetClient, err := config.NewScalesetClient(ss.RegistrationURL, ss.Token, logger)
 	if err != nil {
 		return fmt.Errorf("failed to create scaleset client: %w", err)
 	}
@@ -309,7 +325,7 @@ func runScaleSet(ctx context.Context, ss config.ScaleSetConfig, dockerClient *do
 	desired := &scaleset.RunnerScaleSet{
 		Name:          ss.ScaleSetName,
 		RunnerGroupID: runnerGroupID,
-		Labels:        ss.BuildLabels(),
+		Labels:        config.BuildLabels(ss.ScaleSetName, ss.Labels),
 		RunnerSetting: scaleset.RunnerSetting{
 			DisableUpdate: true,
 		},
@@ -337,7 +353,7 @@ func runScaleSet(ctx context.Context, ss config.ScaleSetConfig, dockerClient *do
 	}
 
 	// Set user agent info
-	scalesetClient.SetSystemInfo(config.SystemInfo(scaleSet.ID))
+	scalesetClient.SetSystemInfo(config.NewSystemInfo(scaleSet.ID, version))
 
 	// Delete scale set on exit
 	defer func() {
@@ -383,9 +399,9 @@ func runScaleSet(ctx context.Context, ss config.ScaleSetConfig, dockerClient *do
 	s := scaler.NewScaler(scaleSet.ID, ss.MinRunners, ss.MaxRunners, b, scalesetClient, logger)
 	defer s.Shutdown(context.WithoutCancel(ctx))
 
-	if ss.SharedVolume != "" {
+	if ss.Docker.SharedVolume != "" {
 		logger.Info("Shared volume enabled",
-			slog.String("path", ss.SharedVolume),
+			slog.String("path", ss.Docker.SharedVolume),
 			slog.Bool("dind", ss.IsDinD()),
 		)
 	}

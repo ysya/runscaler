@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/ysya/runscaler/internal/config"
 	"github.com/ysya/runscaler/internal/health"
 )
 
@@ -25,7 +26,7 @@ var statusCmd = &cobra.Command{
 
 func init() {
 	flags := statusCmd.Flags()
-	flags.Int("health-port", 8080, "Health check server port to connect to")
+	flags.Int("health-port", config.DefaultHealthPort, "Health check server port to connect to")
 	flags.Bool("json", false, "Output raw JSON")
 }
 

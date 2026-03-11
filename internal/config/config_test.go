@@ -2,8 +2,6 @@ package config
 
 import (
 	"testing"
-
-	"github.com/actions/scaleset"
 )
 
 func validScaleSetConfig() ScaleSetConfig {
@@ -13,6 +11,7 @@ func validScaleSetConfig() ScaleSetConfig {
 		Token:           "ghp_test",
 		MaxRunners:      10,
 		MinRunners:      0,
+		Backend:         DefaultBackend,
 	}
 }
 
@@ -91,11 +90,7 @@ func TestScaleSetConfigValidate(t *testing.T) {
 
 func TestBuildLabels(t *testing.T) {
 	t.Run("custom labels", func(t *testing.T) {
-		c := ScaleSetConfig{
-			ScaleSetName: "my-runners",
-			Labels:       []string{"linux", "x64", "docker"},
-		}
-		labels := c.BuildLabels()
+		labels := BuildLabels("my-runners", []string{"linux", "x64", "docker"})
 
 		if len(labels) != 3 {
 			t.Fatalf("BuildLabels() got %d labels, want 3", len(labels))
@@ -112,11 +107,7 @@ func TestBuildLabels(t *testing.T) {
 	})
 
 	t.Run("defaults to scale set name", func(t *testing.T) {
-		c := ScaleSetConfig{
-			ScaleSetName: "my-runners",
-			Labels:       nil,
-		}
-		labels := c.BuildLabels()
+		labels := BuildLabels("my-runners", nil)
 
 		if len(labels) != 1 {
 			t.Fatalf("BuildLabels() got %d labels, want 1", len(labels))
@@ -128,15 +119,20 @@ func TestBuildLabels(t *testing.T) {
 }
 
 func TestResolveScaleSets_Legacy(t *testing.T) {
+	dindTrue := true
 	c := Config{
-		RegistrationURL: "https://github.com/test-org",
-		ScaleSetName:    "my-runners",
-		Token:           "ghp_test",
-		MaxRunners:      10,
-		RunnerImage:     "ghcr.io/actions/actions-runner:latest",
-		SharedVolume:    "/shared",
-		DockerSocket:    "/var/run/docker.sock",
-		DinD:            true,
+		Defaults: ScaleSetConfig{
+			RegistrationURL: "https://github.com/test-org",
+			ScaleSetName:    "my-runners",
+			Token:           "ghp_test",
+			MaxRunners:      10,
+			RunnerImage:     DefaultRunnerImage,
+			Docker: DockerConfig{
+				SharedVolume: "/shared",
+				Socket:       DefaultDockerSocket,
+				DinD:         &dindTrue,
+			},
+		},
 	}
 
 	sets := c.ResolveScaleSets()
@@ -149,26 +145,34 @@ func TestResolveScaleSets_Legacy(t *testing.T) {
 	if sets[0].MaxRunners != 10 {
 		t.Errorf("max-runners = %d, want 10", sets[0].MaxRunners)
 	}
-	if sets[0].SharedVolume != "/shared" {
-		t.Errorf("shared-volume = %q, want %q", sets[0].SharedVolume, "/shared")
+	if sets[0].Docker.SharedVolume != "/shared" {
+		t.Errorf("shared-volume = %q, want %q", sets[0].Docker.SharedVolume, "/shared")
 	}
-	if sets[0].DockerSocket != "/var/run/docker.sock" {
-		t.Errorf("docker-socket = %q, want %q", sets[0].DockerSocket, "/var/run/docker.sock")
+	if sets[0].Docker.Socket != DefaultDockerSocket {
+		t.Errorf("docker-socket = %q, want %q", sets[0].Docker.Socket, DefaultDockerSocket)
 	}
 	if !sets[0].IsDinD() {
 		t.Error("IsDinD() = false, want true")
 	}
+	if sets[0].Backend != DefaultBackend {
+		t.Errorf("Backend = %q, want %q", sets[0].Backend, DefaultBackend)
+	}
 }
 
 func TestResolveScaleSets_Multi(t *testing.T) {
+	dindTrue := true
 	dindFalse := false
 	c := Config{
-		RunnerImage:  "default-image:latest",
-		RunnerGroup:  "default",
-		MaxRunners:   5,
-		SharedVolume: "/shared",
-		DockerSocket: "/var/run/docker.sock",
-		DinD:         true,
+		Defaults: ScaleSetConfig{
+			RunnerImage: "default-image:latest",
+			RunnerGroup: "default",
+			MaxRunners:  5,
+			Docker: DockerConfig{
+				SharedVolume: "/shared",
+				Socket:       DefaultDockerSocket,
+				DinD:         &dindTrue,
+			},
+		},
 		ScaleSets: []ScaleSetConfig{
 			{
 				RegistrationURL: "https://github.com/org-a",
@@ -181,9 +185,11 @@ func TestResolveScaleSets_Multi(t *testing.T) {
 				Token:           "token-b",
 				RunnerImage:     "custom-image:latest",
 				MaxRunners:      20,
-				SharedVolume:    "/data",
-				DockerSocket:    "/run/podman/podman.sock",
-				DinD:            &dindFalse,
+				Docker: DockerConfig{
+					SharedVolume: "/data",
+					Socket:       "/run/podman/podman.sock",
+					DinD:         &dindFalse,
+				},
 			},
 		},
 	}
@@ -203,11 +209,11 @@ func TestResolveScaleSets_Multi(t *testing.T) {
 	if sets[0].RunnerGroup != "default" {
 		t.Errorf("sets[0].RunnerGroup = %q, want default (inherited)", sets[0].RunnerGroup)
 	}
-	if sets[0].SharedVolume != "/shared" {
-		t.Errorf("sets[0].SharedVolume = %q, want /shared (inherited)", sets[0].SharedVolume)
+	if sets[0].Docker.SharedVolume != "/shared" {
+		t.Errorf("sets[0].Docker.SharedVolume = %q, want /shared (inherited)", sets[0].Docker.SharedVolume)
 	}
-	if sets[0].DockerSocket != "/var/run/docker.sock" {
-		t.Errorf("sets[0].DockerSocket = %q, want /var/run/docker.sock (inherited)", sets[0].DockerSocket)
+	if sets[0].Docker.Socket != DefaultDockerSocket {
+		t.Errorf("sets[0].Docker.Socket = %q, want %s (inherited)", sets[0].Docker.Socket, DefaultDockerSocket)
 	}
 	if !sets[0].IsDinD() {
 		t.Error("sets[0].IsDinD() = false, want true (inherited)")
@@ -220,11 +226,11 @@ func TestResolveScaleSets_Multi(t *testing.T) {
 	if sets[1].MaxRunners != 20 {
 		t.Errorf("sets[1].MaxRunners = %d, want 20", sets[1].MaxRunners)
 	}
-	if sets[1].SharedVolume != "/data" {
-		t.Errorf("sets[1].SharedVolume = %q, want /data (per-scaleset override)", sets[1].SharedVolume)
+	if sets[1].Docker.SharedVolume != "/data" {
+		t.Errorf("sets[1].Docker.SharedVolume = %q, want /data (per-scaleset override)", sets[1].Docker.SharedVolume)
 	}
-	if sets[1].DockerSocket != "/run/podman/podman.sock" {
-		t.Errorf("sets[1].DockerSocket = %q, want podman socket (per-scaleset override)", sets[1].DockerSocket)
+	if sets[1].Docker.Socket != "/run/podman/podman.sock" {
+		t.Errorf("sets[1].Docker.Socket = %q, want podman socket (per-scaleset override)", sets[1].Docker.Socket)
 	}
 	if sets[1].IsDinD() {
 		t.Error("sets[1].IsDinD() = true, want false (per-scaleset override)")
@@ -243,7 +249,7 @@ func TestScaleSetConfigValidate_TartBackend(t *testing.T) {
 			name: "valid tart config",
 			modify: func(c *ScaleSetConfig) {
 				c.Backend = "tart"
-				c.TartImage = "macos-base:latest"
+				c.Tart.Image = "macos-base:latest"
 			},
 		},
 		{
@@ -251,7 +257,7 @@ func TestScaleSetConfigValidate_TartBackend(t *testing.T) {
 			modify: func(c *ScaleSetConfig) {
 				c.Backend = "tart"
 			},
-			wantErr: "tart-image is required",
+			wantErr: "tart image is required",
 		},
 		{
 			name: "unsupported backend",
@@ -287,12 +293,16 @@ func TestScaleSetConfigValidate_TartBackend(t *testing.T) {
 
 func TestTartDefaults(t *testing.T) {
 	c := Config{
-		RegistrationURL: "https://github.com/test-org",
-		ScaleSetName:    "macos-runners",
-		Token:           "ghp_test",
-		MaxRunners:      2,
-		Backend:         "tart",
-		TartImage:       "macos-base:latest",
+		Defaults: ScaleSetConfig{
+			RegistrationURL: "https://github.com/test-org",
+			ScaleSetName:    "macos-runners",
+			Token:           "ghp_test",
+			MaxRunners:      2,
+			Backend:         "tart",
+			Tart: TartConfig{
+				Image: "macos-base:latest",
+			},
+		},
 	}
 
 	sets := c.ResolveScaleSets()
@@ -301,8 +311,8 @@ func TestTartDefaults(t *testing.T) {
 	}
 
 	ss := sets[0]
-	if ss.TartRunnerDir != "/Users/admin/actions-runner" {
-		t.Errorf("TartRunnerDir = %q, want %q", ss.TartRunnerDir, "/Users/admin/actions-runner")
+	if ss.Tart.RunnerDir != DefaultTartRunnerDir {
+		t.Errorf("Tart.RunnerDir = %q, want %q", ss.Tart.RunnerDir, DefaultTartRunnerDir)
 	}
 	if !ss.IsTart() {
 		t.Error("IsTart() = false, want true")
@@ -311,8 +321,12 @@ func TestTartDefaults(t *testing.T) {
 
 func TestResolveScaleSets_MixedBackends(t *testing.T) {
 	c := Config{
-		MaxRunners: 5,
-		TartImage:  "global-macos:latest",
+		Defaults: ScaleSetConfig{
+			MaxRunners: 5,
+			Tart: TartConfig{
+				Image: "global-macos:latest",
+			},
+		},
 		ScaleSets: []ScaleSetConfig{
 			{
 				RegistrationURL: "https://github.com/org",
@@ -324,7 +338,9 @@ func TestResolveScaleSets_MixedBackends(t *testing.T) {
 				ScaleSetName:    "macos-runners",
 				Token:           "token-b",
 				Backend:         "tart",
-				TartImage:       "custom-macos:latest",
+				Tart: TartConfig{
+					Image: "custom-macos:latest",
+				},
 			},
 		},
 	}
@@ -338,26 +354,114 @@ func TestResolveScaleSets_MixedBackends(t *testing.T) {
 	if sets[0].IsTart() {
 		t.Error("sets[0] should not be tart")
 	}
+	if sets[0].Backend != DefaultBackend {
+		t.Errorf("sets[0].Backend = %q, want %q", sets[0].Backend, DefaultBackend)
+	}
 
 	// Second: Tart with custom image
 	if !sets[1].IsTart() {
 		t.Error("sets[1] should be tart")
 	}
-	if sets[1].TartImage != "custom-macos:latest" {
-		t.Errorf("sets[1].TartImage = %q, want custom", sets[1].TartImage)
+	if sets[1].Tart.Image != "custom-macos:latest" {
+		t.Errorf("sets[1].Tart.Image = %q, want custom", sets[1].Tart.Image)
 	}
 }
 
-func TestSystemInfo(t *testing.T) {
-	info := SystemInfo(42)
+func TestNewSystemInfo(t *testing.T) {
+	info := NewSystemInfo(42, "1.0.0")
 	if info.ScaleSetID != 42 {
 		t.Errorf("ScaleSetID = %d, want 42", info.ScaleSetID)
 	}
-	if info.System != "dockerscaleset" {
-		t.Errorf("System = %q, want %q", info.System, "dockerscaleset")
+	if info.System != DefaultSystemName {
+		t.Errorf("System = %q, want %q", info.System, DefaultSystemName)
 	}
-	if info == (scaleset.SystemInfo{}) {
-		t.Error("SystemInfo() returned zero value")
+	if info.Version != "1.0.0" {
+		t.Errorf("Version = %q, want %q", info.Version, "1.0.0")
+	}
+}
+
+func TestIsDinD_Default(t *testing.T) {
+	ss := ScaleSetConfig{} // DinD is nil
+	if !ss.IsDinD() {
+		t.Error("IsDinD() with nil should return DefaultDinD (true)")
+	}
+
+	dindFalse := false
+	ss.Docker.DinD = &dindFalse
+	if ss.IsDinD() {
+		t.Error("IsDinD() with explicit false should return false")
+	}
+
+	dindTrue := true
+	ss.Docker.DinD = &dindTrue
+	if !ss.IsDinD() {
+		t.Error("IsDinD() with explicit true should return true")
+	}
+}
+
+func TestApplyDefaults_BackendDefault(t *testing.T) {
+	ss := ScaleSetConfig{} // Backend is ""
+	ss.applyDefaults()
+	if ss.Backend != DefaultBackend {
+		t.Errorf("applyDefaults() Backend = %q, want %q", ss.Backend, DefaultBackend)
+	}
+}
+
+func TestMergeDefaults(t *testing.T) {
+	dindTrue := true
+	defaults := ScaleSetConfig{
+		RunnerImage: "default-image:latest",
+		RunnerGroup: "default",
+		MaxRunners:  10,
+		Backend:     DefaultBackend,
+		Docker: DockerConfig{
+			Socket:       DefaultDockerSocket,
+			DinD:         &dindTrue,
+			SharedVolume: "/shared",
+		},
+		Tart: TartConfig{
+			Image:     "global-macos:latest",
+			RunnerDir: DefaultTartRunnerDir,
+			CPU:       4,
+			Memory:    8192,
+			PoolSize:  2,
+		},
+	}
+
+	// Scaleset with partial overrides
+	dst := ScaleSetConfig{
+		RegistrationURL: "https://github.com/org",
+		ScaleSetName:    "test",
+		Token:           "ghp_test",
+		RunnerImage:     "custom-image:latest", // override
+		// Everything else should be inherited
+	}
+
+	mergeDefaults(&dst, &defaults)
+
+	if dst.RunnerImage != "custom-image:latest" {
+		t.Errorf("RunnerImage should keep override, got %q", dst.RunnerImage)
+	}
+	if dst.RunnerGroup != "default" {
+		t.Errorf("RunnerGroup should inherit, got %q", dst.RunnerGroup)
+	}
+	if dst.MaxRunners != 10 {
+		t.Errorf("MaxRunners should inherit, got %d", dst.MaxRunners)
+	}
+	if dst.Docker.Socket != DefaultDockerSocket {
+		t.Errorf("Docker.Socket should inherit, got %q", dst.Docker.Socket)
+	}
+	if !dst.IsDinD() {
+		t.Error("IsDinD() should inherit true")
+	}
+	if dst.Docker.SharedVolume != "/shared" {
+		t.Errorf("Docker.SharedVolume should inherit, got %q", dst.Docker.SharedVolume)
+	}
+	if dst.Tart.Image != "global-macos:latest" {
+		t.Errorf("Tart.Image should inherit, got %q", dst.Tart.Image)
+	}
+	if dst.Tart.CPU != 4 {
+		t.Errorf("Tart.CPU should inherit, got %d", dst.Tart.CPU)
 	}
 }
 

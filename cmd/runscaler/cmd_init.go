@@ -9,6 +9,8 @@ import (
 
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
+
+	"github.com/ysya/runscaler/internal/config"
 )
 
 var initCmd = &cobra.Command{
@@ -28,9 +30,9 @@ func init() {
 	flags.String("url", "", "Registration URL (e.g. https://github.com/org)")
 	flags.String("name", "", "Scale set name")
 	flags.String("token", "", "Personal access token")
-	flags.Int("max-runners", 10, "Maximum concurrent runners")
+	flags.Int("max-runners", config.DefaultMaxRunners, "Maximum concurrent runners")
 	flags.String("backend", "", "Runner backend (docker or tart)")
-	flags.Bool("dind", true, "Enable Docker-in-Docker")
+	flags.Bool("dind", config.DefaultDinD, "Enable Docker-in-Docker")
 	flags.String("shared-volume", "", "Shared volume path (e.g. /shared)")
 	flags.String("tart-image", "", "Base Tart VM image for macOS runners")
 	flags.String("output", "config.toml", "Output file path")
@@ -80,7 +82,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 		}
 	}
 	if !cmd.Flags().Changed("max-runners") {
-		maxRunners, err = promptInt("Maximum concurrent runners", 10)
+		maxRunners, err = promptInt("Maximum concurrent runners", config.DefaultMaxRunners)
 		if err != nil {
 			return err
 		}
@@ -95,7 +97,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 		if useTart {
 			backend = "tart"
 		} else {
-			backend = "docker"
+			backend = config.DefaultBackend
 		}
 	}
 
@@ -131,23 +133,33 @@ min-runners = 0
 # Backend: "docker" (Linux containers) or "tart" (macOS VMs)
 backend = "tart"
 
+[tart]
 # Base Tart VM image (must have GitHub Actions runner pre-installed)
-tart-image = %q
+image = %q
 
 # Path to the runner binary inside the VM
-tart-runner-dir = "/Users/admin/actions-runner"
+runner-dir = %q
 
 # Logging
-log-level = "info"
-log-format = "text"
+[docker]
+# Not used with tart backend, but shown for reference
+# socket = %q
+
+# --- Global ---
+log-level = %q
+log-format = %q
 
 # Health check server port (0 to disable)
-# health-port = 8080
-`, url, name, token, maxRunners, tartImage)
+# health-port = %d
+`, url, name, token, maxRunners,
+			tartImage, config.DefaultTartRunnerDir,
+			config.DefaultDockerSocket,
+			config.DefaultLogLevel, config.DefaultLogFormat,
+			config.DefaultHealthPort)
 	} else {
 		// Docker backend config
 		if !cmd.Flags().Changed("dind") {
-			dind, err = promptYN("Enable Docker-in-Docker?", true)
+			dind, err = promptYN("Enable Docker-in-Docker?", config.DefaultDinD)
 			if err != nil {
 				return err
 			}
@@ -181,23 +193,27 @@ max-runners = %d
 min-runners = 0
 
 # Docker image for runners
-runner-image = "ghcr.io/actions/actions-runner:latest"
+runner-image = %q
 
+# Backend: "docker" (Linux containers) or "tart" (macOS VMs)
+backend = %q
+
+[docker]
 # Docker-in-Docker: mount host Docker socket into runners
 dind = %v
 
 # Docker socket path
-docker-socket = "/var/run/docker.sock"
+socket = %q
 
 # Shared volume for cross-job data sharing (optional)
 shared-volume = %q
 
-# Logging
-log-level = "info"
-log-format = "text"
+# --- Global ---
+log-level = %q
+log-format = %q
 
 # Health check server port (0 to disable)
-# health-port = 8080
+# health-port = %d
 
 # --- Multi-org / mixed backend example ---
 # Uncomment and duplicate [[scaleset]] blocks:
@@ -214,9 +230,14 @@ log-format = "text"
 # name = "macos-runners"
 # token = "env:TOKEN_ORG_A"
 # backend = "tart"
-# tart-image = "ghcr.io/cirruslabs/macos-sequoia-xcode:latest"
 # max-runners = 2
-`, url, name, token, maxRunners, dind, sharedVolume)
+# [scaleset.tart]
+# image = "ghcr.io/cirruslabs/macos-sequoia-xcode:latest"
+`, url, name, token, maxRunners,
+			config.DefaultRunnerImage, config.DefaultBackend,
+			dind, config.DefaultDockerSocket, sharedVolume,
+			config.DefaultLogLevel, config.DefaultLogFormat,
+			config.DefaultHealthPort)
 	}
 
 	if err := os.WriteFile(output, []byte(configContent), 0600); err != nil {

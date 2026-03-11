@@ -13,41 +13,29 @@ import (
 	"github.com/hashicorp/go-retryablehttp"
 )
 
-// Config holds global configuration for runscaler.
+// Config holds the complete runscaler configuration.
+//
+// Global-only fields (LogLevel, LogFormat, HealthPort, DryRun) are never
+// inherited by scale sets. The Defaults field is squashed so its keys
+// appear at the TOML top level; it doubles as the single-mode config
+// when no [[scaleset]] entries exist.
 type Config struct {
-	// Global settings
-	DockerSocket string `mapstructure:"docker-socket"`
-	DinD         bool   `mapstructure:"dind"`
-	SharedVolume string `mapstructure:"shared-volume"`
-	LogLevel     string `mapstructure:"log-level"`
-	LogFormat    string `mapstructure:"log-format"`
+	// Global settings (not inherited by scale sets)
+	LogLevel   string `mapstructure:"log-level"`
+	LogFormat  string `mapstructure:"log-format"`
+	HealthPort int    `mapstructure:"health-port"`
+	DryRun     bool   `mapstructure:"dry-run"`
 
-	// Backend selection: "docker" (default) or "tart"
-	Backend string `mapstructure:"backend"`
+	// Default values for scale sets + single-mode fields.
+	// Squashed so TOML keys (url, name, backend, etc.) stay at the top level.
+	Defaults ScaleSetConfig `mapstructure:",squash"`
 
-	// Tart backend settings (global defaults)
-	TartImage     string `mapstructure:"tart-image"`
-	TartRunnerDir string `mapstructure:"tart-runner-dir"`
-	TartCPU       int    `mapstructure:"tart-cpu"`
-	TartMemory    int    `mapstructure:"tart-memory"`
-	TartPoolSize  int    `mapstructure:"tart-pool-size"`
-
-	// Scale sets (multi-org support)
+	// Multi-scaleset mode: each entry inherits from Defaults.
 	ScaleSets []ScaleSetConfig `mapstructure:"scaleset"`
-
-	// Legacy top-level fields for single scale set / CLI mode
-	RegistrationURL string   `mapstructure:"url"`
-	ScaleSetName    string   `mapstructure:"name"`
-	Token           string   `mapstructure:"token"`
-	MaxRunners      int      `mapstructure:"max-runners"`
-	MinRunners      int      `mapstructure:"min-runners"`
-	Labels          []string `mapstructure:"labels"`
-	RunnerGroup     string   `mapstructure:"runner-group"`
-	RunnerImage     string   `mapstructure:"runner-image"`
 }
 
 // ScaleSetConfig holds per-scale-set configuration.
-// Fields left at their zero value inherit from the global Config.
+// In multi-mode, fields left at their zero value inherit from Config.Defaults.
 type ScaleSetConfig struct {
 	RegistrationURL string   `mapstructure:"url"`
 	ScaleSetName    string   `mapstructure:"name"`
@@ -57,112 +45,116 @@ type ScaleSetConfig struct {
 	Labels          []string `mapstructure:"labels"`
 	RunnerGroup     string   `mapstructure:"runner-group"`
 	RunnerImage     string   `mapstructure:"runner-image"`
-	SharedVolume    string   `mapstructure:"shared-volume"`
-	DockerSocket    string   `mapstructure:"docker-socket"`
-	DinD            *bool    `mapstructure:"dind"` // pointer to distinguish "not set" from "false"
+	Backend         string   `mapstructure:"backend"`
 
-	// Backend selection: "docker" (default) or "tart"
-	Backend string `mapstructure:"backend"`
+	// Docker backend settings
+	Docker DockerConfig `mapstructure:"docker"`
 
-	// Tart backend settings
-	TartImage     string `mapstructure:"tart-image"`      // Base VM image (e.g. "ghcr.io/cirruslabs/macos-sequoia-xcode:latest")
-	TartRunnerDir string `mapstructure:"tart-runner-dir"` // Runner binary path in VM (default: "/Users/admin/actions-runner")
-	TartCPU       int    `mapstructure:"tart-cpu"`        // Number of CPU cores for each VM (0 = use image default)
-	TartMemory    int    `mapstructure:"tart-memory"`     // Memory in MB for each VM (0 = use image default)
-	TartPoolSize  int    `mapstructure:"tart-pool-size"`  // Number of pre-warmed VMs to keep ready (0 = disabled)
+	// Tart VM backend settings
+	Tart TartConfig `mapstructure:"tart"`
 }
 
-// ResolveScaleSets returns the list of scale set configs to run.
-// If [[scaleset]] entries exist, use them. Otherwise fall back to
-// top-level fields (single scale set / CLI mode).
+// DockerConfig holds Docker-specific backend settings.
+type DockerConfig struct {
+	Socket       string `mapstructure:"socket"`
+	DinD         *bool  `mapstructure:"dind"`          // pointer: nil = inherit default (true)
+	SharedVolume string `mapstructure:"shared-volume"`
+}
+
+// TartConfig holds Tart VM-specific backend settings.
+type TartConfig struct {
+	Image     string `mapstructure:"image"`      // Base VM image (e.g. "ghcr.io/cirruslabs/macos-sequoia-xcode:latest")
+	RunnerDir string `mapstructure:"runner-dir"` // Runner binary path in VM
+	CPU       int    `mapstructure:"cpu"`         // Number of CPU cores (0 = use image default)
+	Memory    int    `mapstructure:"memory"`      // Memory in MB (0 = use image default)
+	PoolSize  int    `mapstructure:"pool-size"`   // Pre-warmed VM count (0 = disabled)
+}
+
+// ResolveScaleSets returns the resolved list of scale set configs.
+// If [[scaleset]] entries exist, each inherits unset fields from Defaults.
+// Otherwise, Defaults itself is returned as a single-element slice.
 func (c *Config) ResolveScaleSets() []ScaleSetConfig {
 	if len(c.ScaleSets) > 0 {
-		// Apply defaults from global config to each scale set
 		for i := range c.ScaleSets {
-			ss := &c.ScaleSets[i]
-			if ss.RunnerImage == "" {
-				ss.RunnerImage = c.RunnerImage
-			}
-			if ss.RunnerGroup == "" {
-				ss.RunnerGroup = c.RunnerGroup
-			}
-			if ss.MaxRunners == 0 {
-				ss.MaxRunners = c.MaxRunners
-			}
-			if ss.SharedVolume == "" {
-				ss.SharedVolume = c.SharedVolume
-			}
-			if ss.DockerSocket == "" {
-				ss.DockerSocket = c.DockerSocket
-			}
-			if ss.DinD == nil {
-				ss.DinD = &c.DinD
-			}
-			if ss.Backend == "" {
-				ss.Backend = c.Backend
-			}
-			if ss.TartImage == "" {
-				ss.TartImage = c.TartImage
-			}
-			if ss.TartRunnerDir == "" {
-				ss.TartRunnerDir = c.TartRunnerDir
-			}
-			if ss.TartCPU == 0 {
-				ss.TartCPU = c.TartCPU
-			}
-			if ss.TartMemory == 0 {
-				ss.TartMemory = c.TartMemory
-			}
-			if ss.TartPoolSize == 0 {
-				ss.TartPoolSize = c.TartPoolSize
-			}
-			ss.ApplyTartDefaults()
-			ss.ResolveEnvToken()
+			mergeDefaults(&c.ScaleSets[i], &c.Defaults)
 		}
 		return c.ScaleSets
 	}
 
-	// Legacy single scale set mode
-	ss := ScaleSetConfig{
-		RegistrationURL: c.RegistrationURL,
-		ScaleSetName:    c.ScaleSetName,
-		Token:           c.Token,
-		MaxRunners:      c.MaxRunners,
-		MinRunners:      c.MinRunners,
-		Labels:          c.Labels,
-		RunnerGroup:     c.RunnerGroup,
-		RunnerImage:     c.RunnerImage,
-		SharedVolume:    c.SharedVolume,
-		DockerSocket:    c.DockerSocket,
-		DinD:            &c.DinD,
-		Backend:         c.Backend,
-		TartImage:       c.TartImage,
-		TartRunnerDir:   c.TartRunnerDir,
-		TartCPU:         c.TartCPU,
-		TartMemory:      c.TartMemory,
-		TartPoolSize:    c.TartPoolSize,
-	}
-	ss.ApplyTartDefaults()
-	ss.ResolveEnvToken()
+	// Single scale set mode: use Defaults directly.
+	ss := c.Defaults
+	ss.applyDefaults()
+	ss.resolveEnvToken()
 	return []ScaleSetConfig{ss}
+}
+
+// mergeDefaults fills zero-valued fields in dst from defaults.
+// Identity fields (URL, Name, Token, Labels) are never inherited.
+// MinRunners is not inherited because 0 is a valid explicit value.
+func mergeDefaults(dst *ScaleSetConfig, defaults *ScaleSetConfig) {
+	// Common
+	if dst.RunnerImage == "" {
+		dst.RunnerImage = defaults.RunnerImage
+	}
+	if dst.RunnerGroup == "" {
+		dst.RunnerGroup = defaults.RunnerGroup
+	}
+	if dst.MaxRunners == 0 {
+		dst.MaxRunners = defaults.MaxRunners
+	}
+	if dst.Backend == "" {
+		dst.Backend = defaults.Backend
+	}
+
+	// Docker
+	if dst.Docker.Socket == "" {
+		dst.Docker.Socket = defaults.Docker.Socket
+	}
+	if dst.Docker.DinD == nil {
+		dst.Docker.DinD = defaults.Docker.DinD
+	}
+	if dst.Docker.SharedVolume == "" {
+		dst.Docker.SharedVolume = defaults.Docker.SharedVolume
+	}
+
+	// Tart
+	if dst.Tart.Image == "" {
+		dst.Tart.Image = defaults.Tart.Image
+	}
+	if dst.Tart.RunnerDir == "" {
+		dst.Tart.RunnerDir = defaults.Tart.RunnerDir
+	}
+	if dst.Tart.CPU == 0 {
+		dst.Tart.CPU = defaults.Tart.CPU
+	}
+	if dst.Tart.Memory == 0 {
+		dst.Tart.Memory = defaults.Tart.Memory
+	}
+	if dst.Tart.PoolSize == 0 {
+		dst.Tart.PoolSize = defaults.Tart.PoolSize
+	}
+
+	dst.applyDefaults()
+	dst.resolveEnvToken()
+}
+
+// applyDefaults fills in backend-specific defaults that depend on
+// the backend selection (e.g. TartRunnerDir when backend is "tart").
+func (ss *ScaleSetConfig) applyDefaults() {
+	if ss.Backend == "" {
+		ss.Backend = DefaultBackend
+	}
+	if ss.Backend == "tart" && ss.Tart.RunnerDir == "" {
+		ss.Tart.RunnerDir = DefaultTartRunnerDir
+	}
 }
 
 // IsDinD returns whether Docker-in-Docker is enabled for this scale set.
 func (ss *ScaleSetConfig) IsDinD() bool {
-	if ss.DinD != nil {
-		return *ss.DinD
+	if ss.Docker.DinD != nil {
+		return *ss.Docker.DinD
 	}
-	return true // default
-}
-
-// ApplyTartDefaults fills in default values for Tart backend settings.
-func (ss *ScaleSetConfig) ApplyTartDefaults() {
-	if ss.Backend != "tart" {
-		return
-	}
-	if ss.TartRunnerDir == "" {
-		ss.TartRunnerDir = "/Users/admin/actions-runner"
-	}
+	return DefaultDinD
 }
 
 // IsTart returns whether this scale set uses the Tart VM backend.
@@ -170,11 +162,11 @@ func (ss *ScaleSetConfig) IsTart() bool {
 	return ss.Backend == "tart"
 }
 
-// ResolveEnvToken resolves the token value from environment variables.
+// resolveEnvToken resolves the token value from environment variables.
 // Supports two patterns:
 //   - token = "env:VARIABLE_NAME" — reads from the named env var
 //   - Empty token with RUNSCALER_TOKEN env var set — uses that as fallback
-func (ss *ScaleSetConfig) ResolveEnvToken() {
+func (ss *ScaleSetConfig) resolveEnvToken() {
 	if strings.HasPrefix(ss.Token, "env:") {
 		envName := strings.TrimPrefix(ss.Token, "env:")
 		ss.Token = os.Getenv(envName)
@@ -212,30 +204,60 @@ func (ss *ScaleSetConfig) Validate() error {
 	}
 
 	switch ss.Backend {
-	case "", "docker":
+	case DefaultBackend:
 		// Docker backend: no additional validation
 	case "tart":
-		if ss.TartImage == "" {
-			return fmt.Errorf("tart-image is required when backend is \"tart\"")
+		if ss.Tart.Image == "" {
+			return fmt.Errorf("tart image is required when backend is \"tart\"")
 		}
 	default:
-		return fmt.Errorf("unsupported backend %q (must be \"docker\" or \"tart\")", ss.Backend)
+		return fmt.Errorf("unsupported backend %q (must be %q or \"tart\")", ss.Backend, DefaultBackend)
 	}
 
 	return nil
 }
 
-// ScalesetClient creates a scaleset.Client using PAT authentication.
-// A custom retryablehttp client is used to override its default logger,
-// which otherwise prints unformatted [DEBUG] lines to stderr.
-func (ss *ScaleSetConfig) ScalesetClient(logger *slog.Logger) (*scaleset.Client, error) {
+// --- Standalone utility functions (not struct methods) ---
+
+// NewLogger creates a structured logger with the given level and format,
+// and sets it as the process-wide default.
+func NewLogger(level, format string) *slog.Logger {
+	var lvl charmlog.Level
+	switch strings.ToLower(level) {
+	case "debug":
+		lvl = charmlog.DebugLevel
+	case "warn":
+		lvl = charmlog.WarnLevel
+	case "error":
+		lvl = charmlog.ErrorLevel
+	default:
+		lvl = charmlog.InfoLevel
+	}
+
+	opts := charmlog.Options{
+		ReportTimestamp: true,
+		TimeFormat:      time.DateTime,
+		Level:           lvl,
+	}
+
+	if strings.ToLower(format) == "json" {
+		opts.Formatter = charmlog.JSONFormatter
+	}
+
+	logger := slog.New(charmlog.NewWithOptions(os.Stdout, opts))
+	slog.SetDefault(logger)
+	return logger
+}
+
+// NewScalesetClient creates a scaleset.Client using PAT authentication.
+func NewScalesetClient(registrationURL, token string, logger *slog.Logger) (*scaleset.Client, error) {
 	httpClient := retryablehttp.NewClient()
 	httpClient.Logger = nil // suppress noisy "performing request" debug lines
 
 	client, err := scaleset.NewClientWithPersonalAccessToken(
 		scaleset.NewClientWithPersonalAccessTokenConfig{
-			GitHubConfigURL:     ss.RegistrationURL,
-			PersonalAccessToken: ss.Token,
+			GitHubConfigURL:     registrationURL,
+			PersonalAccessToken: token,
 		},
 		scaleset.WithLogger(logger),
 		scaleset.WithRetryableHTTPClint(httpClient),
@@ -246,46 +268,11 @@ func (ss *ScaleSetConfig) ScalesetClient(logger *slog.Logger) (*scaleset.Client,
 	return client, nil
 }
 
-// Logger creates a structured logger using charmbracelet/log and sets it
-// as the process-wide default. This unifies all logging output:
-// slog calls, Go standard log calls, and any library using either.
-func (c *Config) Logger() *slog.Logger {
-	var level charmlog.Level
-	switch strings.ToLower(c.LogLevel) {
-	case "debug":
-		level = charmlog.DebugLevel
-	case "warn":
-		level = charmlog.WarnLevel
-	case "error":
-		level = charmlog.ErrorLevel
-	default:
-		level = charmlog.InfoLevel
-	}
-
-	opts := charmlog.Options{
-		ReportTimestamp: true,
-		TimeFormat:      time.DateTime,
-		Level:           level,
-	}
-
-	if strings.ToLower(c.LogFormat) == "json" {
-		opts.Formatter = charmlog.JSONFormatter
-	}
-
-	logger := slog.New(charmlog.NewWithOptions(os.Stdout, opts))
-
-	// Set as process-wide default: unifies slog.Info(), log.Println(), etc.
-	slog.SetDefault(logger)
-
-	return logger
-}
-
 // BuildLabels converts string labels to scaleset.Label slice.
 // If no labels are provided, uses the scale set name as default.
-func (ss *ScaleSetConfig) BuildLabels() []scaleset.Label {
-	labels := ss.Labels
+func BuildLabels(name string, labels []string) []scaleset.Label {
 	if len(labels) == 0 {
-		labels = []string{ss.ScaleSetName}
+		labels = []string{name}
 	}
 
 	result := make([]scaleset.Label, len(labels))
@@ -298,11 +285,11 @@ func (ss *ScaleSetConfig) BuildLabels() []scaleset.Label {
 	return result
 }
 
-// SystemInfo returns metadata for the scaleset client user agent.
-func SystemInfo(scaleSetID int) scaleset.SystemInfo {
+// NewSystemInfo returns metadata for the scaleset client user agent.
+func NewSystemInfo(scaleSetID int, version string) scaleset.SystemInfo {
 	return scaleset.SystemInfo{
-		System:     "dockerscaleset",
-		Version:    "0.1.0",
+		System:     DefaultSystemName,
+		Version:    version,
 		ScaleSetID: scaleSetID,
 	}
 }

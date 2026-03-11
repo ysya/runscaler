@@ -8,7 +8,6 @@ import (
 
 	dockerclient "github.com/docker/docker/client"
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 
 	"github.com/ysya/runscaler/internal/config"
 )
@@ -17,32 +16,18 @@ var validateCmd = &cobra.Command{
 	Use:   "validate",
 	Short: "Validate configuration and connectivity",
 	Long:  "Check that the config file is valid, Docker/Tart is reachable, and GitHub tokens work.",
-	Example: `  runscaler validate --config config.toml
-  runscaler validate --url https://github.com/org --name test --token ghp_xxx`,
+	Example: `  runscaler validate --config config.toml`,
 	RunE: runValidate,
 }
 
-func init() {
-	flags := validateCmd.Flags()
-	flags.String("config", "", "Path to config file (TOML)")
-}
-
 func runValidate(cmd *cobra.Command, args []string) error {
-	// Load config using same logic as root command
-	if configFile, _ := cmd.Flags().GetString("config"); configFile != "" {
-		viper.SetConfigFile(configFile)
-		if err := viper.ReadInConfig(); err != nil {
-			return fmt.Errorf("failed to read config file: %w", err)
-		}
-	}
-
-	var c config.Config
-	if err := viper.Unmarshal(&c); err != nil {
-		return fmt.Errorf("failed to parse configuration: %w", err)
+	cfg, err := loadConfig(cmd)
+	if err != nil {
+		return err
 	}
 
 	// Validate scale sets
-	scaleSets := c.ResolveScaleSets()
+	scaleSets := cfg.ResolveScaleSets()
 	if len(scaleSets) == 0 {
 		return fmt.Errorf("no scale sets configured")
 	}
@@ -52,12 +37,8 @@ func runValidate(cmd *cobra.Command, args []string) error {
 			fmt.Printf("  ✗ scaleset[%d] %q: %s\n", i, scaleSets[i].ScaleSetName, err)
 			return fmt.Errorf("validation failed")
 		}
-		b := scaleSets[i].Backend
-		if b == "" {
-			b = "docker"
-		}
 		fmt.Printf("  ✓ scaleset[%d] %q — backend=%s url=%s max=%d min=%d\n",
-			i, scaleSets[i].ScaleSetName, b, scaleSets[i].RegistrationURL,
+			i, scaleSets[i].ScaleSetName, scaleSets[i].Backend, scaleSets[i].RegistrationURL,
 			scaleSets[i].MaxRunners, scaleSets[i].MinRunners,
 		)
 	}
@@ -95,7 +76,7 @@ func runValidate(cmd *cobra.Command, args []string) error {
 			fmt.Println("  3. Re-login or run: newgrp docker")
 			return fmt.Errorf("validation failed")
 		}
-		fmt.Printf("  ✓ Docker is reachable at %s\n", c.DockerSocket)
+		fmt.Printf("  ✓ Docker is reachable at %s\n", cfg.Defaults.Docker.Socket)
 	}
 
 	// Test Tart binary (only if needed)
@@ -116,16 +97,16 @@ func runValidate(cmd *cobra.Command, args []string) error {
 	}
 
 	// Show shared volume status
-	if c.SharedVolume != "" {
-		fmt.Printf("  ✓ Shared volume enabled at %s\n", c.SharedVolume)
+	if cfg.Defaults.Docker.SharedVolume != "" {
+		fmt.Printf("  ✓ Shared volume enabled at %s\n", cfg.Defaults.Docker.SharedVolume)
 	} else if needsDocker {
 		fmt.Println("  - Shared volume: not configured (cross-job sharing will not work)")
 	}
 
 	// Test GitHub API connectivity for each scale set
+	logger := config.NewLogger(cfg.LogLevel, cfg.LogFormat)
 	for i, ss := range scaleSets {
-		logger := c.Logger()
-		client, err := ss.ScalesetClient(logger)
+		client, err := config.NewScalesetClient(ss.RegistrationURL, ss.Token, logger)
 		if err != nil {
 			fmt.Printf("  ✗ scaleset[%d] %q GitHub API: %s\n", i, ss.ScaleSetName, err)
 			return fmt.Errorf("validation failed")

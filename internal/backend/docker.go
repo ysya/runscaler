@@ -45,9 +45,9 @@ func NewDockerBackend(ss config.ScaleSetConfig, client DockerAPI, logger *slog.L
 	return &DockerBackend{
 		dockerClient: client,
 		runnerImage:  ss.RunnerImage,
-		dockerSocket: ss.DockerSocket,
+		dockerSocket: ss.Docker.Socket,
 		dind:         ss.IsDinD(),
-		sharedVolume: ss.SharedVolume,
+		sharedVolume: ss.Docker.SharedVolume,
 		logger:       logger,
 	}
 }

@@ -3,16 +3,31 @@
 
 # --- Global settings ---
 
-docker-socket = "/var/run/docker.sock"
-dind = true
-# shared-volume = "/shared"
 log-level = "info"
 log-format = "text"
+health-port = 8080
 
-# Default runner image and group (inherited by scale sets if not specified)
+# --- Defaults (inherited by all scale sets unless overridden) ---
+
+# Backend: "docker" (Linux containers) or "tart" (macOS VMs)
+backend = "docker"
+
+# Default runner image and group
 runner-image = "ghcr.io/actions/actions-runner:latest"
 runner-group = "default"
 max-runners = 10
+
+[docker]
+socket = "/var/run/docker.sock"
+dind = true
+# shared-volume = "/shared"
+
+# [tart]
+# image = "ghcr.io/cirruslabs/macos-sequoia-xcode:latest"
+# runner-dir = "/Users/admin/actions-runner"
+# cpu = 0        # 0 = use image default
+# memory = 0     # MB, 0 = use image default
+# pool-size = 0  # pre-warmed VMs, 0 = disabled
 
 # --- Single scale set mode ---
 # Use top-level fields when managing a single org/repo.
@@ -27,8 +42,8 @@ max-runners = 10
 
 # --- Multiple scale sets mode ---
 # Use [[scaleset]] entries to manage multiple orgs/repos from one process.
-# Each entry inherits runner-image, runner-group, and max-runners from
-# the global settings above unless explicitly overridden.
+# Each entry inherits runner-image, runner-group, max-runners, [docker],
+# and [tart] from the defaults above unless explicitly overridden.
 
 # [[scaleset]]
 # url = "https://github.com/org-a"
@@ -42,3 +57,12 @@ max-runners = 10
 # token = "ghp_bbb"
 # runner-image = "custom-runner:latest"
 # labels = ["linux", "gpu"]
+
+# [[scaleset]]
+# url = "https://github.com/org-c"
+# name = "macos-runners"
+# token = "env:TOKEN_ORG_C"
+# backend = "tart"
+# max-runners = 2
+# [scaleset.tart]
+# image = "ghcr.io/cirruslabs/macos-sequoia-xcode:latest"

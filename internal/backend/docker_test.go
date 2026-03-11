@@ -144,6 +144,11 @@ func TestDockerBackend_StartRunner_WithSharedVolume(t *testing.T) {
 	if !foundSharedDir {
 		t.Errorf("env should contain SHARED_DIR=/shared, got: %v", call.config.Env)
 	}
+
+	// Verify managed-by label
+	if label := call.config.Labels["managed-by"]; label != "runscaler" {
+		t.Errorf("label managed-by = %q, want %q", label, "runscaler")
+	}
 }
 
 func TestDockerBackend_StartRunner_WithoutSharedVolume(t *testing.T) {

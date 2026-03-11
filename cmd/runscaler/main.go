@@ -98,7 +98,7 @@ func init() {
 	viper.BindPFlag("tart.pool-size", flags.Lookup("tart-pool-size"))
 
 	// Register subcommands
-	cmd.AddCommand(initCmd, validateCmd, statusCmd)
+	cmd.AddCommand(initCmd, validateCmd, statusCmd, doctorCmd)
 }
 
 func main() {

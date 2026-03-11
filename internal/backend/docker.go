@@ -89,10 +89,11 @@ func (b *DockerBackend) StartRunner(ctx context.Context, name string, jitConfig 
 	c, err := b.dockerClient.ContainerCreate(
 		ctx,
 		&container.Config{
-			Image: b.runnerImage,
-			User:  "runner",
-			Cmd:   cmd,
-			Env:   b.buildContainerEnv(jitConfig),
+			Image:  b.runnerImage,
+			User:   "runner",
+			Cmd:    cmd,
+			Env:    b.buildContainerEnv(jitConfig),
+			Labels: map[string]string{"managed-by": "runscaler"},
 		},
 		&container.HostConfig{
 			Mounts:      mounts,

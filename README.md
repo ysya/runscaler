@@ -149,12 +149,27 @@ jobs:
 
 ## Commands
 
-| Command              | Description                                    |
-| -------------------- | ---------------------------------------------- |
-| `runscaler`          | Start the auto-scaler (default)                |
-| `runscaler init`     | Generate a config file interactively           |
-| `runscaler validate` | Validate configuration and connectivity        |
-| `runscaler status`   | Show current runner status via health endpoint |
+| Command              | Description                                            |
+| -------------------- | ------------------------------------------------------ |
+| `runscaler`          | Start the auto-scaler (default)                        |
+| `runscaler init`     | Generate a config file interactively                   |
+| `runscaler validate` | Validate configuration and connectivity                |
+| `runscaler status`   | Show current runner status via health endpoint         |
+| `runscaler doctor`   | Diagnose and clean up orphaned containers/VMs          |
+
+### Troubleshooting with `doctor`
+
+If runscaler is killed unexpectedly (e.g. `kill -9`, crash, power loss), Docker containers or Tart VMs may be left behind. Use `doctor` to detect and clean them up:
+
+```bash
+# Check for orphaned resources
+runscaler doctor
+
+# Auto-remove orphaned containers, VMs, and volumes
+runscaler doctor --fix
+```
+
+The `--fix` flag will refuse to run if runscaler is currently active (detected via health endpoint), preventing accidental removal of in-use resources.
 
 ## Configuration
 
@@ -319,7 +334,7 @@ Built on top of [actions/scaleset](https://github.com/actions/scaleset), the off
 Key components:
 
 ```
-cmd/runscaler/       CLI entry point, commands (init, validate, status)
+cmd/runscaler/       CLI entry point, commands (init, validate, status, doctor)
 internal/
   config/            Configuration management with Viper (flags + TOML)
   backend/           RunnerBackend interface + Docker/Tart implementations

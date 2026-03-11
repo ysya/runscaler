@@ -1,6 +1,7 @@
 package config
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -247,7 +248,8 @@ func NewLogger(level, format string) *slog.Logger {
 		opts.Formatter = charmlog.JSONFormatter
 	}
 
-	logger := slog.New(charmlog.NewWithOptions(os.Stdout, opts))
+	handler := charmlog.NewWithOptions(os.Stdout, opts)
+	logger := slog.New(&demoteHandler{inner: handler, demote: demoteMessages})
 	slog.SetDefault(logger)
 	return logger
 }
@@ -287,7 +289,41 @@ func NewScaleSetLogger(level, format string, name string, index int) *slog.Logge
 		handler.SetStyles(styles)
 	}
 
-	return slog.New(handler)
+	return slog.New(&demoteHandler{inner: handler, demote: demoteMessages})
+}
+
+// demoteMessages lists log messages from upstream libraries that are too noisy
+// at Info level. These are demoted to Debug so they only appear with log-level=debug.
+var demoteMessages = map[string]bool{
+	"Getting next message": true, // actions/scaleset listener polling loop
+}
+
+// demoteHandler wraps a slog.Handler and downgrades specific messages from Info to Debug.
+type demoteHandler struct {
+	inner  slog.Handler
+	demote map[string]bool
+}
+
+func (h *demoteHandler) Enabled(ctx context.Context, level slog.Level) bool {
+	return h.inner.Enabled(ctx, level)
+}
+
+func (h *demoteHandler) Handle(ctx context.Context, r slog.Record) error {
+	if r.Level == slog.LevelInfo && h.demote[r.Message] {
+		r.Level = slog.LevelDebug
+		if !h.inner.Enabled(ctx, slog.LevelDebug) {
+			return nil
+		}
+	}
+	return h.inner.Handle(ctx, r)
+}
+
+func (h *demoteHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return &demoteHandler{inner: h.inner.WithAttrs(attrs), demote: h.demote}
+}
+
+func (h *demoteHandler) WithGroup(name string) slog.Handler {
+	return &demoteHandler{inner: h.inner.WithGroup(name), demote: h.demote}
 }
 
 // NewScalesetClient creates a scaleset.Client using PAT authentication.

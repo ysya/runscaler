@@ -68,9 +68,12 @@ func (b *DockerBackend) StartRunner(ctx context.Context, name string, jitConfig 
 			Target:   "/var/run/docker.sock",
 			ReadOnly: false,
 		})
-		if gid, err := socketGroupID(b.dockerSocket); err == nil {
+		// Add socket's owning group (works on native Linux where socket is root:docker).
+		// Also add GID 0 for macOS/OrbStack where virtiofs maps the socket to root:root.
+		if gid, err := socketGroupID(b.dockerSocket); err == nil && gid != 0 {
 			groupAdd = append(groupAdd, strconv.Itoa(gid))
 		}
+		groupAdd = append(groupAdd, "0")
 	}
 	if b.sharedVolume != "" {
 		mounts = append(mounts, mount.Mount{

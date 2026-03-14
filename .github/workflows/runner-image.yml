@@ -5,10 +5,12 @@ on:
     branches: [main]
     paths:
       - 'images/actions-runner/**'
+      - '!images/actions-runner/README.md'
       - '.github/workflows/runner-image.yml'
   pull_request:
     paths:
       - 'images/actions-runner/**'
+      - '!images/actions-runner/README.md'
   workflow_dispatch:
 
 env:

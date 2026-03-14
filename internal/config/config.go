@@ -61,6 +61,8 @@ type DockerConfig struct {
 	Socket       string `mapstructure:"socket"`
 	DinD         *bool  `mapstructure:"dind"`          // pointer: nil = inherit default (true)
 	SharedVolume string `mapstructure:"shared-volume"`
+	Memory       int    `mapstructure:"memory"`        // Memory limit in MB (0 = unlimited)
+	CPU          int    `mapstructure:"cpu"`            // CPU cores (0 = unlimited)
 }
 
 // TartConfig holds Tart VM-specific backend settings.
@@ -117,6 +119,12 @@ func mergeDefaults(dst *ScaleSetConfig, defaults *ScaleSetConfig) {
 	}
 	if dst.Docker.SharedVolume == "" {
 		dst.Docker.SharedVolume = defaults.Docker.SharedVolume
+	}
+	if dst.Docker.Memory == 0 {
+		dst.Docker.Memory = defaults.Docker.Memory
+	}
+	if dst.Docker.CPU == 0 {
+		dst.Docker.CPU = defaults.Docker.CPU
 	}
 
 	// Tart

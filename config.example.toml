@@ -21,6 +21,8 @@ max-runners = 10
 socket = "/var/run/docker.sock"
 dind = true
 # shared-volume = "/shared"
+# memory = 0     # MB, 0 = unlimited (e.g. 8192 for 8GB)
+# cpu = 0        # cores, 0 = unlimited (e.g. 4)
 
 # [tart]
 # image = "ghcr.io/cirruslabs/macos-sequoia-xcode:latest"

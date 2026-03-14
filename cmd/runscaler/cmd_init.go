@@ -208,6 +208,10 @@ socket = %q
 # Shared volume for cross-job data sharing (optional)
 shared-volume = %q
 
+# Resource limits (0 = unlimited)
+# memory = 8192   # MB (recommended: 6144+ for Android/Gradle builds)
+# cpu = 4         # cores
+
 # --- Global ---
 log-level = %q
 log-format = %q

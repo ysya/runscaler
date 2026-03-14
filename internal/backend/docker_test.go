@@ -74,6 +74,20 @@ func newTestDockerBackend(sharedVolume string, dind bool) (*DockerBackend, *mock
 	return b, md
 }
 
+func newTestDockerBackendWithResources(memory int64, cpu int64) (*DockerBackend, *mockDocker) {
+	md := &mockDocker{}
+	b := &DockerBackend{
+		dockerClient: md,
+		runnerImage:  "test-image:latest",
+		dockerSocket: "/var/run/docker.sock",
+		dind:         false,
+		memoryBytes:  memory,
+		nanoCPUs:     cpu,
+		logger:       slog.New(slog.DiscardHandler),
+	}
+	return b, md
+}
+
 // --- Docker Backend tests ---
 
 // findMountByTarget returns the mount with the given target, or nil if not found.
@@ -311,6 +325,44 @@ func TestDockerBackend_BuildContainerEnv(t *testing.T) {
 				t.Errorf("env should not contain SHARED_DIR, got: %v", env)
 			}
 		})
+	}
+}
+
+func TestDockerBackend_StartRunner_WithResourceLimits(t *testing.T) {
+	memoryBytes := int64(8192) * 1024 * 1024  // 8GB
+	nanoCPUs := int64(4) * 1_000_000_000      // 4 cores
+	b, md := newTestDockerBackendWithResources(memoryBytes, nanoCPUs)
+	ctx := context.Background()
+
+	_, err := b.StartRunner(ctx, "runner-1", "mock-jit-config")
+	if err != nil {
+		t.Fatalf("StartRunner() error: %v", err)
+	}
+
+	call := md.createCalls[0]
+	if call.hostConfig.Resources.Memory != memoryBytes {
+		t.Errorf("Memory = %d, want %d", call.hostConfig.Resources.Memory, memoryBytes)
+	}
+	if call.hostConfig.Resources.NanoCPUs != nanoCPUs {
+		t.Errorf("NanoCPUs = %d, want %d", call.hostConfig.Resources.NanoCPUs, nanoCPUs)
+	}
+}
+
+func TestDockerBackend_StartRunner_WithoutResourceLimits(t *testing.T) {
+	b, md := newTestDockerBackendWithResources(0, 0)
+	ctx := context.Background()
+
+	_, err := b.StartRunner(ctx, "runner-1", "mock-jit-config")
+	if err != nil {
+		t.Fatalf("StartRunner() error: %v", err)
+	}
+
+	call := md.createCalls[0]
+	if call.hostConfig.Resources.Memory != 0 {
+		t.Errorf("Memory = %d, want 0 (unlimited)", call.hostConfig.Resources.Memory)
+	}
+	if call.hostConfig.Resources.NanoCPUs != 0 {
+		t.Errorf("NanoCPUs = %d, want 0 (unlimited)", call.hostConfig.Resources.NanoCPUs)
 	}
 }
 

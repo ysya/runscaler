@@ -57,6 +57,8 @@ func init() {
 	flags.String("docker-socket", config.DefaultDockerSocket, "Path to Docker socket")
 	flags.Bool("dind", config.DefaultDinD, "Mount Docker socket into runner containers (Docker-in-Docker)")
 	flags.String("shared-volume", "", "Shared Docker volume mounted into all runners (container path, e.g. /shared)")
+	flags.Int("docker-memory", 0, "Memory limit in MB for each Docker runner container (0 = unlimited)")
+	flags.Int("docker-cpu", 0, "CPU cores for each Docker runner container (0 = unlimited)")
 
 	// Tart backend
 	flags.String("tart-image", "", "Base Tart VM image for macOS runners")
@@ -93,6 +95,8 @@ func init() {
 	viper.BindPFlag("docker.socket", flags.Lookup("docker-socket"))
 	viper.BindPFlag("docker.dind", flags.Lookup("dind"))
 	viper.BindPFlag("docker.shared-volume", flags.Lookup("shared-volume"))
+	viper.BindPFlag("docker.memory", flags.Lookup("docker-memory"))
+	viper.BindPFlag("docker.cpu", flags.Lookup("docker-cpu"))
 	viper.BindPFlag("tart.image", flags.Lookup("tart-image"))
 	viper.BindPFlag("tart.runner-dir", flags.Lookup("tart-runner-dir"))
 	viper.BindPFlag("tart.cpu", flags.Lookup("tart-cpu"))

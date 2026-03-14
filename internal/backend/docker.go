@@ -37,6 +37,8 @@ type DockerBackend struct {
 	dockerSocket string
 	dind         bool
 	sharedVolume string
+	memoryBytes  int64 // container memory limit in bytes (0 = unlimited)
+	nanoCPUs     int64 // container CPU limit in nanoseconds (0 = unlimited)
 	logger       *slog.Logger
 }
 
@@ -48,6 +50,8 @@ func NewDockerBackend(ss config.ScaleSetConfig, client DockerAPI, logger *slog.L
 		dockerSocket: ss.Docker.Socket,
 		dind:         ss.IsDinD(),
 		sharedVolume: ss.Docker.SharedVolume,
+		memoryBytes:  int64(ss.Docker.Memory) * 1024 * 1024,       // MB → bytes
+		nanoCPUs:     int64(ss.Docker.CPU) * 1_000_000_000,        // cores → nanoseconds
 		logger:       logger,
 	}
 }
@@ -99,6 +103,7 @@ func (b *DockerBackend) StartRunner(ctx context.Context, name string, jitConfig 
 			Mounts:      mounts,
 			GroupAdd:    groupAdd,
 			SecurityOpt: []string{"label:disable"},
+			Resources:   b.containerResources(),
 		},
 		nil, nil,
 		name,
@@ -173,6 +178,18 @@ func (b *DockerBackend) pruneDocker(ctx context.Context) {
 			slog.String("reclaimed", FormatBytes(buildReport.SpaceReclaimed)),
 		)
 	}
+}
+
+// containerResources builds the resource constraints for a runner container.
+func (b *DockerBackend) containerResources() container.Resources {
+	var r container.Resources
+	if b.memoryBytes > 0 {
+		r.Memory = b.memoryBytes
+	}
+	if b.nanoCPUs > 0 {
+		r.NanoCPUs = b.nanoCPUs
+	}
+	return r
 }
 
 // socketGroupID returns the owning group ID of a Unix socket file.

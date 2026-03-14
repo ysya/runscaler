@@ -59,6 +59,7 @@ func init() {
 	flags.String("shared-volume", "", "Shared Docker volume mounted into all runners (container path, e.g. /shared)")
 	flags.Int("docker-memory", 0, "Memory limit in MB for each Docker runner container (0 = unlimited)")
 	flags.Int("docker-cpu", 0, "CPU cores for each Docker runner container (0 = unlimited)")
+	flags.String("docker-platform", "", "Force container platform (e.g. linux/amd64)")
 
 	// Tart backend
 	flags.String("tart-runner-dir", "", "Runner binary path inside VM")
@@ -96,6 +97,7 @@ func init() {
 	viper.BindPFlag("docker.shared-volume", flags.Lookup("shared-volume"))
 	viper.BindPFlag("docker.memory", flags.Lookup("docker-memory"))
 	viper.BindPFlag("docker.cpu", flags.Lookup("docker-cpu"))
+	viper.BindPFlag("docker.platform", flags.Lookup("docker-platform"))
 	viper.BindPFlag("tart.runner-dir", flags.Lookup("tart-runner-dir"))
 	viper.BindPFlag("tart.cpu", flags.Lookup("tart-cpu"))
 	viper.BindPFlag("tart.memory", flags.Lookup("tart-memory"))
@@ -202,11 +204,12 @@ func run(ctx context.Context, cfg config.Config) error {
 		// Pull unique runner images for Docker scalesets
 		pulled := make(map[string]bool)
 		for _, ss := range scaleSets {
-			if ss.IsTart() || pulled[ss.RunnerImage] {
+			pullKey := ss.RunnerImage + "|" + ss.Docker.Platform
+			if ss.IsTart() || pulled[pullKey] {
 				continue
 			}
-			logger.Info("Pulling runner image", slog.String("image", ss.RunnerImage))
-			pull, err := dockerClient.ImagePull(ctx, ss.RunnerImage, image.PullOptions{})
+			logger.Info("Pulling runner image", slog.String("image", ss.RunnerImage), slog.String("platform", ss.Docker.Platform))
+			pull, err := dockerClient.ImagePull(ctx, ss.RunnerImage, image.PullOptions{Platform: ss.Docker.Platform})
 			if err != nil {
 				return fmt.Errorf("failed to pull runner image %s: %w", ss.RunnerImage, err)
 			}
@@ -214,7 +217,7 @@ func run(ctx context.Context, cfg config.Config) error {
 				return fmt.Errorf("failed to read image pull response: %w", err)
 			}
 			pull.Close()
-			pulled[ss.RunnerImage] = true
+			pulled[pullKey] = true
 		}
 	}
 

@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"strconv"
+	"strings"
 	"syscall"
 
 	"github.com/docker/docker/api/types/build"
@@ -39,12 +40,13 @@ type DockerBackend struct {
 	sharedVolume string
 	memoryBytes  int64 // container memory limit in bytes (0 = unlimited)
 	nanoCPUs     int64 // container CPU limit in nanoseconds (0 = unlimited)
+	platform     *ocispec.Platform // nil = use host default
 	logger       *slog.Logger
 }
 
 // NewDockerBackend creates a DockerBackend from scale set config.
 func NewDockerBackend(ss config.ScaleSetConfig, client DockerAPI, logger *slog.Logger) *DockerBackend {
-	return &DockerBackend{
+	b := &DockerBackend{
 		dockerClient: client,
 		runnerImage:  ss.RunnerImage,
 		dockerSocket: ss.Docker.Socket,
@@ -54,6 +56,23 @@ func NewDockerBackend(ss config.ScaleSetConfig, client DockerAPI, logger *slog.L
 		nanoCPUs:     int64(ss.Docker.CPU) * 1_000_000_000,        // cores → nanoseconds
 		logger:       logger,
 	}
+	if ss.Docker.Platform != "" {
+		b.platform = parsePlatform(ss.Docker.Platform)
+	}
+	return b
+}
+
+// parsePlatform parses a platform string like "linux/amd64" into an OCI platform spec.
+func parsePlatform(s string) *ocispec.Platform {
+	parts := strings.SplitN(s, "/", 3)
+	if len(parts) < 2 {
+		return nil
+	}
+	p := &ocispec.Platform{OS: parts[0], Architecture: parts[1]}
+	if len(parts) == 3 {
+		p.Variant = parts[2]
+	}
+	return p
 }
 
 // StartRunner creates and starts a new ephemeral Docker container runner.
@@ -108,7 +127,7 @@ func (b *DockerBackend) StartRunner(ctx context.Context, name string, jitConfig 
 			SecurityOpt: []string{"label:disable"},
 			Resources:   b.containerResources(),
 		},
-		nil, nil,
+		nil, b.platform,
 		name,
 	)
 	if err != nil {

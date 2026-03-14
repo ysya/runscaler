@@ -63,6 +63,7 @@ type DockerConfig struct {
 	SharedVolume string `mapstructure:"shared-volume"`
 	Memory       int    `mapstructure:"memory"`        // Memory limit in MB (0 = unlimited)
 	CPU          int    `mapstructure:"cpu"`            // CPU cores (0 = unlimited)
+	Platform     string `mapstructure:"platform"`      // e.g. "linux/amd64" to force architecture
 }
 
 // TartConfig holds Tart VM-specific backend settings.
@@ -124,6 +125,9 @@ func mergeDefaults(dst *ScaleSetConfig, defaults *ScaleSetConfig) {
 	}
 	if dst.Docker.CPU == 0 {
 		dst.Docker.CPU = defaults.Docker.CPU
+	}
+	if dst.Docker.Platform == "" {
+		dst.Docker.Platform = defaults.Docker.Platform
 	}
 
 	// Tart

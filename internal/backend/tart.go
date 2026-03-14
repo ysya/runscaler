@@ -327,10 +327,19 @@ func (b *TartBackend) destroyVM(vm *warmVM) {
 // If a warm pool is available, picks a pre-booted VM (near-instant).
 // Otherwise, cold-starts a new VM (~30s).
 func (b *TartBackend) StartRunner(ctx context.Context, name string, jitConfig string) (string, error) {
-	// Try to get a warm VM from the pool
+	// Try to get a warm VM from the pool.
+	// When pool is enabled, we MUST wait for it rather than cold-starting,
+	// because pool VMs already hold VM slots — cold-starting would deadlock
+	// if all slots are occupied by pool VMs being booted.
 	if b.pool != nil {
-		select {
-		case vm := <-b.pool:
+		for {
+			var vm *warmVM
+			select {
+			case vm = <-b.pool:
+			case <-ctx.Done():
+				return "", ctx.Err()
+			}
+
 			// Check if the VM is still alive (tart run process hasn't exited)
 			select {
 			case <-vm.done:
@@ -338,22 +347,21 @@ func (b *TartBackend) StartRunner(ctx context.Context, name string, jitConfig st
 					slog.String("vmName", vm.name),
 				)
 				b.destroyVM(vm)
-				// Fall through to cold start
+				continue // wait for next pool VM
 			default:
-				b.logger.Debug("Using warm VM from pool",
-					slog.String("vmName", vm.name),
-					slog.String("runner", name),
-				)
-				if err := b.runRunner(ctx, vm.name, jitConfig); err != nil {
-					b.destroyVM(vm)
-					return "", fmt.Errorf("failed to start runner: %w", err)
-				}
-				b.activeSlots.Store(vm.name, vm.slotIdx)
-				b.logger.Debug("Runner started (warm)", slog.String("name", vm.name))
-				return vm.name, nil
 			}
-		default:
-			b.logger.Warn("VM pool empty, cold-starting VM", slog.String("runner", name))
+
+			b.logger.Debug("Using warm VM from pool",
+				slog.String("vmName", vm.name),
+				slog.String("runner", name),
+			)
+			if err := b.runRunner(ctx, vm.name, jitConfig); err != nil {
+				b.destroyVM(vm)
+				return "", fmt.Errorf("failed to start runner: %w", err)
+			}
+			b.activeSlots.Store(vm.name, vm.slotIdx)
+			b.logger.Debug("Runner started (warm)", slog.String("name", vm.name))
+			return vm.name, nil
 		}
 	}
 

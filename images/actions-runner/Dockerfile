@@ -27,13 +27,13 @@ RUN sudo apt-get update && sudo apt-get install -y --no-install-recommends \
         zlib1g-dev \
     && sudo rm -rf /var/lib/apt/lists/*
 
-# ── Java 21 LTS (OpenJDK) ─────────────────────────────────────────────────────
+# ── Java 17 LTS (OpenJDK) ─────────────────────────────────────────────────────
 RUN sudo apt-get update \
-    && sudo apt-get install -y --no-install-recommends openjdk-21-jdk \
+    && sudo apt-get install -y --no-install-recommends openjdk-17-jdk \
     && sudo rm -rf /var/lib/apt/lists/* \
     && ARCH=$(dpkg --print-architecture) \
-    && sudo ln -s /usr/lib/jvm/java-21-openjdk-${ARCH} /usr/lib/jvm/java-21-openjdk
-ENV JAVA_HOME=/usr/lib/jvm/java-21-openjdk
+    && sudo ln -s /usr/lib/jvm/java-17-openjdk-${ARCH} /usr/lib/jvm/java-17-openjdk
+ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk
 ENV PATH="${JAVA_HOME}/bin:${PATH}"
 
 # ── Node.js LTS (via NodeSource) ─────────────────────────────────────────────

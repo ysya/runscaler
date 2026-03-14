@@ -27,17 +27,13 @@ RUN sudo apt-get update && sudo apt-get install -y --no-install-recommends \
         zlib1g-dev \
     && sudo rm -rf /var/lib/apt/lists/*
 
-# ── Java 17 LTS (Eclipse Temurin) ────────────────────────────────────────────
-RUN sudo mkdir -p /etc/apt/keyrings \
-    && wget -qO- https://packages.adoptium.net/artifactory/api/gpg/key/public \
-       | sudo gpg --dearmor -o /etc/apt/keyrings/adoptium.gpg \
-    && echo "deb [signed-by=/etc/apt/keyrings/adoptium.gpg] https://packages.adoptium.net/artifactory/deb $(lsb_release -cs) main" \
-       | sudo tee /etc/apt/sources.list.d/adoptium.list \
-    && sudo apt-get update \
-    && sudo apt-get install -y --no-install-recommends temurin-17-jdk \
-    && sudo rm -rf /var/lib/apt/lists/*
-
-ENV JAVA_HOME=/usr/lib/jvm/temurin-17-amd64
+# ── Java 21 LTS (OpenJDK) ─────────────────────────────────────────────────────
+RUN sudo apt-get update \
+    && sudo apt-get install -y --no-install-recommends openjdk-21-jdk \
+    && sudo rm -rf /var/lib/apt/lists/* \
+    && ARCH=$(dpkg --print-architecture) \
+    && sudo ln -s /usr/lib/jvm/java-21-openjdk-${ARCH} /usr/lib/jvm/java-21-openjdk
+ENV JAVA_HOME=/usr/lib/jvm/java-21-openjdk
 ENV PATH="${JAVA_HOME}/bin:${PATH}"
 
 # ── Node.js LTS (via NodeSource) ─────────────────────────────────────────────
@@ -66,11 +62,10 @@ RUN sudo mkdir -p ${ANDROID_HOME}/cmdline-tools \
        "platform-tools" \
        "platforms;android-36" \
        "build-tools;36.0.0" \
-    && sudo chmod -R a+r ${ANDROID_HOME} \
-    && sudo find ${ANDROID_HOME} -type d -exec chmod a+x {} +
+    && sudo chmod -R a+rX ${ANDROID_HOME}
 
 # ── Verify installations ─────────────────────────────────────────────────────
-RUN echo "=== Toolchain versions ===" \
+RUN set -x \
     && gcc --version | head -1 \
     && g++ --version | head -1 \
     && gfortran --version | head -1 \
@@ -79,4 +74,4 @@ RUN echo "=== Toolchain versions ===" \
     && node --version \
     && pnpm --version \
     && ruby --version \
-    && sdkmanager --version
+    && sdkmanager --version 2>&1 | head -1

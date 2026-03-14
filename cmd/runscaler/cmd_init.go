@@ -34,7 +34,6 @@ func init() {
 	flags.String("backend", "", "Runner backend (docker or tart)")
 	flags.Bool("dind", config.DefaultDinD, "Enable Docker-in-Docker")
 	flags.String("shared-volume", "", "Shared volume path (e.g. /shared)")
-	flags.String("tart-image", "", "Base Tart VM image for macOS runners")
 	flags.String("output", "config.toml", "Output file path")
 }
 
@@ -59,8 +58,6 @@ func runInit(cmd *cobra.Command, args []string) error {
 	maxRunners, _ := cmd.Flags().GetInt("max-runners")
 	backend, _ := cmd.Flags().GetString("backend")
 	dind, _ := cmd.Flags().GetBool("dind")
-	tartImage, _ := cmd.Flags().GetString("tart-image")
-
 	// Interactive mode: prompt for missing values
 	var err error
 	if url == "" {
@@ -104,8 +101,9 @@ func runInit(cmd *cobra.Command, args []string) error {
 	var configContent string
 	if backend == "tart" {
 		// Tart backend config
-		if tartImage == "" {
-			tartImage, err = promptString("Tart base VM image (e.g. ghcr.io/cirruslabs/macos-sequoia-xcode:latest)")
+		runnerImage, _ := cmd.Flags().GetString("runner-image")
+		if runnerImage == "" || runnerImage == config.DefaultRunnerImage {
+			runnerImage, err = promptString("Tart base VM image (e.g. ghcr.io/cirruslabs/macos-sequoia-xcode:latest)")
 			if err != nil {
 				return err
 			}
@@ -133,17 +131,12 @@ min-runners = 0
 # Backend: "docker" (Linux containers) or "tart" (macOS VMs)
 backend = "tart"
 
-[tart]
-# Base Tart VM image (must have GitHub Actions runner pre-installed)
-image = %q
+# Runner image (Tart VM image with GitHub Actions runner pre-installed)
+runner-image = %q
 
+[tart]
 # Path to the runner binary inside the VM
 runner-dir = %q
-
-# Logging
-[docker]
-# Not used with tart backend, but shown for reference
-# socket = %q
 
 # --- Global ---
 log-level = %q
@@ -152,8 +145,7 @@ log-format = %q
 # Health check server port (0 to disable)
 # health-port = %d
 `, url, name, token, maxRunners,
-			tartImage, config.DefaultTartRunnerDir,
-			config.DefaultDockerSocket,
+			runnerImage, config.DefaultTartRunnerDir,
 			config.DefaultLogLevel, config.DefaultLogFormat,
 			config.DefaultHealthPort)
 	} else {
@@ -235,8 +227,7 @@ log-format = %q
 # token = "env:TOKEN_ORG_A"
 # backend = "tart"
 # max-runners = 2
-# [scaleset.tart]
-# image = "ghcr.io/cirruslabs/macos-sequoia-xcode:latest"
+# runner-image = "ghcr.io/cirruslabs/macos-sequoia-xcode:latest"
 `, url, name, token, maxRunners,
 			config.DefaultRunnerImage, config.DefaultBackend,
 			dind, config.DefaultDockerSocket, sharedVolume,

@@ -67,7 +67,6 @@ type DockerConfig struct {
 
 // TartConfig holds Tart VM-specific backend settings.
 type TartConfig struct {
-	Image     string `mapstructure:"image"`      // Base VM image (e.g. "ghcr.io/cirruslabs/macos-sequoia-xcode:latest")
 	RunnerDir string `mapstructure:"runner-dir"` // Runner binary path in VM
 	CPU       int    `mapstructure:"cpu"`         // Number of CPU cores (0 = use image default)
 	Memory    int    `mapstructure:"memory"`      // Memory in MB (0 = use image default)
@@ -128,9 +127,6 @@ func mergeDefaults(dst *ScaleSetConfig, defaults *ScaleSetConfig) {
 	}
 
 	// Tart
-	if dst.Tart.Image == "" {
-		dst.Tart.Image = defaults.Tart.Image
-	}
 	if dst.Tart.RunnerDir == "" {
 		dst.Tart.RunnerDir = defaults.Tart.RunnerDir
 	}
@@ -217,8 +213,8 @@ func (ss *ScaleSetConfig) Validate() error {
 	case DefaultBackend:
 		// Docker backend: no additional validation
 	case "tart":
-		if ss.Tart.Image == "" {
-			return fmt.Errorf("tart image is required when backend is \"tart\"")
+		if ss.RunnerImage == "" {
+			return fmt.Errorf("runner-image is required when backend is \"tart\"")
 		}
 	default:
 		return fmt.Errorf("unsupported backend %q (must be %q or \"tart\")", ss.Backend, DefaultBackend)

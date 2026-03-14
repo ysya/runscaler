@@ -25,7 +25,6 @@ dind = true
 # cpu = 0        # cores, 0 = unlimited (e.g. 4)
 
 # [tart]
-# image = "ghcr.io/cirruslabs/macos-sequoia-xcode:latest"
 # runner-dir = "/Users/admin/actions-runner"
 # cpu = 0        # 0 = use image default
 # memory = 0     # MB, 0 = use image default
@@ -66,5 +65,4 @@ dind = true
 # token = "env:TOKEN_ORG_C"
 # backend = "tart"
 # max-runners = 2
-# [scaleset.tart]
-# image = "ghcr.io/cirruslabs/macos-sequoia-xcode:latest"
+# runner-image = "ghcr.io/cirruslabs/macos-sequoia-xcode:latest"

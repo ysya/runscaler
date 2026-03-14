@@ -97,7 +97,7 @@ type TartBackend struct {
 // NewTartBackend creates a TartBackend from scale set config.
 func NewTartBackend(ss config.ScaleSetConfig, logger *slog.Logger) *TartBackend {
 	b := &TartBackend{
-		baseImage:  ss.Tart.Image,
+		baseImage:  ss.RunnerImage,
 		runnerDir:  ss.Tart.RunnerDir,
 		cpu:        ss.Tart.CPU,
 		memory:     ss.Tart.Memory,

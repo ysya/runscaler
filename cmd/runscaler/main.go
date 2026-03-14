@@ -61,7 +61,6 @@ func init() {
 	flags.Int("docker-cpu", 0, "CPU cores for each Docker runner container (0 = unlimited)")
 
 	// Tart backend
-	flags.String("tart-image", "", "Base Tart VM image for macOS runners")
 	flags.String("tart-runner-dir", "", "Runner binary path inside VM")
 	flags.Int("tart-cpu", 0, "Number of CPU cores for each VM (0 = use image default)")
 	flags.Int("tart-memory", 0, "Memory in MB for each VM (0 = use image default)")
@@ -97,7 +96,6 @@ func init() {
 	viper.BindPFlag("docker.shared-volume", flags.Lookup("shared-volume"))
 	viper.BindPFlag("docker.memory", flags.Lookup("docker-memory"))
 	viper.BindPFlag("docker.cpu", flags.Lookup("docker-cpu"))
-	viper.BindPFlag("tart.image", flags.Lookup("tart-image"))
 	viper.BindPFlag("tart.runner-dir", flags.Lookup("tart-runner-dir"))
 	viper.BindPFlag("tart.cpu", flags.Lookup("tart-cpu"))
 	viper.BindPFlag("tart.memory", flags.Lookup("tart-memory"))
@@ -231,14 +229,14 @@ func run(ctx context.Context, cfg config.Config) error {
 		// Ensure Tart images are available locally (auto-pull if missing)
 		pulled := make(map[string]bool)
 		for _, ss := range scaleSets {
-			if !ss.IsTart() || pulled[ss.Tart.Image] {
+			if !ss.IsTart() || pulled[ss.RunnerImage] {
 				continue
 			}
 			tb := backend.NewTartBackend(ss, logger)
 			if err := tb.EnsureImage(ctx); err != nil {
 				return err
 			}
-			pulled[ss.Tart.Image] = true
+			pulled[ss.RunnerImage] = true
 		}
 
 		// Warn about the 2-VM macOS limit

@@ -249,15 +249,16 @@ func TestScaleSetConfigValidate_TartBackend(t *testing.T) {
 			name: "valid tart config",
 			modify: func(c *ScaleSetConfig) {
 				c.Backend = "tart"
-				c.Tart.Image = "macos-base:latest"
+				c.RunnerImage = "macos-base:latest"
 			},
 		},
 		{
 			name: "tart missing image",
 			modify: func(c *ScaleSetConfig) {
 				c.Backend = "tart"
+				c.RunnerImage = ""
 			},
-			wantErr: "tart image is required",
+			wantErr: "runner-image is required",
 		},
 		{
 			name: "unsupported backend",
@@ -299,9 +300,7 @@ func TestTartDefaults(t *testing.T) {
 			Token:           "ghp_test",
 			MaxRunners:      2,
 			Backend:         "tart",
-			Tart: TartConfig{
-				Image: "macos-base:latest",
-			},
+			RunnerImage:     "macos-base:latest",
 		},
 	}
 
@@ -322,10 +321,8 @@ func TestTartDefaults(t *testing.T) {
 func TestResolveScaleSets_MixedBackends(t *testing.T) {
 	c := Config{
 		Defaults: ScaleSetConfig{
-			MaxRunners: 5,
-			Tart: TartConfig{
-				Image: "global-macos:latest",
-			},
+			MaxRunners:  5,
+			RunnerImage: "global-macos:latest",
 		},
 		ScaleSets: []ScaleSetConfig{
 			{
@@ -338,9 +335,7 @@ func TestResolveScaleSets_MixedBackends(t *testing.T) {
 				ScaleSetName:    "macos-runners",
 				Token:           "token-b",
 				Backend:         "tart",
-				Tart: TartConfig{
-					Image: "custom-macos:latest",
-				},
+				RunnerImage:     "custom-macos:latest",
 			},
 		},
 	}
@@ -362,8 +357,8 @@ func TestResolveScaleSets_MixedBackends(t *testing.T) {
 	if !sets[1].IsTart() {
 		t.Error("sets[1] should be tart")
 	}
-	if sets[1].Tart.Image != "custom-macos:latest" {
-		t.Errorf("sets[1].Tart.Image = %q, want custom", sets[1].Tart.Image)
+	if sets[1].RunnerImage != "custom-macos:latest" {
+		t.Errorf("sets[1].RunnerImage = %q, want custom", sets[1].RunnerImage)
 	}
 }
 
@@ -420,7 +415,6 @@ func TestMergeDefaults(t *testing.T) {
 			SharedVolume: "/shared",
 		},
 		Tart: TartConfig{
-			Image:     "global-macos:latest",
 			RunnerDir: DefaultTartRunnerDir,
 			CPU:       4,
 			Memory:    8192,
@@ -456,9 +450,6 @@ func TestMergeDefaults(t *testing.T) {
 	}
 	if dst.Docker.SharedVolume != "/shared" {
 		t.Errorf("Docker.SharedVolume should inherit, got %q", dst.Docker.SharedVolume)
-	}
-	if dst.Tart.Image != "global-macos:latest" {
-		t.Errorf("Tart.Image should inherit, got %q", dst.Tart.Image)
 	}
 	if dst.Tart.CPU != 4 {
 		t.Errorf("Tart.CPU should inherit, got %d", dst.Tart.CPU)

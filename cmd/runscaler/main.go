@@ -184,6 +184,7 @@ func run(ctx context.Context, cfg config.Config) error {
 		var err error
 		dockerClient, err = dockerclient.NewClientWithOpts(
 			dockerclient.FromEnv,
+			dockerclient.WithHost("unix://"+cfg.Defaults.Docker.Socket),
 			dockerclient.WithAPIVersionNegotiation(),
 		)
 		if err != nil {

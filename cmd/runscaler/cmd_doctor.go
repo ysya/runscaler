@@ -43,6 +43,12 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	fix, _ := cmd.Flags().GetBool("fix")
 	healthPort, _ := cmd.Flags().GetInt("health-port")
 
+	// Try to load config for docker socket path; fall back to default
+	dockerSocket := config.DefaultDockerSocket
+	if cfg, err := loadConfig(cmd); err == nil {
+		dockerSocket = cfg.Defaults.Docker.Socket
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -58,7 +64,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	var totalOrphans int
 
 	// Docker checks
-	orphans, err := checkDocker(ctx, fix)
+	orphans, err := checkDocker(ctx, dockerSocket, fix)
 	if err != nil {
 		return err
 	}
@@ -96,9 +102,10 @@ func isRunscalerRunning(port int) bool {
 }
 
 // checkDocker checks for Docker daemon reachability, orphaned containers, and volumes.
-func checkDocker(ctx context.Context, fix bool) (int, error) {
+func checkDocker(ctx context.Context, socket string, fix bool) (int, error) {
 	dockerClient, err := dockerclient.NewClientWithOpts(
 		dockerclient.FromEnv,
+		dockerclient.WithHost("unix://"+socket),
 		dockerclient.WithAPIVersionNegotiation(),
 	)
 	if err != nil {

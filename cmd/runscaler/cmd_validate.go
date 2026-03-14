@@ -61,6 +61,7 @@ func runValidate(cmd *cobra.Command, args []string) error {
 	if needsDocker {
 		dockerClient, err := dockerclient.NewClientWithOpts(
 			dockerclient.FromEnv,
+			dockerclient.WithHost("unix://"+cfg.Defaults.Docker.Socket),
 			dockerclient.WithAPIVersionNegotiation(),
 		)
 		if err != nil {

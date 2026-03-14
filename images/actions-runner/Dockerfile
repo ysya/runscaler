@@ -21,7 +21,6 @@ RUN sudo apt-get update && sudo apt-get install -y --no-install-recommends \
         git \
         ca-certificates \
         gnupg \
-        lsb-release \
         software-properties-common \
         libssl-dev \
         zlib1g-dev \
@@ -47,7 +46,6 @@ RUN sudo npm install -g pnpm
 
 # ── Android SDK (command-line tools only) ─────────────────────────────────────
 ENV ANDROID_HOME=/opt/android-sdk
-ENV ANDROID_SDK_ROOT=${ANDROID_HOME}
 ENV PATH="${ANDROID_HOME}/cmdline-tools/latest/bin:${ANDROID_HOME}/platform-tools:${PATH}"
 
 ARG ANDROID_CMDLINE_TOOLS_VERSION=14742923
@@ -57,12 +55,12 @@ RUN sudo mkdir -p ${ANDROID_HOME}/cmdline-tools \
     && sudo unzip -q /tmp/cmdline-tools.zip -d ${ANDROID_HOME}/cmdline-tools \
     && sudo mv ${ANDROID_HOME}/cmdline-tools/cmdline-tools ${ANDROID_HOME}/cmdline-tools/latest \
     && rm /tmp/cmdline-tools.zip \
-    && yes | sudo ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager --licenses > /dev/null 2>&1 \
+    && yes | sudo ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager --licenses 2>&1 | tail -1 \
     && sudo ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager \
        "platform-tools" \
        "platforms;android-36" \
        "build-tools;36.0.0" \
-    && sudo chmod -R a+rX ${ANDROID_HOME}
+    && sudo chown -R runner:runner ${ANDROID_HOME}
 
 # ── Verify installations ─────────────────────────────────────────────────────
 RUN set -x \

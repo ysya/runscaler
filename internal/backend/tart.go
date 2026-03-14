@@ -53,6 +53,7 @@ func (execCommandRunner) RunStreaming(ctx context.Context, name string, args ...
 type warmVM struct {
 	name    string
 	cancel  context.CancelFunc // cancels the `tart run` goroutine
+	done    <-chan struct{}     // closed when `tart run` exits (VM died)
 	slotIdx int                // index into vmSlots for deterministic MAC assignment
 }
 
@@ -162,10 +163,18 @@ func (b *TartBackend) fillPool(slot int) {
 			slog.Int("slot", slot),
 		)
 
-		// Put VM in pool; block until consumed or shutdown
+		// Put VM in pool; block until consumed, VM dies, or shutdown
 		select {
 		case b.pool <- vm:
 			// VM was consumed by StartRunner, loop to create replacement
+		case <-vm.done:
+			// VM died while waiting in the pool — clean up and recreate
+			b.logger.Warn("Warm VM died in pool, replacing",
+				slog.String("name", vm.name),
+				slog.Int("slot", slot),
+			)
+			b.destroyVM(vm)
+			// loop back to create a new one
 		case <-b.poolCtx.Done():
 			// Shutdown — clean up this warm VM
 			b.destroyVM(vm)
@@ -242,8 +251,10 @@ func (b *TartBackend) bootVM(ctx context.Context, name string) (*warmVM, error) 
 
 	// 4. Start VM in background (tart run blocks until VM shuts down)
 	vmCtx, vmCancel := context.WithCancel(ctx)
+	vmDone := make(chan struct{})
 	go func() {
 		defer vmCancel()
+		defer close(vmDone)
 		if _, err := b.cmd.Run(vmCtx, "tart", "run", name, "--no-graphics"); err != nil {
 			if vmCtx.Err() == nil {
 				b.logger.Error("VM exited unexpectedly", slog.String("name", name), slog.Any("error", err))
@@ -260,7 +271,7 @@ func (b *TartBackend) bootVM(ctx context.Context, name string) (*warmVM, error) 
 		return nil, fmt.Errorf("guest agent not ready on %s: %w", name, err)
 	}
 
-	return &warmVM{name: name, cancel: vmCancel, slotIdx: slotIdx}, nil
+	return &warmVM{name: name, cancel: vmCancel, done: vmDone, slotIdx: slotIdx}, nil
 }
 
 // setVMMAC writes a deterministic MAC address to the VM's config.json.
@@ -320,17 +331,27 @@ func (b *TartBackend) StartRunner(ctx context.Context, name string, jitConfig st
 	if b.pool != nil {
 		select {
 		case vm := <-b.pool:
-			b.logger.Debug("Using warm VM from pool",
-				slog.String("vmName", vm.name),
-				slog.String("runner", name),
-			)
-			if err := b.runRunner(ctx, vm.name, jitConfig); err != nil {
+			// Check if the VM is still alive (tart run process hasn't exited)
+			select {
+			case <-vm.done:
+				b.logger.Warn("Warm VM already dead, discarding",
+					slog.String("vmName", vm.name),
+				)
 				b.destroyVM(vm)
-				return "", fmt.Errorf("failed to start runner: %w", err)
+				// Fall through to cold start
+			default:
+				b.logger.Debug("Using warm VM from pool",
+					slog.String("vmName", vm.name),
+					slog.String("runner", name),
+				)
+				if err := b.runRunner(ctx, vm.name, jitConfig); err != nil {
+					b.destroyVM(vm)
+					return "", fmt.Errorf("failed to start runner: %w", err)
+				}
+				b.activeSlots.Store(vm.name, vm.slotIdx)
+				b.logger.Debug("Runner started (warm)", slog.String("name", vm.name))
+				return vm.name, nil
 			}
-			b.activeSlots.Store(vm.name, vm.slotIdx)
-			b.logger.Debug("Runner started (warm)", slog.String("name", vm.name))
-			return vm.name, nil
 		default:
 			b.logger.Warn("VM pool empty, cold-starting VM", slog.String("runner", name))
 		}
@@ -427,14 +448,34 @@ func (b *TartBackend) waitForExec(ctx context.Context, name string) error {
 // runRunner starts the GitHub Actions runner inside the VM via `tart exec`.
 // Uses Virtio gRPC (Guest Agent) instead of SSH — no network dependency.
 func (b *TartBackend) runRunner(ctx context.Context, vmName, jitConfig string) error {
-	remoteCmd := fmt.Sprintf(
-		"ACTIONS_RUNNER_INPUT_JITCONFIG=%s nohup %s/run.sh &",
-		jitConfig, b.runnerDir,
-	)
+	// Verify runner binary exists before attempting to start
+	runScript := b.runnerDir + "/run.sh"
+	if _, err := b.cmd.Run(ctx, "tart", "exec", vmName, "test", "-x", runScript); err != nil {
+		return fmt.Errorf("runner not found at %s on %s: %w", runScript, vmName, err)
+	}
 
-	_, err := b.cmd.Run(ctx, "tart", "exec", vmName, "sh", "-c", remoteCmd)
-	if err != nil {
+	// Write JIT config to a temp file to avoid shell argument length limits
+	writeJIT := fmt.Sprintf("cat > /tmp/jitconfig <<'JITEOF'\n%s\nJITEOF", jitConfig)
+	if _, err := b.cmd.Run(ctx, "tart", "exec", vmName, "sh", "-c", writeJIT); err != nil {
+		return fmt.Errorf("failed to write JIT config on %s: %w", vmName, err)
+	}
+
+	// Start runner in background, reading JIT config from file
+	startCmd := fmt.Sprintf(
+		"ACTIONS_RUNNER_INPUT_JITCONFIG=$(cat /tmp/jitconfig) nohup %s > /tmp/runner.log 2>&1 &",
+		runScript,
+	)
+	if _, err := b.cmd.Run(ctx, "tart", "exec", vmName, "sh", "-c", startCmd); err != nil {
 		return fmt.Errorf("failed to start runner on %s: %w", vmName, err)
 	}
+
+	// Wait briefly and verify the runner process is still alive
+	time.Sleep(2 * time.Second)
+	if _, err := b.cmd.Run(ctx, "tart", "exec", vmName, "pgrep", "-f", "Runner.Listener"); err != nil {
+		// Grab log output to help diagnose the failure
+		logOut, _ := b.cmd.Run(ctx, "tart", "exec", vmName, "tail", "-20", "/tmp/runner.log")
+		return fmt.Errorf("runner process died on %s, log:\n%s", vmName, string(logOut))
+	}
+
 	return nil
 }

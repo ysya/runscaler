@@ -68,7 +68,10 @@ func (s *Scaler) HandleDesiredRunnerCount(ctx context.Context, count int) (int, 
 		)
 		for range scaleUp {
 			if _, err := s.startRunner(ctx); err != nil {
-				return 0, fmt.Errorf("failed to start runner: %w", err)
+				s.logger.Error("Failed to start runner, continuing with available runners",
+					slog.Any("error", err),
+				)
+				break
 			}
 		}
 		return s.runners.count(), nil

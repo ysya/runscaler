@@ -122,10 +122,15 @@ func TestTartBackend_StartRunner_Success(t *testing.T) {
 		t.Error("tart clone was not called")
 	}
 
-	// Verify tart exec was called: first readiness check ("true"), then runner start
+	// Verify tart exec was called:
+	// 1. readiness check ("true")
+	// 2. test -x (verify runner binary)
+	// 3. write JIT config to file
+	// 4. start runner
+	// 5. pgrep verification
 	execCount := cmd.callCount("tart exec")
-	if execCount != 2 {
-		t.Fatalf("expected 2 tart exec calls (readiness + runner), got %d", execCount)
+	if execCount != 5 {
+		t.Fatalf("expected 5 tart exec calls, got %d", execCount)
 	}
 }
 

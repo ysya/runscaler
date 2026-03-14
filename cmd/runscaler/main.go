@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/actions/scaleset"
 	"github.com/actions/scaleset/listener"
@@ -378,30 +379,7 @@ func runScaleSet(ctx context.Context, ss config.ScaleSetConfig, dockerClient *do
 		}
 	}()
 
-	// Create message session
-	hostname, err := os.Hostname()
-	if err != nil {
-		hostname = uuid.NewString()
-	}
-	sessionID := fmt.Sprintf("%s-%s", hostname, ss.ScaleSetName)
-
-	sessionClient, err := scalesetClient.MessageSessionClient(ctx, scaleSet.ID, sessionID)
-	if err != nil {
-		return fmt.Errorf("failed to create message session: %w", err)
-	}
-	defer sessionClient.Close(context.Background())
-
-	// Create listener
-	l, err := listener.New(sessionClient, listener.Config{
-		ScaleSetID: scaleSet.ID,
-		MaxRunners: ss.MaxRunners,
-		Logger:     logger,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to create listener: %w", err)
-	}
-
-	// Create backend based on config
+	// Create backend based on config (persists across reconnections)
 	var b backend.RunnerBackend
 	if ss.IsTart() {
 		tb := backend.NewTartBackend(ss, logger)
@@ -427,15 +405,61 @@ func runScaleSet(ctx context.Context, ss config.ScaleSetConfig, dockerClient *do
 		defer h.UnregisterScaler(ss.ScaleSetName)
 	}
 
-	// Start listening
-	logger.Info("Listening for jobs",
-		slog.Int("maxRunners", ss.MaxRunners),
-		slog.Int("minRunners", ss.MinRunners),
-	)
+	// Session ID for message session
+	hostname, err := os.Hostname()
+	if err != nil {
+		hostname = uuid.NewString()
+	}
+	sessionID := fmt.Sprintf("%s-%s", hostname, ss.ScaleSetName)
 
-	if err := l.Run(ctx, s); !errors.Is(err, context.Canceled) {
-		return fmt.Errorf("listener failed: %w", err)
+	// Reconnection loop: recreate session + listener on transient failures
+	backoff := 5 * time.Second
+	const maxBackoff = 60 * time.Second
+
+	for {
+		logger.Info("Listening for jobs",
+			slog.Int("maxRunners", ss.MaxRunners),
+			slog.Int("minRunners", ss.MinRunners),
+		)
+
+		listenErr := listenOnce(ctx, scalesetClient, scaleSet.ID, sessionID, ss.MaxRunners, s, logger)
+		if listenErr == nil || ctx.Err() != nil {
+			// Clean exit: either listener finished normally or the parent
+			// context was canceled (user sent SIGTERM/SIGINT).
+			return nil
+		}
+
+		logger.Warn("Listener disconnected, will reconnect",
+			slog.Any("error", listenErr),
+			slog.Duration("backoff", backoff),
+		)
+
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(backoff):
+		}
+		backoff = min(backoff*2, maxBackoff)
+	}
+}
+
+// listenOnce creates a message session and listener, then runs until
+// disconnection or context cancellation. Callers retry on transient errors.
+func listenOnce(ctx context.Context, client *scaleset.Client, scaleSetID int, sessionID string, maxRunners int, s *scaler.Scaler, logger *slog.Logger) error {
+	sessionClient, err := client.MessageSessionClient(ctx, scaleSetID, sessionID)
+	if err != nil {
+		return fmt.Errorf("failed to create message session: %w", err)
+	}
+	defer sessionClient.Close(context.Background())
+
+	l, err := listener.New(sessionClient, listener.Config{
+		ScaleSetID: scaleSetID,
+		MaxRunners: maxRunners,
+		Logger:     logger,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create listener: %w", err)
 	}
 
-	return nil
+	return l.Run(ctx, s)
 }

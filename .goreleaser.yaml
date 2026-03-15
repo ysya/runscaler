@@ -12,3 +12,9 @@ builds:
     goarch:
       - amd64
       - arm64
+
+archives:
+  - name_template: "{{ .ProjectName }}-{{ .Os }}-{{ .Arch }}"
+
+checksum:
+  name_template: "checksums.txt"

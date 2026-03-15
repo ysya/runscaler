@@ -3,7 +3,7 @@ set -eu
 
 REPO="ysya/runscaler"
 BINARY="runscaler"
-INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
+INSTALL_DIR="${INSTALL_DIR:-${HOME}/.local/bin}"
 
 fail() { echo "Error: $1" >&2; exit 1; }
 
@@ -70,3 +70,13 @@ install -d "${INSTALL_DIR}"
 install "${BINARY}" "${INSTALL_DIR}/${BINARY}"
 
 echo "Installed ${BINARY} ${RUNSCALER_VERSION} to ${INSTALL_DIR}/${BINARY}"
+
+# Warn if INSTALL_DIR is not in PATH
+case ":${PATH}:" in
+    *":${INSTALL_DIR}:"*) ;;
+    *)
+        echo ""
+        echo "NOTE: ${INSTALL_DIR} is not in your PATH. Add this to your shell profile:"
+        echo "  export PATH=\"\${HOME}/.local/bin:\${PATH}\""
+        ;;
+esac

@@ -98,10 +98,14 @@ flowchart LR
 curl -fsSL https://raw.githubusercontent.com/ysya/runscaler/main/install.sh | sh
 ```
 
-You can set `INSTALL_DIR` to customize the install location, or `RUNSCALER_VERSION` to pin a version:
+Installs to `~/.local/bin` by default (no sudo required). Set `INSTALL_DIR` to customize, or `RUNSCALER_VERSION` to pin a version:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ysya/runscaler/main/install.sh | INSTALL_DIR=./bin sh
+# Install to a custom location (e.g. system-wide)
+curl -fsSL https://raw.githubusercontent.com/ysya/runscaler/main/install.sh | INSTALL_DIR=/usr/local/bin sh
+
+# Pin a specific version
+curl -fsSL https://raw.githubusercontent.com/ysya/runscaler/main/install.sh | RUNSCALER_VERSION=v1.2.3 sh
 ```
 
 **Go install:**

@@ -227,11 +227,11 @@ url = "https://github.com/your-org"
 name = "macos-runners"
 token = "ghp_xxx"
 max-runners = 2          # Apple limits 2 concurrent macOS VMs per host
+runner-image = "ghcr.io/cirruslabs/macos-tahoe-xcode:latest"
 labels = ["self-hosted", "macOS"]
 log-level = "info"
 
 [tart]
-image = "ghcr.io/cirruslabs/macos-tahoe-xcode:latest"
 cpu = 4                  # CPU cores per VM (0 = use image default)
 memory = 8192            # Memory in MB per VM (0 = use image default)
 runner-dir = "/Users/admin/actions-runner"  # default
@@ -284,9 +284,9 @@ url = "https://github.com/your-org"
 name = "macos-runners"
 token = "ghp_bbb"
 max-runners = 2
+runner-image = "ghcr.io/cirruslabs/macos-tahoe-xcode:latest"
 labels = ["self-hosted", "macOS"]
 [scaleset.tart]
-image = "ghcr.io/cirruslabs/macos-tahoe-xcode:latest"
 pool-size = 2
 ```
 
@@ -303,11 +303,10 @@ pool-size = 2
 | `--min-runners`     | `min-runners`        | `0`                                     | Minimum runners to keep warm                      |
 | `--labels`          | `labels`             | `<name>`                                | Runner labels (comma-separated)                   |
 | `--runner-group`    | `runner-group`       | `default`                               | Runner group name                                 |
-| `--runner-image`    | `runner-image`       | `ghcr.io/actions/actions-runner:latest` | Docker image (Docker backend)                     |
+| `--runner-image`    | `runner-image`       | `ghcr.io/actions/actions-runner:latest` | Runner image (Docker image or Tart VM image)      |
 | `--docker-socket`   | `[docker] socket`    | `/var/run/docker.sock`                  | Docker socket path (Docker backend)               |
 | `--dind`            | `[docker] dind`      | `true`                                  | Mount Docker socket into runners (Docker backend) |
 | `--shared-volume`   | `[docker] shared-volume` |                                     | Shared Docker volume path (Docker backend)        |
-| `--tart-image`      | `[tart] image`       |                                         | Tart VM image name (Tart backend, required)       |
 | `--tart-cpu`        | `[tart] cpu`         | `0` (image default)                     | CPU cores per VM (Tart backend)                   |
 | `--tart-memory`     | `[tart] memory`      | `0` (image default)                     | Memory in MB per VM (Tart backend)                |
 | `--tart-runner-dir` | `[tart] runner-dir`  | `/Users/admin/actions-runner`           | Runner install directory inside Tart VM           |

@@ -45,24 +45,34 @@ RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_MAJOR}.x | sudo -E bash -
 RUN sudo npm install -g pnpm
 
 # ── Android SDK (command-line tools only) ─────────────────────────────────────
-ENV ANDROID_HOME=/opt/android-sdk
+# Install under runner's home so all runtime operations (Gradle auto-provisioning,
+# sdkmanager updates, license acceptance) work without sudo or chown.
+ENV ANDROID_HOME=/home/runner/android-sdk
 ENV PATH="${ANDROID_HOME}/cmdline-tools/latest/bin:${ANDROID_HOME}/platform-tools:${PATH}"
 
 ARG ANDROID_CMDLINE_TOOLS_VERSION=14742923
-RUN sudo mkdir -p ${ANDROID_HOME}/cmdline-tools \
+RUN mkdir -p ${ANDROID_HOME}/cmdline-tools \
     && wget -qO /tmp/cmdline-tools.zip \
        "https://dl.google.com/android/repository/commandlinetools-linux-${ANDROID_CMDLINE_TOOLS_VERSION}_latest.zip" \
-    && sudo unzip -q /tmp/cmdline-tools.zip -d ${ANDROID_HOME}/cmdline-tools \
-    && sudo mv ${ANDROID_HOME}/cmdline-tools/cmdline-tools ${ANDROID_HOME}/cmdline-tools/latest \
+    && unzip -q /tmp/cmdline-tools.zip -d ${ANDROID_HOME}/cmdline-tools \
+    && mv ${ANDROID_HOME}/cmdline-tools/cmdline-tools ${ANDROID_HOME}/cmdline-tools/latest \
     && rm /tmp/cmdline-tools.zip \
-    && yes | sudo ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager --licenses 2>&1 | tail -1 \
-    && sudo ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager \
+    && yes | ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager --licenses 2>&1 | tail -1 \
+    && ${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager \
        "platform-tools" \
        "platforms;android-36" \
        "build-tools;36.0.0" \
        "ndk;27.1.12297006" \
-       "cmake;3.22.1" \
-    && sudo chown -R runner:runner ${ANDROID_HOME}
+       "cmake;3.22.1"
+
+# ── Temp directory owned by runner ─────────────────────────────────────────
+# Redirect all temp file creation to a runner-owned directory so that any
+# tool (Gradle, EAS CLI, npx, etc.) can freely create subdirectories
+# without hitting permission errors on /tmp.
+RUN mkdir -p /home/runner/tmp
+ENV TMPDIR=/home/runner/tmp
+ENV TEMP=/home/runner/tmp
+ENV TMP=/home/runner/tmp
 
 # ── Verify installations ─────────────────────────────────────────────────────
 RUN set -x \

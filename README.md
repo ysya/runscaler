@@ -18,6 +18,7 @@ Runners are **ephemeral** — each container/VM handles exactly one job and is r
   - [Install](#install)
   - [Run](#run)
 - [Commands](#commands)
+  - [Updating](#updating)
 - [Configuration](#configuration)
   - [Config File (TOML)](#config-file-toml)
   - [Token Security](#token-security)
@@ -158,6 +159,20 @@ jobs:
 | `runscaler doctor`         | Diagnose and clean up orphaned containers/VMs          |
 | `runscaler version`        | Show version, commit, build date, and runtime info     |
 | `runscaler version --check`| Check GitHub for newer releases                        |
+| `runscaler update`         | Update runscaler to the latest release                 |
+| `runscaler update --check` | Check for updates without installing                   |
+
+### Updating
+
+```bash
+# Update to the latest release (downloads, verifies checksum, replaces binary in-place)
+runscaler update
+
+# Check if a newer version is available without installing
+runscaler update --check
+```
+
+`runscaler update` downloads the archive for your platform, verifies its SHA-256 checksum against the release's `checksums.txt`, then atomically replaces the running binary. Restart runscaler after updating.
 
 ### Troubleshooting with `doctor`
 
@@ -342,7 +357,7 @@ internal/
   backend/           RunnerBackend interface + Docker/Tart implementations
   scaler/            Implements listener.Scaler for runner lifecycle
   health/            Health check HTTP server
-  versioncheck/      GitHub releases API client for update notifications
+  versioncheck/      GitHub releases API client for update notifications and in-place binary updates
 ```
 
 The `RunnerBackend` interface abstracts container/VM lifecycle:

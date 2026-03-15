@@ -286,7 +286,7 @@ func run(ctx context.Context, cfg config.Config) error {
 			return
 		}
 		if versioncheck.IsNewer(version, release.TagName) {
-			logger.Warn("A newer version of runscaler is available",
+			logger.Warn("A newer version of runscaler is available — run 'runscaler update' to upgrade",
 				slog.String("current", version),
 				slog.String("latest", release.TagName),
 			)

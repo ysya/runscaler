@@ -162,7 +162,6 @@ jobs:
 | `runscaler status`         | Show current runner status via health endpoint         |
 | `runscaler doctor`         | Diagnose and clean up orphaned containers/VMs          |
 | `runscaler version`        | Show version, commit, build date, and runtime info     |
-| `runscaler version --check`| Check GitHub for newer releases                        |
 | `runscaler update`         | Update runscaler to the latest release                 |
 | `runscaler update --check` | Check for updates without installing                   |
 

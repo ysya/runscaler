@@ -6,27 +6,21 @@ import (
 	"runtime"
 
 	"github.com/spf13/cobra"
-
-	"github.com/ysya/runscaler/internal/versioncheck"
 )
 
 var versionCmd = &cobra.Command{
 	Use:   "version",
 	Short: "Show version information",
-	Long: `Display the version, commit hash, build date, and runtime info.
-
-Use --check to query the GitHub releases API for newer versions.`,
+	Long:  `Display the version, commit hash, build date, and runtime info.`,
 	Example: `  runscaler version            # Show version info
   runscaler version --short    # Print version number only
-  runscaler version --json     # Output as JSON
-  runscaler version --check    # Check for updates`,
+  runscaler version --json     # Output as JSON`,
 	RunE: runVersion,
 }
 
 func init() {
 	versionCmd.Flags().Bool("json", false, "Output as JSON")
 	versionCmd.Flags().Bool("short", false, "Print version number only")
-	versionCmd.Flags().Bool("check", false, "Check for newer version on GitHub")
 }
 
 type versionInfo struct {
@@ -41,8 +35,6 @@ type versionInfo struct {
 func runVersion(cmd *cobra.Command, _ []string) error {
 	jsonOutput, _ := cmd.Flags().GetBool("json")
 	short, _ := cmd.Flags().GetBool("short")
-	check, _ := cmd.Flags().GetBool("check")
-
 	if short {
 		fmt.Fprintln(cmd.OutOrStdout(), version)
 		return nil
@@ -73,28 +65,5 @@ func runVersion(cmd *cobra.Command, _ []string) error {
 	fmt.Fprintf(cmd.OutOrStdout(), "  go:     %s\n", info.Go)
 	fmt.Fprintf(cmd.OutOrStdout(), "  os:     %s/%s\n", info.OS, info.Arch)
 
-	if check {
-		return checkLatestVersion(cmd)
-	}
-
-	return nil
-}
-
-func checkLatestVersion(cmd *cobra.Command) error {
-	release, err := versioncheck.Latest(cmd.Context())
-	if err != nil {
-		fmt.Fprintf(cmd.ErrOrStderr(), "\nCould not check for updates: %s\n", err)
-		return nil // non-fatal
-	}
-
-	if versioncheck.IsNewer(version, release.TagName) {
-		fmt.Fprintf(cmd.OutOrStdout(),
-			"\nA newer version is available: %s (you have %s)\n"+
-				"  Upgrade:  curl -fsSL https://raw.githubusercontent.com/ysya/runscaler/main/install.sh | sh\n"+
-				"  Release:  %s\n",
-			release.TagName, version, release.HTMLURL)
-	} else {
-		fmt.Fprintln(cmd.OutOrStdout(), "\nYou are up to date.")
-	}
 	return nil
 }

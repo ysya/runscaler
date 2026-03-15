@@ -60,6 +60,8 @@ RUN sudo mkdir -p ${ANDROID_HOME}/cmdline-tools \
        "platform-tools" \
        "platforms;android-36" \
        "build-tools;36.0.0" \
+       "ndk;27.1.12297006" \
+       "cmake;3.22.1" \
     && sudo chown -R runner:runner ${ANDROID_HOME}
 
 # ── Verify installations ─────────────────────────────────────────────────────

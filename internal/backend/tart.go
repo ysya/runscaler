@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -108,7 +109,7 @@ func NewTartBackend(ss config.ScaleSetConfig, logger *slog.Logger) *TartBackend 
 		vmSlots:    make(chan int, ss.MaxRunners),
 	}
 	// Pre-fill slot indices: each slot gets a deterministic MAC address
-	for i := 0; i < ss.MaxRunners; i++ {
+	for i := range ss.MaxRunners {
 		b.vmSlots <- i
 	}
 	return b
@@ -124,12 +125,12 @@ func (b *TartBackend) StartPool(ctx context.Context) {
 	b.poolCtx, b.poolStop = context.WithCancel(ctx)
 
 	b.logger.Info("Starting VM warm pool", slog.Int("poolSize", b.poolSize))
-	for i := 0; i < b.poolSize; i++ {
+	for i := range b.poolSize {
 		b.poolWg.Add(1)
-		go func(idx int) {
+		go func() {
 			defer b.poolWg.Done()
-			b.fillPool(idx)
-		}(i)
+			b.fillPool(i)
+		}()
 	}
 }
 
@@ -226,10 +227,10 @@ func (b *TartBackend) bootVM(ctx context.Context, name string) (*warmVM, error) 
 	if b.cpu > 0 || b.memory > 0 {
 		args := []string{"set", name}
 		if b.cpu > 0 {
-			args = append(args, "--cpu", fmt.Sprintf("%d", b.cpu))
+			args = append(args, "--cpu", strconv.Itoa(b.cpu))
 		}
 		if b.memory > 0 {
-			args = append(args, "--memory", fmt.Sprintf("%d", b.memory))
+			args = append(args, "--memory", strconv.Itoa(b.memory))
 		}
 		if _, err := b.cmd.Run(ctx, "tart", args...); err != nil {
 			releaseSlot()

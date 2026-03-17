@@ -297,15 +297,15 @@ func run(ctx context.Context, cfg config.Config) error {
 	var wg sync.WaitGroup
 	errs := make(chan error, len(scaleSets))
 
-	for i := range scaleSets {
+	for i, ss := range scaleSets {
 		wg.Add(1)
-		go func(idx int, ss config.ScaleSetConfig) {
+		go func() {
 			defer wg.Done()
-			ssLogger := config.NewScaleSetLogger(cfg.LogLevel, cfg.LogFormat, ss.ScaleSetName, idx)
+			ssLogger := config.NewScaleSetLogger(cfg.LogLevel, cfg.LogFormat, ss.ScaleSetName, i)
 			if err := runScaleSet(ctx, ss, dockerClient, ssLogger, healthServer); err != nil {
 				errs <- fmt.Errorf("scaleset %q: %w", ss.ScaleSetName, err)
 			}
-		}(i, scaleSets[i])
+		}()
 	}
 
 	wg.Wait()

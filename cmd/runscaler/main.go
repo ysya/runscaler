@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -19,6 +18,8 @@ import (
 	"github.com/actions/scaleset/listener"
 	"github.com/docker/docker/api/types/image"
 	dockerclient "github.com/docker/docker/client"
+	"github.com/docker/docker/pkg/jsonmessage"
+	"golang.org/x/term"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -209,14 +210,19 @@ func run(ctx context.Context, cfg config.Config) error {
 				continue
 			}
 			logger.Info("Pulling runner image", slog.String("image", ss.RunnerImage), slog.String("platform", ss.Docker.Platform))
-			pull, err := dockerClient.ImagePull(ctx, ss.RunnerImage, image.PullOptions{Platform: ss.Docker.Platform})
+			pullCtx, pullCancel := context.WithTimeout(ctx, 30*time.Minute)
+			pull, err := dockerClient.ImagePull(pullCtx, ss.RunnerImage, image.PullOptions{Platform: ss.Docker.Platform})
 			if err != nil {
+				pullCancel()
 				return fmt.Errorf("failed to pull runner image %s: %w", ss.RunnerImage, err)
 			}
-			if _, err := io.ReadAll(pull); err != nil {
-				return fmt.Errorf("failed to read image pull response: %w", err)
-			}
+			fd := os.Stdout.Fd()
+			pullErr := jsonmessage.DisplayJSONMessagesStream(pull, os.Stdout, fd, term.IsTerminal(int(fd)), nil)
 			pull.Close()
+			pullCancel()
+			if pullErr != nil {
+				return fmt.Errorf("failed to pull runner image %s: %w", ss.RunnerImage, pullErr)
+			}
 			pulled[pullKey] = true
 		}
 	}

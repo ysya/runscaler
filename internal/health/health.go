@@ -7,11 +7,18 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/ysya/runscaler/internal/metrics"
 )
 
 // RunnerCounter provides runner count information.
 type RunnerCounter interface {
 	RunnerCounts() (idle, busy int)
+}
+
+// MetricsProvider provides a snapshot of listener metrics for a scale set.
+type MetricsProvider interface {
+	Snapshot() metrics.Snapshot
 }
 
 // HealthServer provides /healthz and /readyz endpoints for monitoring.
@@ -21,13 +28,25 @@ type HealthServer struct {
 	version   string
 	mu        sync.RWMutex
 	scalers   map[string]RunnerCounter
+	metrics   map[string]MetricsProvider
 }
 
 // ScaleSetStatus represents the status of a single scale set.
 type ScaleSetStatus struct {
-	Name string `json:"name"`
-	Idle int    `json:"idle"`
-	Busy int    `json:"busy"`
+	Name           string          `json:"name"`
+	Idle           int             `json:"idle"`
+	Busy           int             `json:"busy"`
+	Metrics        *MetricsStatus  `json:"metrics,omitempty"`
+}
+
+// MetricsStatus holds listener-level metrics for a scale set.
+type MetricsStatus struct {
+	JobsStarted    int64  `json:"jobs_started"`
+	JobsCompleted  int64  `json:"jobs_completed"`
+	DesiredRunners int    `json:"desired_runners"`
+	AvailableJobs  int    `json:"available_jobs,omitempty"`
+	AssignedJobs   int    `json:"assigned_jobs,omitempty"`
+	RunningJobs    int    `json:"running_jobs,omitempty"`
 }
 
 // HealthResponse is the JSON response for /healthz.
@@ -44,6 +63,7 @@ func NewHealthServer(port int, version string) *HealthServer {
 		startTime: time.Now(),
 		version:   version,
 		scalers:   make(map[string]RunnerCounter),
+		metrics:   make(map[string]MetricsProvider),
 	}
 
 	mux := http.NewServeMux()
@@ -77,6 +97,14 @@ func (h *HealthServer) RegisterScaler(name string, s RunnerCounter) {
 func (h *HealthServer) UnregisterScaler(name string) {
 	h.mu.Lock()
 	delete(h.scalers, name)
+	delete(h.metrics, name)
+	h.mu.Unlock()
+}
+
+// RegisterMetrics associates a MetricsProvider with a named scale set.
+func (h *HealthServer) RegisterMetrics(name string, m MetricsProvider) {
+	h.mu.Lock()
+	h.metrics[name] = m
 	h.mu.Unlock()
 }
 
@@ -93,11 +121,26 @@ func (h *HealthServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
 
 	for name, s := range h.scalers {
 		idle, busy := s.RunnerCounts()
-		resp.ScaleSets = append(resp.ScaleSets, ScaleSetStatus{
+		ss := ScaleSetStatus{
 			Name: name,
 			Idle: idle,
 			Busy: busy,
-		})
+		}
+		if m, ok := h.metrics[name]; ok {
+			snap := m.Snapshot()
+			ms := &MetricsStatus{
+				JobsStarted:    snap.JobsStarted,
+				JobsCompleted:  snap.JobsCompleted,
+				DesiredRunners: snap.DesiredRunners,
+			}
+			if snap.Statistics != nil {
+				ms.AvailableJobs = snap.Statistics.TotalAvailableJobs
+				ms.AssignedJobs = snap.Statistics.TotalAssignedJobs
+				ms.RunningJobs = snap.Statistics.TotalRunningJobs
+			}
+			ss.Metrics = ms
+		}
+		resp.ScaleSets = append(resp.ScaleSets, ss)
 	}
 
 	w.Header().Set("Content-Type", "application/json")

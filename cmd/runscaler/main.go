@@ -27,6 +27,7 @@ import (
 	"github.com/ysya/runscaler/internal/backend"
 	"github.com/ysya/runscaler/internal/config"
 	"github.com/ysya/runscaler/internal/health"
+	"github.com/ysya/runscaler/internal/metrics"
 	"github.com/ysya/runscaler/internal/scaler"
 	"github.com/ysya/runscaler/internal/versioncheck"
 )
@@ -191,6 +192,7 @@ func run(ctx context.Context, cfg config.Config) error {
 		if err != nil {
 			return fmt.Errorf("failed to create docker client: %w", err)
 		}
+		defer dockerClient.Close()
 
 		if _, err := dockerClient.Ping(ctx); err != nil {
 			return fmt.Errorf("cannot connect to Docker at %s: %w\n\n"+
@@ -383,10 +385,12 @@ func runScaleSet(ctx context.Context, ss config.ScaleSetConfig, dockerClient *do
 	// Set user agent info
 	scalesetClient.SetSystemInfo(config.NewSystemInfo(scaleSet.ID, version))
 
-	// Delete scale set on exit
+	// Delete scale set on exit (with timeout to avoid hanging if API is unresponsive)
 	defer func() {
 		logger.Info("Deleting runner scale set", slog.Int("scaleSetID", scaleSet.ID))
-		if err := scalesetClient.DeleteRunnerScaleSet(context.WithoutCancel(ctx), scaleSet.ID); err != nil {
+		cleanCtx, cleanCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cleanCancel()
+		if err := scalesetClient.DeleteRunnerScaleSet(cleanCtx, scaleSet.ID); err != nil {
 			logger.Error("Failed to delete runner scale set", slog.Any("error", err))
 		}
 	}()
@@ -411,9 +415,13 @@ func runScaleSet(ctx context.Context, ss config.ScaleSetConfig, dockerClient *do
 		)
 	}
 
+	// Metrics recorder for this scale set
+	recorder := &metrics.Recorder{}
+
 	// Register with health server
 	if h != nil {
 		h.RegisterScaler(ss.ScaleSetName, s)
+		h.RegisterMetrics(ss.ScaleSetName, recorder)
 		defer h.UnregisterScaler(ss.ScaleSetName)
 	}
 
@@ -434,8 +442,8 @@ func runScaleSet(ctx context.Context, ss config.ScaleSetConfig, dockerClient *do
 			slog.Int("minRunners", ss.MinRunners),
 		)
 
-		listenErr := listenOnce(ctx, scalesetClient, scaleSet.ID, sessionID, ss.MaxRunners, s, logger)
-		if listenErr == nil || ctx.Err() != nil {
+		listenErr := listenOnce(ctx, scalesetClient, scaleSet.ID, sessionID, ss.MaxRunners, s, recorder, logger)
+		if listenErr == nil || ctx.Err() != nil || errors.Is(listenErr, context.Canceled) {
 			// Clean exit: either listener finished normally or the parent
 			// context was canceled (user sent SIGTERM/SIGINT).
 			return nil
@@ -457,7 +465,7 @@ func runScaleSet(ctx context.Context, ss config.ScaleSetConfig, dockerClient *do
 
 // listenOnce creates a message session and listener, then runs until
 // disconnection or context cancellation. Callers retry on transient errors.
-func listenOnce(ctx context.Context, client *scaleset.Client, scaleSetID int, sessionID string, maxRunners int, s *scaler.Scaler, logger *slog.Logger) error {
+func listenOnce(ctx context.Context, client *scaleset.Client, scaleSetID int, sessionID string, maxRunners int, s *scaler.Scaler, recorder *metrics.Recorder, logger *slog.Logger) error {
 	sessionClient, err := client.MessageSessionClient(ctx, scaleSetID, sessionID)
 	if err != nil {
 		return fmt.Errorf("failed to create message session: %w", err)
@@ -468,7 +476,7 @@ func listenOnce(ctx context.Context, client *scaleset.Client, scaleSetID int, se
 		ScaleSetID: scaleSetID,
 		MaxRunners: maxRunners,
 		Logger:     logger,
-	})
+	}, listener.WithMetricsRecorder(recorder))
 	if err != nil {
 		return fmt.Errorf("failed to create listener: %w", err)
 	}

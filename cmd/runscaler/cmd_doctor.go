@@ -43,9 +43,10 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	fix, _ := cmd.Flags().GetBool("fix")
 	healthPort, _ := cmd.Flags().GetInt("health-port")
 
-	// Try to load config for docker socket path; fall back to default
+	// Try to load config for docker socket path and scaleset info
 	dockerSocket := config.DefaultDockerSocket
-	if cfg, err := loadConfig(cmd); err == nil {
+	cfg, cfgErr := loadConfig(cmd)
+	if cfgErr == nil {
 		dockerSocket = cfg.Defaults.Docker.Socket
 	}
 
@@ -59,6 +60,11 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 			fmt.Println("    Stop runscaler first before using --fix")
 			return fmt.Errorf("cannot fix while runscaler is running")
 		}
+	}
+
+	// Scaleset API connectivity check (if config is available)
+	if cfgErr == nil {
+		checkScalesetAPI(ctx, &cfg)
 	}
 
 	var totalOrphans int
@@ -88,6 +94,36 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("orphaned resources found")
 	}
 	return nil
+}
+
+// checkScalesetAPI tests scaleset API connectivity and prints debug info.
+func checkScalesetAPI(ctx context.Context, cfg *config.Config) {
+	scaleSets := cfg.ResolveScaleSets()
+	if len(scaleSets) == 0 {
+		return
+	}
+
+	// Use the first scale set with a token for the connectivity check
+	var ss config.ScaleSetConfig
+	for _, s := range scaleSets {
+		if s.Token != "" && s.RegistrationURL != "" {
+			ss = s
+			break
+		}
+	}
+	if ss.Token == "" {
+		fmt.Println("  - Scaleset API: no token configured (skipping)")
+		return
+	}
+
+	client, err := config.NewScalesetClient(ss.RegistrationURL, ss.Token, nil)
+	if err != nil {
+		fmt.Printf("  ✗ Scaleset API: failed to create client: %s\n", err)
+		return
+	}
+
+	fmt.Println("  ✓ Scaleset API client created")
+	fmt.Printf("    Debug: %s\n", client.DebugInfo())
 }
 
 // isRunscalerRunning checks if a runscaler instance is responding on the health port.

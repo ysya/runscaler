@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/actions/scaleset"
 	"github.com/actions/scaleset/listener"
@@ -141,14 +142,21 @@ func (s *Scaler) startRunner(ctx context.Context) (string, error) {
 }
 
 // Shutdown force-removes all managed runners.
+// The provided context should already be detached from cancellation
+// (e.g. via context.WithoutCancel); this method adds a timeout to
+// prevent hanging if a backend operation is unresponsive.
 func (s *Scaler) Shutdown(ctx context.Context) {
 	s.logger.Info("Shutting down runners")
+
+	shutdownCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
 	s.runners.mu.Lock()
 	defer s.runners.mu.Unlock()
 
 	for name, resourceID := range s.runners.idle {
 		s.logger.Debug("Removing idle runner", slog.String("name", name))
-		if err := s.backend.RemoveRunner(ctx, resourceID); err != nil {
+		if err := s.backend.RemoveRunner(shutdownCtx, resourceID); err != nil {
 			s.logger.Error("Failed to remove idle runner", slog.String("name", name), slog.Any("error", err))
 		}
 	}
@@ -156,13 +164,13 @@ func (s *Scaler) Shutdown(ctx context.Context) {
 
 	for name, resourceID := range s.runners.busy {
 		s.logger.Debug("Removing busy runner", slog.String("name", name))
-		if err := s.backend.RemoveRunner(ctx, resourceID); err != nil {
+		if err := s.backend.RemoveRunner(shutdownCtx, resourceID); err != nil {
 			s.logger.Error("Failed to remove busy runner", slog.String("name", name), slog.Any("error", err))
 		}
 	}
 	clear(s.runners.busy)
 
-	s.backend.Shutdown(ctx)
+	s.backend.Shutdown(shutdownCtx)
 }
 
 // RunnerCounts returns the number of idle and busy runners.

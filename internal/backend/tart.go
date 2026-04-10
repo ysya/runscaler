@@ -279,11 +279,15 @@ func (b *TartBackend) bootVM(ctx context.Context, name string) (*warmVM, error) 
 // Uses locally administered unicast addresses (02:00:00:00:00:XX) so
 // the DHCP server always assigns the same IP to the same slot index.
 func (b *TartBackend) setVMMAC(name string, slotIdx int) error {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("get home dir: %w", err)
+	tartHome := os.Getenv("TART_HOME")
+	if tartHome == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return fmt.Errorf("get home dir: %w", err)
+		}
+		tartHome = filepath.Join(home, ".tart")
 	}
-	configPath := filepath.Join(home, ".tart", "vms", name, "config.json")
+	configPath := filepath.Join(tartHome, "vms", name, "config.json")
 
 	data, err := os.ReadFile(configPath)
 	if err != nil {

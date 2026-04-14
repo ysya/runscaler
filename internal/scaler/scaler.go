@@ -141,7 +141,7 @@ func (s *Scaler) startRunner(ctx context.Context) (string, error) {
 	return name, nil
 }
 
-// Shutdown force-removes all managed runners.
+// Shutdown force-removes all managed runners in parallel.
 // The provided context should already be detached from cancellation
 // (e.g. via context.WithoutCancel); this method adds a timeout to
 // prevent hanging if a backend operation is unresponsive.
@@ -152,24 +152,31 @@ func (s *Scaler) Shutdown(ctx context.Context) {
 	defer cancel()
 
 	s.runners.mu.Lock()
-	defer s.runners.mu.Unlock()
+
+	var wg sync.WaitGroup
+	removeRunner := func(label, name, resourceID string) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s.logger.Debug("Removing "+label+" runner", slog.String("name", name))
+			if err := s.backend.RemoveRunner(shutdownCtx, resourceID); err != nil {
+				s.logger.Error("Failed to remove "+label+" runner", slog.String("name", name), slog.Any("error", err))
+			}
+		}()
+	}
 
 	for name, resourceID := range s.runners.idle {
-		s.logger.Debug("Removing idle runner", slog.String("name", name))
-		if err := s.backend.RemoveRunner(shutdownCtx, resourceID); err != nil {
-			s.logger.Error("Failed to remove idle runner", slog.String("name", name), slog.Any("error", err))
-		}
+		removeRunner("idle", name, resourceID)
+	}
+	for name, resourceID := range s.runners.busy {
+		removeRunner("busy", name, resourceID)
 	}
 	clear(s.runners.idle)
-
-	for name, resourceID := range s.runners.busy {
-		s.logger.Debug("Removing busy runner", slog.String("name", name))
-		if err := s.backend.RemoveRunner(shutdownCtx, resourceID); err != nil {
-			s.logger.Error("Failed to remove busy runner", slog.String("name", name), slog.Any("error", err))
-		}
-	}
 	clear(s.runners.busy)
 
+	s.runners.mu.Unlock()
+
+	wg.Wait()
 	s.backend.Shutdown(shutdownCtx)
 }
 

@@ -271,7 +271,7 @@ func run(ctx context.Context, cfg config.Config) error {
 	// Start health check server
 	var healthServer *health.HealthServer
 	if cfg.HealthPort > 0 {
-		healthServer = health.NewHealthServer(cfg.HealthPort, version)
+		healthServer = health.NewHealthServer(cfg.HealthPort, version, logger)
 		ln, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.HealthPort))
 		if err != nil {
 			return fmt.Errorf("failed to start health server on port %d: %w", cfg.HealthPort, err)
@@ -442,11 +442,18 @@ func runScaleSet(ctx context.Context, ss config.ScaleSetConfig, dockerClient *do
 			slog.Int("minRunners", ss.MinRunners),
 		)
 
+		listenStart := time.Now()
 		listenErr := listenOnce(ctx, scalesetClient, scaleSet.ID, sessionID, ss.MaxRunners, s, recorder, logger)
 		if listenErr == nil || ctx.Err() != nil || errors.Is(listenErr, context.Canceled) {
 			// Clean exit: either listener finished normally or the parent
 			// context was canceled (user sent SIGTERM/SIGINT).
 			return nil
+		}
+
+		// If the listener ran for a meaningful period, the disconnect is
+		// a fresh transient failure — reset backoff so we reconnect quickly.
+		if time.Since(listenStart) > maxBackoff {
+			backoff = 5 * time.Second
 		}
 
 		logger.Warn("Listener disconnected, will reconnect",

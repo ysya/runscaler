@@ -3,6 +3,7 @@ package health
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net"
 	"net/http"
 	"sync"
@@ -26,6 +27,7 @@ type HealthServer struct {
 	server    *http.Server
 	startTime time.Time
 	version   string
+	logger    *slog.Logger
 	mu        sync.RWMutex
 	scalers   map[string]RunnerCounter
 	metrics   map[string]MetricsProvider
@@ -58,10 +60,11 @@ type HealthResponse struct {
 }
 
 // NewHealthServer creates a new health check HTTP server.
-func NewHealthServer(port int, version string) *HealthServer {
+func NewHealthServer(port int, version string, logger *slog.Logger) *HealthServer {
 	h := &HealthServer{
 		startTime: time.Now(),
 		version:   version,
+		logger:    logger,
 		scalers:   make(map[string]RunnerCounter),
 		metrics:   make(map[string]MetricsProvider),
 	}
@@ -144,10 +147,25 @@ func (h *HealthServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		h.logger.Error("Failed to encode health response", slog.Any("error", err))
+	}
 }
 
 func (h *HealthServer) handleReadyz(w http.ResponseWriter, r *http.Request) {
+	h.mu.RLock()
+	ready := len(h.scalers) > 0
+	h.mu.RUnlock()
+
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	if !ready {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		if err := json.NewEncoder(w).Encode(map[string]string{"status": "not ready"}); err != nil {
+			h.logger.Error("Failed to encode readyz response", slog.Any("error", err))
+		}
+		return
+	}
+	if err := json.NewEncoder(w).Encode(map[string]string{"status": "ok"}); err != nil {
+		h.logger.Error("Failed to encode readyz response", slog.Any("error", err))
+	}
 }

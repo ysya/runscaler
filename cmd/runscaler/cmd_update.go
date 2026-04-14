@@ -27,6 +27,10 @@ func init() {
 func runUpdate(cmd *cobra.Command, _ []string) error {
 	checkOnly, _ := cmd.Flags().GetBool("check")
 
+	if version == "dev" {
+		fmt.Fprintln(cmd.ErrOrStderr(), "Warning: running a dev build — version comparison may be inaccurate.")
+	}
+
 	fmt.Fprintln(cmd.OutOrStdout(), "Checking for updates...")
 
 	release, err := versioncheck.Latest(cmd.Context())

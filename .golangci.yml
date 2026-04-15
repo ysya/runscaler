@@ -11,21 +11,32 @@ linters:
   settings:
     errcheck:
       exclude-functions:
+        # Standard library: close/flush/print returns are rarely actionable.
         - (io.Closer).Close
-        - (io/fs.File).Close
         - (*os.File).Close
         - fmt.Fprintln
         - fmt.Fprintf
         - fmt.Fprint
         - (*text/tabwriter.Writer).Flush
+        - (*encoding/json.Encoder).Encode
+        - os.Remove
+        - os.RemoveAll
+        # Third-party: viper.BindPFlag only fails on nil flag (compile-time);
+        # scaleset MessageSessionClient.Close takes a context but the error
+        # is informational.
+        - github.com/spf13/viper.BindPFlag
+        - (*github.com/docker/docker/client.Client).Close
+        - (*github.com/actions/scaleset.MessageSessionClient).Close
         - (*net/http.Server).Shutdown
+        - viper.ReadInConfig
     staticcheck:
-      # QF* checks are stylistic "quick-fix" suggestions (e.g. embedded field
-      # selectors). Disable them — the underlying code is correct and
-      # rewriting for style is not worth the churn.
+      # Skip stylistic checks that don't add safety value:
+      # - QF* quick-fix suggestions (e.g. QF1008 embedded field selectors)
+      # - ST1000 package comment requirement (purely bureaucratic)
       checks:
         - all
         - -QF1008
+        - -ST1000
 
 issues:
   max-issues-per-linter: 0

@@ -1,23 +1,23 @@
+version: "2"
+
 linters:
+  default: none
   enable:
     - errcheck
     - govet
     - staticcheck
     - unused
-    - gosimple
     - ineffassign
-    - typecheck
     - gocritic
     - gosec
-
-linters-settings:
-  errcheck:
-    check-type-assertions: true
-  gocritic:
-    enabled-tags:
-      - diagnostic
-      - performance
+  settings:
+    errcheck:
+      check-type-assertions: true
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - performance
 
 issues:
-  exclude-dirs:
-    - vendor
+  max-issues-per-linter: 0
+  max-same-issues: 0

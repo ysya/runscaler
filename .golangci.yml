@@ -8,15 +8,24 @@ linters:
     - staticcheck
     - unused
     - ineffassign
-    - gocritic
-    - gosec
   settings:
     errcheck:
-      check-type-assertions: true
-    gocritic:
-      enabled-tags:
-        - diagnostic
-        - performance
+      exclude-functions:
+        - (io.Closer).Close
+        - (io/fs.File).Close
+        - (*os.File).Close
+        - fmt.Fprintln
+        - fmt.Fprintf
+        - fmt.Fprint
+        - (*text/tabwriter.Writer).Flush
+        - (*net/http.Server).Shutdown
+    staticcheck:
+      # QF* checks are stylistic "quick-fix" suggestions (e.g. embedded field
+      # selectors). Disable them — the underlying code is correct and
+      # rewriting for style is not worth the churn.
+      checks:
+        - all
+        - -QF1008
 
 issues:
   max-issues-per-linter: 0

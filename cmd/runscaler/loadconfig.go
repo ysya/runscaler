@@ -23,7 +23,7 @@ func loadConfig(cmd *cobra.Command) (config.Config, error) {
 		viper.SetConfigType("toml")
 		viper.AddConfigPath(".")
 		viper.AddConfigPath("/etc/runscaler")
-		viper.ReadInConfig() // ignore error — default paths are optional
+		_ = viper.ReadInConfig() // ignore error — default paths are optional
 	}
 
 	var cfg config.Config

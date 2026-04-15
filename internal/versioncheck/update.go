@@ -180,7 +180,7 @@ func extractBinary(archivePath, binaryName, destPath string) error {
 	if err != nil {
 		return err
 	}
-	defer gz.Close()
+	defer func() { _ = gz.Close() }()
 
 	tr := tar.NewReader(gz)
 	for {

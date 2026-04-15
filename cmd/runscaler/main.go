@@ -281,7 +281,7 @@ func run(ctx context.Context, cfg config.Config) error {
 				logger.Error("Health server error", slog.Any("error", err))
 			}
 		}()
-		defer healthServer.Shutdown(context.WithoutCancel(ctx))
+		defer func() { _ = healthServer.Shutdown(context.WithoutCancel(ctx)) }()
 		logger.Info("Health check server started", slog.Int("port", cfg.HealthPort))
 	}
 

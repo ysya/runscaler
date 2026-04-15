@@ -155,16 +155,11 @@ func (b *DockerBackend) RemoveRunner(ctx context.Context, resourceID string) err
 	return nil
 }
 
-// Shutdown removes the shared Docker volume and prunes dangling resources.
-func (b *DockerBackend) Shutdown(ctx context.Context) {
-	if b.sharedVolume != "" {
-		b.logger.Debug("Removing shared volume", slog.String("volume", "runscaler-shared"))
-		if err := b.dockerClient.VolumeRemove(ctx, "runscaler-shared", true); err != nil {
-			b.logger.Error("Failed to remove shared volume", slog.Any("error", err))
-		}
-	}
-	b.pruneDocker(ctx)
-}
+// Shutdown is a no-op for DockerBackend — shared Docker resources
+// (volume, image/build caches) are cleaned up once at process exit via
+// CleanupSharedDocker to avoid races when multiple scale sets share the
+// same Docker client and volume.
+func (b *DockerBackend) Shutdown(_ context.Context) {}
 
 // buildContainerEnv returns the environment variables for a runner container.
 func (b *DockerBackend) buildContainerEnv(jitConfig string) []string {
@@ -177,26 +172,37 @@ func (b *DockerBackend) buildContainerEnv(jitConfig string) []string {
 	return env
 }
 
-// pruneDocker removes dangling images and build cache.
-func (b *DockerBackend) pruneDocker(ctx context.Context) {
-	b.logger.Debug("Pruning Docker resources")
+// CleanupSharedDocker removes the shared Docker volume (if removeVolume is
+// true) and prunes dangling images and build cache. It is safe to call once
+// after all Docker-backed scale sets have finished shutting down; calling it
+// concurrently or per-backend will race with container removal and other
+// prune operations.
+func CleanupSharedDocker(ctx context.Context, client DockerAPI, removeVolume bool, logger *slog.Logger) {
+	if removeVolume {
+		logger.Debug("Removing shared volume", slog.String("volume", "runscaler-shared"))
+		if err := client.VolumeRemove(ctx, "runscaler-shared", true); err != nil {
+			logger.Error("Failed to remove shared volume", slog.Any("error", err))
+		}
+	}
+
+	logger.Debug("Pruning Docker resources")
 
 	pruneFilters := filters.NewArgs(filters.Arg("dangling", "true"))
-	imagesReport, err := b.dockerClient.ImagesPrune(ctx, pruneFilters)
+	imagesReport, err := client.ImagesPrune(ctx, pruneFilters)
 	if err != nil {
-		b.logger.Error("Failed to prune images", slog.Any("error", err))
+		logger.Error("Failed to prune images", slog.Any("error", err))
 	} else if imagesReport.SpaceReclaimed > 0 {
-		b.logger.Debug("Pruned dangling images",
+		logger.Debug("Pruned dangling images",
 			slog.Int("count", len(imagesReport.ImagesDeleted)),
 			slog.String("reclaimed", FormatBytes(imagesReport.SpaceReclaimed)),
 		)
 	}
 
-	buildReport, err := b.dockerClient.BuildCachePrune(ctx, build.CachePruneOptions{All: true})
+	buildReport, err := client.BuildCachePrune(ctx, build.CachePruneOptions{All: true})
 	if err != nil {
-		b.logger.Error("Failed to prune build cache", slog.Any("error", err))
+		logger.Error("Failed to prune build cache", slog.Any("error", err))
 	} else if buildReport.SpaceReclaimed > 0 {
-		b.logger.Debug("Pruned build cache",
+		logger.Debug("Pruned build cache",
 			slog.String("reclaimed", FormatBytes(buildReport.SpaceReclaimed)),
 		)
 	}

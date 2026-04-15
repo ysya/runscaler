@@ -242,11 +242,25 @@ func TestDockerBackend_RemoveRunner(t *testing.T) {
 	}
 }
 
-func TestDockerBackend_Shutdown_RemovesSharedVolume(t *testing.T) {
+func TestDockerBackend_Shutdown_IsNoOp(t *testing.T) {
+	// Shared resources (volume, prune) are cleaned up once at process exit
+	// via CleanupSharedDocker, not per backend. The per-backend Shutdown
+	// must not touch shared state to avoid races between scale sets.
 	b, md := newTestDockerBackend("/shared", true)
 	ctx := context.Background()
 
 	b.Shutdown(ctx)
+
+	if len(md.volumesRemoved) != 0 {
+		t.Errorf("Shutdown should not remove volumes, removed %d", len(md.volumesRemoved))
+	}
+}
+
+func TestCleanupSharedDocker_RemovesVolume(t *testing.T) {
+	md := &mockDocker{}
+	ctx := context.Background()
+
+	CleanupSharedDocker(ctx, md, true, slog.New(slog.DiscardHandler))
 
 	if len(md.volumesRemoved) != 1 {
 		t.Fatalf("expected 1 volume removed, got %d", len(md.volumesRemoved))
@@ -256,14 +270,14 @@ func TestDockerBackend_Shutdown_RemovesSharedVolume(t *testing.T) {
 	}
 }
 
-func TestDockerBackend_Shutdown_SkipsVolumeWhenNotConfigured(t *testing.T) {
-	b, md := newTestDockerBackend("", true)
+func TestCleanupSharedDocker_SkipsVolumeWhenDisabled(t *testing.T) {
+	md := &mockDocker{}
 	ctx := context.Background()
 
-	b.Shutdown(ctx)
+	CleanupSharedDocker(ctx, md, false, slog.New(slog.DiscardHandler))
 
 	if len(md.volumesRemoved) != 0 {
-		t.Errorf("should not remove volumes when not configured, removed %d", len(md.volumesRemoved))
+		t.Errorf("should not remove volume when disabled, removed %d", len(md.volumesRemoved))
 	}
 }
 

@@ -319,6 +319,20 @@ func run(ctx context.Context, cfg config.Config) error {
 	wg.Wait()
 	close(errs)
 
+	// Clean up shared Docker resources once, after all Docker-backed scale
+	// sets have finished shutting down. Doing this per-backend races with
+	// container removal and concurrent prune operations.
+	if needsDocker && dockerClient != nil {
+		removeVolume := false
+		for _, ss := range scaleSets {
+			if !ss.IsTart() && ss.Docker.SharedVolume != "" {
+				removeVolume = true
+				break
+			}
+		}
+		backend.CleanupSharedDocker(context.WithoutCancel(ctx), dockerClient, removeVolume, logger)
+	}
+
 	// Collect errors
 	var errsSlice []error
 	for err := range errs {

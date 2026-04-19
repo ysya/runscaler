@@ -3,15 +3,16 @@ package config
 import (
 	"context"
 	"fmt"
+	"image/color"
 	"log/slog"
 	"net/url"
 	"os"
 	"strings"
 	"time"
 
+	"charm.land/lipgloss/v2"
+	charmlog "charm.land/log/v2"
 	"github.com/actions/scaleset"
-	charmlog "github.com/charmbracelet/log"
-	"github.com/charmbracelet/lipgloss"
 	"github.com/hashicorp/go-retryablehttp"
 )
 
@@ -265,7 +266,7 @@ func NewLogger(level, format string) *slog.Logger {
 // scaleSetColors is a 5-color palette for distinguishing scale sets in logs.
 // Red is excluded to avoid confusion with error output (same rationale as stern).
 // Black/white excluded for readability on dark/light terminal backgrounds.
-var scaleSetColors = []lipgloss.Color{
+var scaleSetColors = []color.Color{
 	lipgloss.Color("6"), // cyan
 	lipgloss.Color("3"), // yellow
 	lipgloss.Color("2"), // green

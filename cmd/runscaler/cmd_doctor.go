@@ -174,6 +174,19 @@ func checkDocker(ctx context.Context, socket string, fix bool) (int, error) {
 	return totalOrphans, nil
 }
 
+// containerDisplayName returns a human-friendly name for a container,
+// falling back to a short container ID when Docker reports no names
+// (e.g. partially-created containers tagged only by label).
+func containerDisplayName(c container.Summary) string {
+	if len(c.Names) > 0 {
+		return strings.TrimPrefix(c.Names[0], "/")
+	}
+	if len(c.ID) >= 12 {
+		return c.ID[:12]
+	}
+	return c.ID
+}
+
 // checkDockerContainers finds and optionally removes orphaned runner containers.
 func checkDockerContainers(ctx context.Context, client *dockerclient.Client, fix bool) (int, error) {
 	containers, err := client.ContainerList(ctx, container.ListOptions{All: true})
@@ -204,8 +217,7 @@ func checkDockerContainers(ctx context.Context, client *dockerclient.Client, fix
 	if !fix {
 		fmt.Printf("  ⚠ Found %d orphaned Docker container(s)\n", len(orphans))
 		for _, c := range orphans {
-			name := strings.TrimPrefix(c.Names[0], "/")
-			fmt.Printf("      %s (%s)\n", name, c.State)
+			fmt.Printf("      %s (%s)\n", containerDisplayName(c), c.State)
 		}
 		return len(orphans), nil
 	}
@@ -213,7 +225,7 @@ func checkDockerContainers(ctx context.Context, client *dockerclient.Client, fix
 	// Fix: remove orphaned containers
 	removed := 0
 	for _, c := range orphans {
-		name := strings.TrimPrefix(c.Names[0], "/")
+		name := containerDisplayName(c)
 		if err := client.ContainerRemove(ctx, c.ID, container.RemoveOptions{Force: true}); err != nil {
 			fmt.Printf("  ✗ Failed to remove container %s: %s\n", name, err)
 		} else {

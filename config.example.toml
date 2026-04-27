@@ -23,6 +23,8 @@ dind = true
 # shared-volume = "/shared"
 # memory = 0     # MB, 0 = unlimited (e.g. 8192 for 8GB)
 # cpu = 0        # cores, 0 = unlimited (e.g. 4)
+# shared-volume-ttl = "168h"               # delete shared-volume files older than this; 0 = disabled
+# shared-volume-cleanup-interval = "6h"    # how often to run the TTL sweep
 
 # [tart]
 # runner-dir = "/Users/admin/actions-runner"

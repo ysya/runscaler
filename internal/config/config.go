@@ -65,6 +65,14 @@ type DockerConfig struct {
 	Memory       int    `mapstructure:"memory"`        // Memory limit in MB (0 = unlimited)
 	CPU          int    `mapstructure:"cpu"`            // CPU cores (0 = unlimited)
 	Platform     string `mapstructure:"platform"`      // e.g. "linux/amd64" to force architecture
+
+	// SharedVolumeTTL deletes files in shared-volume older than this duration.
+	// 0 (default) disables TTL cleanup. Accepts Go duration strings, e.g. "168h".
+	SharedVolumeTTL time.Duration `mapstructure:"shared-volume-ttl"`
+	// SharedVolumeCleanupInterval is how often the TTL sweep runs while
+	// runscaler is up. Ignored when SharedVolumeTTL is 0. Defaults to
+	// DefaultSharedVolumeCleanupInterval when unset.
+	SharedVolumeCleanupInterval time.Duration `mapstructure:"shared-volume-cleanup-interval"`
 }
 
 // TartConfig holds Tart VM-specific backend settings.
@@ -129,6 +137,12 @@ func mergeDefaults(dst *ScaleSetConfig, defaults *ScaleSetConfig) {
 	}
 	if dst.Docker.Platform == "" {
 		dst.Docker.Platform = defaults.Docker.Platform
+	}
+	if dst.Docker.SharedVolumeTTL == 0 {
+		dst.Docker.SharedVolumeTTL = defaults.Docker.SharedVolumeTTL
+	}
+	if dst.Docker.SharedVolumeCleanupInterval == 0 {
+		dst.Docker.SharedVolumeCleanupInterval = defaults.Docker.SharedVolumeCleanupInterval
 	}
 
 	// Tart

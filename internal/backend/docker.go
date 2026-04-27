@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/docker/docker/api/types/build"
 	"github.com/docker/docker/api/types/container"
@@ -26,6 +27,7 @@ type DockerAPI interface {
 	ContainerCreate(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkingConfig *network.NetworkingConfig, platform *ocispec.Platform, containerName string) (container.CreateResponse, error)
 	ContainerStart(ctx context.Context, containerID string, options container.StartOptions) error
 	ContainerRemove(ctx context.Context, containerID string, options container.RemoveOptions) error
+	ContainerWait(ctx context.Context, containerID string, condition container.WaitCondition) (<-chan container.WaitResponse, <-chan error)
 	ImagesPrune(ctx context.Context, pruneFilters filters.Args) (image.PruneReport, error)
 	BuildCachePrune(ctx context.Context, opts build.CachePruneOptions) (*build.CachePruneReport, error)
 	VolumeRemove(ctx context.Context, volumeID string, force bool) error
@@ -231,6 +233,100 @@ func socketGroupID(path string) (int, error) {
 		return 0, fmt.Errorf("unsupported platform")
 	}
 	return int(stat.Gid), nil
+}
+
+// CleanupSharedVolumeStale runs an ephemeral helper container that mounts the
+// shared volume at mountPath and deletes files whose mtime is older than ttl.
+// Empty directories left behind are also pruned. The helper image must already
+// be available locally; the runner image is reused so no additional pull is
+// required. A no-op when ttl <= 0.
+func CleanupSharedVolumeStale(ctx context.Context, client DockerAPI, helperImage, mountPath string, ttl time.Duration, logger *slog.Logger) error {
+	if ttl <= 0 {
+		return nil
+	}
+	if helperImage == "" {
+		return fmt.Errorf("helper image is required for shared-volume cleanup")
+	}
+	if mountPath == "" {
+		return fmt.Errorf("mount path is required for shared-volume cleanup")
+	}
+
+	// `find -mtime` works in 24h units; round up so sub-day TTLs still sweep.
+	days := int(ttl / (24 * time.Hour))
+	if days < 1 {
+		days = 1
+	}
+
+	// Two-phase delete: stale files/symlinks first, then any newly empty dirs.
+	// Errors from inside find (e.g. file vanished mid-walk) are swallowed via
+	// `|| true` so the container always exits 0.
+	script := fmt.Sprintf(
+		"set -e; "+
+			"find %[1]s -mindepth 1 -mtime +%[2]d \\( -type f -o -type l \\) -print -delete 2>/dev/null | wc -l; "+
+			"find %[1]s -mindepth 1 -type d -empty -delete 2>/dev/null || true",
+		mountPath, days,
+	)
+
+	timeoutCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
+
+	name := fmt.Sprintf("runscaler-cleanup-%d", time.Now().UnixNano())
+	c, err := client.ContainerCreate(
+		timeoutCtx,
+		&container.Config{
+			Image: helperImage,
+			User:  "root",
+			Cmd:   []string{"sh", "-c", script},
+			Labels: map[string]string{
+				"managed-by": "runscaler",
+				"purpose":    "shared-volume-cleanup",
+			},
+		},
+		&container.HostConfig{
+			Mounts: []mount.Mount{{
+				Type:   mount.TypeVolume,
+				Source: "runscaler-shared",
+				Target: mountPath,
+			}},
+		},
+		nil, nil,
+		name,
+	)
+	if err != nil {
+		return fmt.Errorf("create cleanup container: %w", err)
+	}
+
+	// Always remove the container, even if start/wait fails.
+	defer func() {
+		_ = client.ContainerRemove(context.WithoutCancel(timeoutCtx), c.ID, container.RemoveOptions{Force: true})
+	}()
+
+	if err := client.ContainerStart(timeoutCtx, c.ID, container.StartOptions{}); err != nil {
+		return fmt.Errorf("start cleanup container: %w", err)
+	}
+
+	statusCh, errCh := client.ContainerWait(timeoutCtx, c.ID, container.WaitConditionNotRunning)
+	select {
+	case err := <-errCh:
+		if err != nil {
+			return fmt.Errorf("wait cleanup container: %w", err)
+		}
+	case status := <-statusCh:
+		if status.Error != nil {
+			return fmt.Errorf("cleanup container error: %s", status.Error.Message)
+		}
+		if status.StatusCode != 0 {
+			return fmt.Errorf("cleanup container exited with status %d", status.StatusCode)
+		}
+	case <-timeoutCtx.Done():
+		return fmt.Errorf("cleanup timed out: %w", timeoutCtx.Err())
+	}
+
+	logger.Info("Shared volume cleanup completed",
+		slog.Int("ttl_days", days),
+		slog.String("path", mountPath),
+	)
+	return nil
 }
 
 // FormatBytes formats a byte count into a human-readable string.

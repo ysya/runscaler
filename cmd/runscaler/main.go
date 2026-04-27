@@ -285,6 +285,11 @@ func run(ctx context.Context, cfg config.Config) error {
 		logger.Info("Health check server started", slog.Int("port", cfg.HealthPort))
 	}
 
+	// Start periodic shared-volume TTL cleanup (one shared sweeper per process —
+	// all Docker scalesets share the same `runscaler-shared` volume, so the
+	// first matching scaleset wins and others are ignored).
+	startSharedVolumeCleanup(ctx, dockerClient, scaleSets, logger)
+
 	logger.Info("Starting scale sets", slog.Int("count", len(scaleSets)))
 
 	// Non-blocking version check at startup
@@ -482,6 +487,67 @@ func runScaleSet(ctx context.Context, ss config.ScaleSetConfig, dockerClient *do
 		}
 		backoff = min(backoff*2, maxBackoff)
 	}
+}
+
+// startSharedVolumeCleanup launches a background goroutine that runs the
+// shared-volume TTL sweeper periodically. The first Docker scaleset with a
+// shared volume and TTL > 0 wins — runscaler uses one global `runscaler-shared`
+// volume, so a single sweeper covers all scalesets. No-op when no scaleset
+// enables TTL or when the Docker client is unavailable.
+func startSharedVolumeCleanup(ctx context.Context, client *dockerclient.Client, scaleSets []config.ScaleSetConfig, logger *slog.Logger) {
+	if client == nil {
+		return
+	}
+
+	var (
+		ttl         time.Duration
+		interval    time.Duration
+		mountPath   string
+		helperImage string
+	)
+	for _, ss := range scaleSets {
+		if ss.IsTart() || ss.Docker.SharedVolume == "" || ss.Docker.SharedVolumeTTL <= 0 {
+			continue
+		}
+		ttl = ss.Docker.SharedVolumeTTL
+		interval = ss.Docker.SharedVolumeCleanupInterval
+		if interval <= 0 {
+			interval = config.DefaultSharedVolumeCleanupInterval
+		}
+		mountPath = ss.Docker.SharedVolume
+		helperImage = ss.RunnerImage
+		break
+	}
+	if ttl <= 0 {
+		return
+	}
+
+	logger.Info("Shared volume TTL cleanup enabled",
+		slog.Duration("ttl", ttl),
+		slog.Duration("interval", interval),
+		slog.String("path", mountPath),
+	)
+
+	// Run an initial sweep so users don't wait `interval` for the first cleanup
+	// after startup (especially relevant after a crash leaves the volume bloated).
+	go func() {
+		if err := backend.CleanupSharedVolumeStale(ctx, client, helperImage, mountPath, ttl, logger); err != nil {
+			logger.Warn("Initial shared volume cleanup failed", slog.Any("error", err))
+		}
+
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if err := backend.CleanupSharedVolumeStale(ctx, client, helperImage, mountPath, ttl, logger); err != nil {
+					logger.Warn("Periodic shared volume cleanup failed", slog.Any("error", err))
+				}
+			}
+		}
+	}()
 }
 
 // listenOnce creates a message session and listener, then runs until

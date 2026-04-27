@@ -2,9 +2,11 @@ package backend
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/docker/docker/api/types/build"
 	"github.com/docker/docker/api/types/container"
@@ -29,6 +31,11 @@ type mockDocker struct {
 	started        []string     // container IDs
 	removed        []string     // container IDs
 	volumesRemoved []string     // volume names
+
+	// Optional overrides for ContainerWait. When unset, the wait succeeds
+	// immediately with status 0.
+	waitStatus int64
+	waitErr    error
 }
 
 func (m *mockDocker) ContainerCreate(_ context.Context, cfg *container.Config, hcfg *container.HostConfig, _ *network.NetworkingConfig, _ *ocispec.Platform, name string) (container.CreateResponse, error) {
@@ -59,6 +66,17 @@ func (m *mockDocker) BuildCachePrune(_ context.Context, _ build.CachePruneOption
 func (m *mockDocker) VolumeRemove(_ context.Context, volumeID string, _ bool) error {
 	m.volumesRemoved = append(m.volumesRemoved, volumeID)
 	return nil
+}
+
+func (m *mockDocker) ContainerWait(_ context.Context, _ string, _ container.WaitCondition) (<-chan container.WaitResponse, <-chan error) {
+	statusCh := make(chan container.WaitResponse, 1)
+	errCh := make(chan error, 1)
+	if m.waitErr != nil {
+		errCh <- m.waitErr
+	} else {
+		statusCh <- container.WaitResponse{StatusCode: m.waitStatus}
+	}
+	return statusCh, errCh
 }
 
 func newTestDockerBackend(sharedVolume string, dind bool) (*DockerBackend, *mockDocker) {
@@ -377,6 +395,106 @@ func TestDockerBackend_StartRunner_WithoutResourceLimits(t *testing.T) {
 	}
 	if call.hostConfig.Resources.NanoCPUs != 0 {
 		t.Errorf("NanoCPUs = %d, want 0 (unlimited)", call.hostConfig.Resources.NanoCPUs)
+	}
+}
+
+func TestCleanupSharedVolumeStale_NoOpWhenTTLZero(t *testing.T) {
+	md := &mockDocker{}
+	if err := CleanupSharedVolumeStale(context.Background(), md, "img", "/shared", 0, slog.New(slog.DiscardHandler)); err != nil {
+		t.Fatalf("CleanupSharedVolumeStale() error: %v", err)
+	}
+	if len(md.created) != 0 {
+		t.Errorf("expected no container created, got %d", len(md.created))
+	}
+}
+
+func TestCleanupSharedVolumeStale_RunsHelperContainer(t *testing.T) {
+	md := &mockDocker{}
+	logger := slog.New(slog.DiscardHandler)
+
+	if err := CleanupSharedVolumeStale(context.Background(), md, "runner-img", "/shared", 7*24*time.Hour, logger); err != nil {
+		t.Fatalf("CleanupSharedVolumeStale() error: %v", err)
+	}
+
+	if len(md.createCalls) != 1 {
+		t.Fatalf("expected 1 create call, got %d", len(md.createCalls))
+	}
+	call := md.createCalls[0]
+
+	// Helper container must use the runner image and run as root for delete perms.
+	if call.config.Image != "runner-img" {
+		t.Errorf("image = %q, want runner-img", call.config.Image)
+	}
+	if call.config.User != "root" {
+		t.Errorf("user = %q, want root", call.config.User)
+	}
+
+	// Mount the shared named volume at the configured path.
+	m := findMountByTarget(call.hostConfig.Mounts, "/shared")
+	if m == nil {
+		t.Fatal("shared volume mount not found")
+	}
+	if m.Type != mount.TypeVolume || m.Source != "runscaler-shared" {
+		t.Errorf("mount = %+v, want named volume runscaler-shared", m)
+	}
+
+	// Script must reference the configured TTL in days and the mount path.
+	cmd := strings.Join(call.config.Cmd, " ")
+	if !strings.Contains(cmd, "-mtime +7") {
+		t.Errorf("cmd should use -mtime +7, got: %q", cmd)
+	}
+	if !strings.Contains(cmd, "/shared") {
+		t.Errorf("cmd should reference /shared, got: %q", cmd)
+	}
+
+	// Labels mark the helper for doctor / observability.
+	if call.config.Labels["managed-by"] != "runscaler" {
+		t.Errorf("missing managed-by label, got: %v", call.config.Labels)
+	}
+	if call.config.Labels["purpose"] != "shared-volume-cleanup" {
+		t.Errorf("missing purpose label, got: %v", call.config.Labels)
+	}
+
+	// Container should be started and removed even on success.
+	if len(md.started) != 1 {
+		t.Errorf("expected 1 start, got %d", len(md.started))
+	}
+	if len(md.removed) != 1 {
+		t.Errorf("expected 1 remove, got %d", len(md.removed))
+	}
+}
+
+func TestCleanupSharedVolumeStale_RoundsSubDayTTLUp(t *testing.T) {
+	md := &mockDocker{}
+	if err := CleanupSharedVolumeStale(context.Background(), md, "img", "/shared", 6*time.Hour, slog.New(slog.DiscardHandler)); err != nil {
+		t.Fatalf("CleanupSharedVolumeStale() error: %v", err)
+	}
+	cmd := strings.Join(md.createCalls[0].config.Cmd, " ")
+	if !strings.Contains(cmd, "-mtime +1") {
+		t.Errorf("sub-day TTL should round up to -mtime +1, got: %q", cmd)
+	}
+}
+
+func TestCleanupSharedVolumeStale_PropagatesNonZeroExit(t *testing.T) {
+	md := &mockDocker{waitStatus: 2}
+	err := CleanupSharedVolumeStale(context.Background(), md, "img", "/shared", time.Hour, slog.New(slog.DiscardHandler))
+	if err == nil {
+		t.Fatal("expected error for non-zero exit, got nil")
+	}
+	if !strings.Contains(err.Error(), "status 2") {
+		t.Errorf("error should mention status 2, got: %v", err)
+	}
+	// Container must still be cleaned up on failure.
+	if len(md.removed) != 1 {
+		t.Errorf("expected container removed after failure, got %d removes", len(md.removed))
+	}
+}
+
+func TestCleanupSharedVolumeStale_PropagatesWaitError(t *testing.T) {
+	md := &mockDocker{waitErr: errors.New("docker died")}
+	err := CleanupSharedVolumeStale(context.Background(), md, "img", "/shared", time.Hour, slog.New(slog.DiscardHandler))
+	if err == nil || !strings.Contains(err.Error(), "docker died") {
+		t.Errorf("expected wait error to propagate, got: %v", err)
 	}
 }
 

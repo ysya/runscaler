@@ -1,7 +1,11 @@
 package config
 
 import (
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/spf13/viper"
 )
 
 func validScaleSetConfig() ScaleSetConfig {
@@ -453,6 +457,68 @@ func TestMergeDefaults(t *testing.T) {
 	}
 	if dst.Tart.CPU != 4 {
 		t.Errorf("Tart.CPU should inherit, got %d", dst.Tart.CPU)
+	}
+}
+
+// TestSharedVolumeTTL_TOMLDecoding pins the assumption that viper.Unmarshal
+// decodes TOML duration strings (e.g. "168h") into time.Duration via its
+// default DecodeHook. Without this, the new TTL fields would silently land
+// as zero and TTL cleanup would never run.
+func TestSharedVolumeTTL_TOMLDecoding(t *testing.T) {
+	v := viper.New()
+	v.SetConfigType("toml")
+	if err := v.ReadConfig(strings.NewReader(`
+[docker]
+shared-volume = "/shared"
+shared-volume-ttl = "168h"
+shared-volume-cleanup-interval = "30m"
+`)); err != nil {
+		t.Fatalf("ReadConfig: %v", err)
+	}
+
+	var cfg Config
+	if err := v.Unmarshal(&cfg); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if got := cfg.Defaults.Docker.SharedVolumeTTL; got != 168*time.Hour {
+		t.Errorf("SharedVolumeTTL = %v, want 168h", got)
+	}
+	if got := cfg.Defaults.Docker.SharedVolumeCleanupInterval; got != 30*time.Minute {
+		t.Errorf("SharedVolumeCleanupInterval = %v, want 30m", got)
+	}
+}
+
+func TestMergeDefaults_SharedVolumeTTL(t *testing.T) {
+	defaults := ScaleSetConfig{
+		Docker: DockerConfig{
+			SharedVolumeTTL:             7 * 24 * time.Hour,
+			SharedVolumeCleanupInterval: 6 * time.Hour,
+		},
+	}
+
+	// Per-scaleset values should win when explicitly set.
+	override := ScaleSetConfig{
+		Docker: DockerConfig{
+			SharedVolumeTTL:             24 * time.Hour,
+			SharedVolumeCleanupInterval: time.Hour,
+		},
+	}
+	mergeDefaults(&override, &defaults)
+	if override.Docker.SharedVolumeTTL != 24*time.Hour {
+		t.Errorf("override TTL = %v, want 24h", override.Docker.SharedVolumeTTL)
+	}
+	if override.Docker.SharedVolumeCleanupInterval != time.Hour {
+		t.Errorf("override interval = %v, want 1h", override.Docker.SharedVolumeCleanupInterval)
+	}
+
+	// Unset values should inherit from defaults.
+	inherit := ScaleSetConfig{}
+	mergeDefaults(&inherit, &defaults)
+	if inherit.Docker.SharedVolumeTTL != 7*24*time.Hour {
+		t.Errorf("inherited TTL = %v, want 168h", inherit.Docker.SharedVolumeTTL)
+	}
+	if inherit.Docker.SharedVolumeCleanupInterval != 6*time.Hour {
+		t.Errorf("inherited interval = %v, want 6h", inherit.Docker.SharedVolumeCleanupInterval)
 	}
 }
 

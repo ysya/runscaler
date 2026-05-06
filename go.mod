@@ -5,7 +5,7 @@ go 1.26
 require (
 	charm.land/lipgloss/v2 v2.0.3
 	charm.land/log/v2 v2.0.0
-	github.com/actions/scaleset v0.3.0
+	github.com/actions/scaleset v0.4.0
 	github.com/containerd/errdefs v1.0.0
 	github.com/docker/docker v28.5.2+incompatible
 	github.com/google/uuid v1.6.0

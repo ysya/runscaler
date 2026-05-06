@@ -26,10 +26,21 @@ type CommandRunner interface {
 }
 
 // execCommandRunner executes real shell commands via os/exec.
-type execCommandRunner struct{}
+// extraEnv is appended to os.Environ() for every spawned child (e.g. TART_HOME).
+type execCommandRunner struct {
+	extraEnv []string
+}
 
-func (execCommandRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
+func (r execCommandRunner) buildCmd(ctx context.Context, name string, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, name, args...)
+	if len(r.extraEnv) > 0 {
+		cmd.Env = append(os.Environ(), r.extraEnv...)
+	}
+	return cmd
+}
+
+func (r execCommandRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
+	cmd := r.buildCmd(ctx, name, args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -39,8 +50,8 @@ func (execCommandRunner) Run(ctx context.Context, name string, args ...string) (
 	return stdout.Bytes(), nil
 }
 
-func (execCommandRunner) RunStreaming(ctx context.Context, name string, args ...string) error {
-	cmd := exec.CommandContext(ctx, name, args...)
+func (r execCommandRunner) RunStreaming(ctx context.Context, name string, args ...string) error {
+	cmd := r.buildCmd(ctx, name, args...)
 	cmd.Stdin = os.Stdin // inherit TTY so child process detects interactive terminal
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -75,8 +86,9 @@ type warmVM struct {
 type TartBackend struct {
 	baseImage  string
 	runnerDir  string
-	cpu        int // 0 = use image default
-	memory     int // MB, 0 = use image default
+	home       string // TART_HOME ("" = tart default ~/.tart)
+	cpu        int    // 0 = use image default
+	memory     int    // MB, 0 = use image default
 	poolSize   int
 	maxRunners int
 	logger     *slog.Logger
@@ -97,15 +109,20 @@ type TartBackend struct {
 
 // NewTartBackend creates a TartBackend from scale set config.
 func NewTartBackend(ss config.ScaleSetConfig, logger *slog.Logger) *TartBackend {
+	var extraEnv []string
+	if ss.Tart.Home != "" {
+		extraEnv = append(extraEnv, "TART_HOME="+ss.Tart.Home)
+	}
 	b := &TartBackend{
 		baseImage:  ss.RunnerImage,
 		runnerDir:  ss.Tart.RunnerDir,
+		home:       ss.Tart.Home,
 		cpu:        ss.Tart.CPU,
 		memory:     ss.Tart.Memory,
 		poolSize:   ss.Tart.PoolSize,
 		maxRunners: ss.MaxRunners,
 		logger:     logger,
-		cmd:        execCommandRunner{},
+		cmd:        execCommandRunner{extraEnv: extraEnv},
 		vmSlots:    make(chan int, ss.MaxRunners),
 	}
 	// Pre-fill slot indices: each slot gets a deterministic MAC address
@@ -279,7 +296,10 @@ func (b *TartBackend) bootVM(ctx context.Context, name string) (*warmVM, error) 
 // Uses locally administered unicast addresses (02:00:00:00:00:XX) so
 // the DHCP server always assigns the same IP to the same slot index.
 func (b *TartBackend) setVMMAC(name string, slotIdx int) error {
-	tartHome := os.Getenv("TART_HOME")
+	tartHome := b.home
+	if tartHome == "" {
+		tartHome = os.Getenv("TART_HOME")
+	}
 	if tartHome == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {

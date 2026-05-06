@@ -77,7 +77,8 @@ type DockerConfig struct {
 
 // TartConfig holds Tart VM-specific backend settings.
 type TartConfig struct {
-	RunnerDir string `mapstructure:"runner-dir"` // Runner binary path in VM
+	Home      string `mapstructure:"home"`        // TART_HOME for tart CLI ("" = default ~/.tart)
+	RunnerDir string `mapstructure:"runner-dir"`  // Runner binary path in VM
 	CPU       int    `mapstructure:"cpu"`         // Number of CPU cores (0 = use image default)
 	Memory    int    `mapstructure:"memory"`      // Memory in MB (0 = use image default)
 	PoolSize  int    `mapstructure:"pool-size"`   // Pre-warmed VM count (0 = disabled)
@@ -157,6 +158,9 @@ func mergeDefaults(dst *ScaleSetConfig, defaults *ScaleSetConfig) {
 	}
 	if dst.Tart.PoolSize == 0 {
 		dst.Tart.PoolSize = defaults.Tart.PoolSize
+	}
+	if dst.Tart.Home == "" {
+		dst.Tart.Home = defaults.Tart.Home
 	}
 
 	dst.applyDefaults()

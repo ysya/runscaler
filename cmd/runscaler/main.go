@@ -290,6 +290,10 @@ func run(ctx context.Context, cfg config.Config) error {
 	// first matching scaleset wins and others are ignored).
 	startSharedVolumeCleanup(ctx, dockerClient, scaleSets, logger)
 
+	// Start periodic Tart cache cleanup (one sweeper per unique TART_HOME, so
+	// scalesets sharing a TART_HOME share a sweeper and won't race).
+	startTartCacheCleanup(ctx, scaleSets, logger)
+
 	logger.Info("Starting scale sets", slog.Int("count", len(scaleSets)))
 
 	// Non-blocking version check at startup
@@ -548,6 +552,79 @@ func startSharedVolumeCleanup(ctx context.Context, client *dockerclient.Client, 
 			}
 		}
 	}()
+}
+
+// startTartCacheCleanup launches one background goroutine per unique TART_HOME
+// among the Tart-backed scalesets, running `tart prune --space-budget` on a
+// timer. When two scalesets share a TART_HOME, the first one wins (with a warn
+// if its config differs) — two sweepers on the same cache would just race.
+// No-op when no Tart scaleset enables CacheSpaceBudgetGB.
+func startTartCacheCleanup(ctx context.Context, scaleSets []config.ScaleSetConfig, logger *slog.Logger) {
+	type sweeper struct {
+		home          string
+		spaceBudgetGB int
+		interval      time.Duration
+	}
+
+	// Group by TART_HOME (empty string is a valid key — tart's default ~/.tart).
+	picked := make(map[string]sweeper)
+	for _, ss := range scaleSets {
+		if !ss.IsTart() || ss.Tart.CacheSpaceBudgetGB <= 0 {
+			continue
+		}
+		interval := ss.Tart.CacheCleanupInterval
+		if interval <= 0 {
+			interval = config.DefaultTartCacheCleanupInterval
+		}
+		s := sweeper{
+			home:          ss.Tart.Home,
+			spaceBudgetGB: ss.Tart.CacheSpaceBudgetGB,
+			interval:      interval,
+		}
+		if existing, ok := picked[ss.Tart.Home]; ok {
+			if existing != s {
+				logger.Warn("Conflicting tart cache cleanup settings for TART_HOME, keeping first",
+					slog.String("home", ss.Tart.Home),
+					slog.Int("kept_budget_gb", existing.spaceBudgetGB),
+					slog.Duration("kept_interval", existing.interval),
+					slog.Int("ignored_budget_gb", s.spaceBudgetGB),
+					slog.Duration("ignored_interval", s.interval),
+				)
+			}
+			continue
+		}
+		picked[ss.Tart.Home] = s
+	}
+
+	for _, s := range picked {
+		s := s
+		logger.Info("Tart cache cleanup enabled",
+			slog.String("home", s.home),
+			slog.Int("space_budget_gb", s.spaceBudgetGB),
+			slog.Duration("interval", s.interval),
+		)
+		go func() {
+			// Run an initial sweep so users don't wait `interval` for the
+			// first cleanup after startup (especially after a crash leaves
+			// the cache bloated).
+			if err := backend.PruneTartCache(ctx, s.home, s.spaceBudgetGB, logger); err != nil {
+				logger.Warn("Initial tart cache cleanup failed", slog.Any("error", err))
+			}
+
+			ticker := time.NewTicker(s.interval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					if err := backend.PruneTartCache(ctx, s.home, s.spaceBudgetGB, logger); err != nil {
+						logger.Warn("Periodic tart cache cleanup failed", slog.Any("error", err))
+					}
+				}
+			}
+		}()
+	}
 }
 
 // listenOnce creates a message session and listener, then runs until

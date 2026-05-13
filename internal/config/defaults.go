@@ -21,4 +21,8 @@ const (
 	// DefaultSharedVolumeCleanupInterval is the period between shared-volume
 	// TTL sweeps when SharedVolumeTTL > 0 and no explicit interval is set.
 	DefaultSharedVolumeCleanupInterval = 6 * time.Hour
+
+	// DefaultTartCacheCleanupInterval is the period between `tart prune` sweeps
+	// when CacheSpaceBudgetGB > 0 and no explicit interval is set.
+	DefaultTartCacheCleanupInterval = 24 * time.Hour
 )

@@ -82,6 +82,16 @@ type TartConfig struct {
 	CPU       int    `mapstructure:"cpu"`         // Number of CPU cores (0 = use image default)
 	Memory    int    `mapstructure:"memory"`      // Memory in MB (0 = use image default)
 	PoolSize  int    `mapstructure:"pool-size"`   // Pre-warmed VM count (0 = disabled)
+
+	// CacheSpaceBudgetGB caps the OCI/IPSW cache size (in GB) under TART_HOME.
+	// Each sweep runs `tart prune --space-budget N` which removes the least
+	// recently used cache entries until the total fits the budget.
+	// 0 (default) disables cache cleanup.
+	CacheSpaceBudgetGB int `mapstructure:"cache-space-budget"`
+	// CacheCleanupInterval is how often the prune sweep runs while runscaler
+	// is up. Ignored when CacheSpaceBudgetGB is 0. Defaults to
+	// DefaultTartCacheCleanupInterval when unset.
+	CacheCleanupInterval time.Duration `mapstructure:"cache-cleanup-interval"`
 }
 
 // ResolveScaleSets returns the resolved list of scale set configs.
@@ -161,6 +171,12 @@ func mergeDefaults(dst *ScaleSetConfig, defaults *ScaleSetConfig) {
 	}
 	if dst.Tart.Home == "" {
 		dst.Tart.Home = defaults.Tart.Home
+	}
+	if dst.Tart.CacheSpaceBudgetGB == 0 {
+		dst.Tart.CacheSpaceBudgetGB = defaults.Tart.CacheSpaceBudgetGB
+	}
+	if dst.Tart.CacheCleanupInterval == 0 {
+		dst.Tart.CacheCleanupInterval = defaults.Tart.CacheCleanupInterval
 	}
 
 	dst.applyDefaults()

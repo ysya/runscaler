@@ -236,7 +236,14 @@ cpu = 4                  # CPU cores per VM (0 = use image default)
 memory = 8192            # Memory in MB per VM (0 = use image default)
 runner-dir = "/Users/admin/actions-runner"  # default
 pool-size = 2            # pre-warm 2 VMs for instant job pickup (~2s vs ~30s cold boot)
+# home = "/Volumes/Data/tart"          # TART_HOME for the tart CLI ("" = ~/.tart)
+# cache-space-budget = 80              # cap OCI/IPSW cache to N GB via `tart prune` (0 = disabled)
+# cache-cleanup-interval = "24h"       # how often the prune sweep runs
 ```
+
+Xcode VM images are huge (50–80 GB each) and `:latest` tags accumulate old
+layers under `$TART_HOME/cache/` — set `cache-space-budget` to keep it
+bounded. The sweeper only touches OCI/IPSW caches, never your local VMs.
 
 ### Token Security
 

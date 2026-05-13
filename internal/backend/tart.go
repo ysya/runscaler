@@ -478,6 +478,43 @@ func (b *TartBackend) waitForExec(ctx context.Context, name string) error {
 	}
 }
 
+// PruneTartCache runs `tart prune --space-budget N` against the given TART_HOME,
+// trimming OCI/IPSW caches to fit the budget. Local VMs are never touched.
+// A no-op when spaceBudgetGB <= 0.
+//
+// tartHome may be empty, meaning use tart's default ($HOME/.tart). It is passed
+// through TART_HOME so a single binary can prune multiple independent caches.
+func PruneTartCache(ctx context.Context, tartHome string, spaceBudgetGB int, logger *slog.Logger) error {
+	if spaceBudgetGB <= 0 {
+		return nil
+	}
+	var extraEnv []string
+	if tartHome != "" {
+		extraEnv = append(extraEnv, "TART_HOME="+tartHome)
+	}
+	return pruneTartCacheWith(ctx, execCommandRunner{extraEnv: extraEnv}, tartHome, spaceBudgetGB, logger)
+}
+
+// pruneTartCacheWith is the testable core: it issues the prune command via the
+// supplied CommandRunner. The exported wrapper above provides the default
+// execCommandRunner wired with TART_HOME.
+func pruneTartCacheWith(ctx context.Context, runner CommandRunner, tartHome string, spaceBudgetGB int, logger *slog.Logger) error {
+	if spaceBudgetGB <= 0 {
+		return nil
+	}
+	logger.Info("Pruning Tart cache",
+		slog.String("home", tartHome),
+		slog.Int("space_budget_gb", spaceBudgetGB),
+	)
+	if _, err := runner.Run(ctx, "tart", "prune",
+		"--entries", "caches",
+		"--space-budget", strconv.Itoa(spaceBudgetGB),
+	); err != nil {
+		return fmt.Errorf("tart prune (home=%q, budget=%dGB): %w", tartHome, spaceBudgetGB, err)
+	}
+	return nil
+}
+
 // runRunner starts the GitHub Actions runner inside the VM via `tart exec`.
 // Uses Virtio gRPC (Guest Agent) instead of SSH — no network dependency.
 func (b *TartBackend) runRunner(ctx context.Context, vmName, jitConfig string) error {

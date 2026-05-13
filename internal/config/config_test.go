@@ -522,6 +522,67 @@ func TestMergeDefaults_SharedVolumeTTL(t *testing.T) {
 	}
 }
 
+func TestTartCacheCleanup_TOMLDecoding(t *testing.T) {
+	v := viper.New()
+	v.SetConfigType("toml")
+	if err := v.ReadConfig(strings.NewReader(`
+[tart]
+home = "/Volumes/Data/tart"
+cache-space-budget = 80
+cache-cleanup-interval = "12h"
+`)); err != nil {
+		t.Fatalf("ReadConfig: %v", err)
+	}
+
+	var cfg Config
+	if err := v.Unmarshal(&cfg); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if got := cfg.Defaults.Tart.Home; got != "/Volumes/Data/tart" {
+		t.Errorf("Tart.Home = %q, want /Volumes/Data/tart", got)
+	}
+	if got := cfg.Defaults.Tart.CacheSpaceBudgetGB; got != 80 {
+		t.Errorf("Tart.CacheSpaceBudgetGB = %d, want 80", got)
+	}
+	if got := cfg.Defaults.Tart.CacheCleanupInterval; got != 12*time.Hour {
+		t.Errorf("Tart.CacheCleanupInterval = %v, want 12h", got)
+	}
+}
+
+func TestMergeDefaults_TartCacheCleanup(t *testing.T) {
+	defaults := ScaleSetConfig{
+		Tart: TartConfig{
+			CacheSpaceBudgetGB:   50,
+			CacheCleanupInterval: 24 * time.Hour,
+		},
+	}
+
+	// Per-scaleset values should win when explicitly set.
+	override := ScaleSetConfig{
+		Tart: TartConfig{
+			CacheSpaceBudgetGB:   100,
+			CacheCleanupInterval: 6 * time.Hour,
+		},
+	}
+	mergeDefaults(&override, &defaults)
+	if override.Tart.CacheSpaceBudgetGB != 100 {
+		t.Errorf("override budget = %d, want 100", override.Tart.CacheSpaceBudgetGB)
+	}
+	if override.Tart.CacheCleanupInterval != 6*time.Hour {
+		t.Errorf("override interval = %v, want 6h", override.Tart.CacheCleanupInterval)
+	}
+
+	// Unset values should inherit from defaults.
+	inherit := ScaleSetConfig{}
+	mergeDefaults(&inherit, &defaults)
+	if inherit.Tart.CacheSpaceBudgetGB != 50 {
+		t.Errorf("inherited budget = %d, want 50", inherit.Tart.CacheSpaceBudgetGB)
+	}
+	if inherit.Tart.CacheCleanupInterval != 24*time.Hour {
+		t.Errorf("inherited interval = %v, want 24h", inherit.Tart.CacheCleanupInterval)
+	}
+}
+
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && searchString(s, substr)
 }

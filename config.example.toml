@@ -31,6 +31,9 @@ dind = true
 # cpu = 0        # 0 = use image default
 # memory = 0     # MB, 0 = use image default
 # pool-size = 0  # pre-warmed VMs, 0 = disabled
+# home = "/Users/admin/.tart"             # TART_HOME for tart CLI ("" = ~/.tart)
+# cache-space-budget = 0                  # cap OCI/IPSW cache size in GB; 0 = disabled
+# cache-cleanup-interval = "24h"          # how often to run `tart prune --space-budget`
 
 # --- Single scale set mode ---
 # Use top-level fields when managing a single org/repo.

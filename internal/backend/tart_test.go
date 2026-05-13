@@ -208,6 +208,66 @@ func TestTartBackend_RemoveRunner_DeleteFails(t *testing.T) {
 	}
 }
 
+func TestPruneTartCache_DisabledWhenBudgetZero(t *testing.T) {
+	cmd := &mockCommandRunner{}
+	ctx := context.Background()
+
+	if err := pruneTartCacheWith(ctx, cmd, "/some/home", 0, slog.New(slog.DiscardHandler)); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := len(cmd.getCalls()); got != 0 {
+		t.Errorf("expected 0 calls when budget=0, got %d", got)
+	}
+}
+
+func TestPruneTartCache_InvokesTartPruneWithBudget(t *testing.T) {
+	cmd := &mockCommandRunner{
+		results: map[string]cmdResult{
+			"tart prune": {output: nil, err: nil},
+		},
+	}
+	ctx := context.Background()
+
+	if err := pruneTartCacheWith(ctx, cmd, "/some/home", 50, slog.New(slog.DiscardHandler)); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	calls := cmd.getCalls()
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(calls))
+	}
+	c := calls[0]
+	if c.name != "tart" {
+		t.Errorf("command = %q, want tart", c.name)
+	}
+	want := []string{"prune", "--entries", "caches", "--space-budget", "50"}
+	if len(c.args) != len(want) {
+		t.Fatalf("args = %v, want %v", c.args, want)
+	}
+	for i := range want {
+		if c.args[i] != want[i] {
+			t.Errorf("args[%d] = %q, want %q", i, c.args[i], want[i])
+		}
+	}
+}
+
+func TestPruneTartCache_PropagatesError(t *testing.T) {
+	cmd := &mockCommandRunner{
+		results: map[string]cmdResult{
+			"tart prune": {err: fmt.Errorf("disk full")},
+		},
+	}
+	ctx := context.Background()
+
+	err := pruneTartCacheWith(ctx, cmd, "/some/home", 50, slog.New(slog.DiscardHandler))
+	if err == nil {
+		t.Fatal("expected error from failed prune, got nil")
+	}
+	if !strings.Contains(err.Error(), "disk full") {
+		t.Errorf("error does not wrap underlying: %v", err)
+	}
+}
+
 func TestTartBackend_Shutdown_IsNoop(t *testing.T) {
 	cmd := &mockCommandRunner{}
 	b := newTestTartBackend(cmd)

@@ -25,4 +25,18 @@ const (
 	// DefaultTartCacheCleanupInterval is the period between `tart prune` sweeps
 	// when CacheSpaceBudgetGB > 0 and no explicit interval is set.
 	DefaultTartCacheCleanupInterval = 24 * time.Hour
+
+	// DefaultBuildxCleanup enables orphaned buildx builder cleanup by default.
+	// It acts as a safety net: `docker buildx create` builders (e.g. from
+	// docker/setup-buildx-action) leak on persistent hosts sharing one daemon,
+	// each keeping a multi-GB state volume, and most users never notice.
+	DefaultBuildxCleanup = true
+
+	// DefaultBuildxCleanupTTL removes buildx builders older than this. It is
+	// deliberately generous — well beyond any realistic build — so a sweep
+	// never disrupts an in-progress build.
+	DefaultBuildxCleanupTTL = 24 * time.Hour
+
+	// DefaultBuildxCleanupInterval is the period between buildx cleanup sweeps.
+	DefaultBuildxCleanupInterval = 6 * time.Hour
 )

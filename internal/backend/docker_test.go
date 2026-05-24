@@ -14,6 +14,7 @@ import (
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/api/types/network"
+	"github.com/docker/docker/api/types/volume"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
@@ -36,6 +37,10 @@ type mockDocker struct {
 	// immediately with status 0.
 	waitStatus int64
 	waitErr    error
+
+	// Optional fixtures for ContainerList / VolumeList.
+	containers []container.Summary
+	volumes    []*volume.Volume
 }
 
 func (m *mockDocker) ContainerCreate(_ context.Context, cfg *container.Config, hcfg *container.HostConfig, _ *network.NetworkingConfig, _ *ocispec.Platform, name string) (container.CreateResponse, error) {
@@ -66,6 +71,14 @@ func (m *mockDocker) BuildCachePrune(_ context.Context, _ build.CachePruneOption
 func (m *mockDocker) VolumeRemove(_ context.Context, volumeID string, _ bool) error {
 	m.volumesRemoved = append(m.volumesRemoved, volumeID)
 	return nil
+}
+
+func (m *mockDocker) ContainerList(_ context.Context, _ container.ListOptions) ([]container.Summary, error) {
+	return m.containers, nil
+}
+
+func (m *mockDocker) VolumeList(_ context.Context, _ volume.ListOptions) (volume.ListResponse, error) {
+	return volume.ListResponse{Volumes: m.volumes}, nil
 }
 
 func (m *mockDocker) ContainerWait(_ context.Context, _ string, _ container.WaitCondition) (<-chan container.WaitResponse, <-chan error) {
@@ -495,6 +508,55 @@ func TestCleanupSharedVolumeStale_PropagatesWaitError(t *testing.T) {
 	err := CleanupSharedVolumeStale(context.Background(), md, "img", "/shared", time.Hour, slog.New(slog.DiscardHandler))
 	if err == nil || !strings.Contains(err.Error(), "docker died") {
 		t.Errorf("expected wait error to propagate, got: %v", err)
+	}
+}
+
+func TestCleanupOrphanedBuildxBuilders_NoOpWhenMaxAgeZero(t *testing.T) {
+	md := &mockDocker{containers: []container.Summary{
+		{ID: "old", Names: []string{"/buildx_buildkit_builder-abc0"}, Created: 0},
+	}}
+	if err := CleanupOrphanedBuildxBuilders(context.Background(), md, 0, slog.New(slog.DiscardHandler)); err != nil {
+		t.Fatalf("error: %v", err)
+	}
+	if len(md.removed) != 0 {
+		t.Errorf("expected nothing removed, got %d", len(md.removed))
+	}
+}
+
+func TestCleanupOrphanedBuildxBuilders_RemovesOldKeepsYoungAndOthers(t *testing.T) {
+	now := time.Now()
+	md := &mockDocker{containers: []container.Summary{
+		{ID: "old", Names: []string{"/buildx_buildkit_builder-old0"}, Created: now.Add(-48 * time.Hour).Unix()},
+		{ID: "young", Names: []string{"/buildx_buildkit_builder-young0"}, Created: now.Add(-1 * time.Hour).Unix()},
+		{ID: "runner", Names: []string{"/runner-deadbeef"}, Created: now.Add(-72 * time.Hour).Unix()},
+	}}
+
+	if err := CleanupOrphanedBuildxBuilders(context.Background(), md, 24*time.Hour, slog.New(slog.DiscardHandler)); err != nil {
+		t.Fatalf("error: %v", err)
+	}
+
+	// Only the old buildx builder container is removed.
+	if len(md.removed) != 1 || md.removed[0] != "old" {
+		t.Errorf("expected only 'old' removed, got %v", md.removed)
+	}
+	// Its state volume is removed explicitly.
+	if len(md.volumesRemoved) != 1 || md.volumesRemoved[0] != "buildx_buildkit_builder-old0_state" {
+		t.Errorf("expected old builder's _state volume removed, got %v", md.volumesRemoved)
+	}
+}
+
+func TestCleanupOrphanedBuildxBuilders_ReapsDanglingVolumes(t *testing.T) {
+	md := &mockDocker{volumes: []*volume.Volume{
+		{Name: "buildx_buildkit_builder-gone0_state"},
+		{Name: "runscaler-shared"}, // must be left untouched
+	}}
+
+	if err := CleanupOrphanedBuildxBuilders(context.Background(), md, 24*time.Hour, slog.New(slog.DiscardHandler)); err != nil {
+		t.Fatalf("error: %v", err)
+	}
+
+	if len(md.volumesRemoved) != 1 || md.volumesRemoved[0] != "buildx_buildkit_builder-gone0_state" {
+		t.Errorf("expected only dangling buildx volume removed, got %v", md.volumesRemoved)
 	}
 }
 

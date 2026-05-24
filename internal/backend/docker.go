@@ -16,6 +16,7 @@ import (
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/api/types/network"
+	"github.com/docker/docker/api/types/volume"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
 	"github.com/ysya/runscaler/internal/config"
@@ -31,6 +32,8 @@ type DockerAPI interface {
 	ImagesPrune(ctx context.Context, pruneFilters filters.Args) (image.PruneReport, error)
 	BuildCachePrune(ctx context.Context, opts build.CachePruneOptions) (*build.CachePruneReport, error)
 	VolumeRemove(ctx context.Context, volumeID string, force bool) error
+	ContainerList(ctx context.Context, options container.ListOptions) ([]container.Summary, error)
+	VolumeList(ctx context.Context, options volume.ListOptions) (volume.ListResponse, error)
 }
 
 // DockerBackend runs GitHub Actions runners as Docker containers.
@@ -208,6 +211,101 @@ func CleanupSharedDocker(ctx context.Context, client DockerAPI, removeVolume boo
 			slog.String("reclaimed", FormatBytes(buildReport.SpaceReclaimed)),
 		)
 	}
+}
+
+// buildxBuilderPrefix is the name prefix Docker gives to BuildKit builder
+// containers and their state volumes (e.g. buildx_buildkit_builder-<uuid>0).
+const buildxBuilderPrefix = "buildx_buildkit_"
+
+// buildxContainerName returns the unprefixed name of a buildx BuildKit builder
+// container, or "" if the container is not one.
+func buildxContainerName(c container.Summary) string {
+	for _, n := range c.Names {
+		n = strings.TrimPrefix(n, "/")
+		if strings.HasPrefix(n, buildxBuilderPrefix) {
+			return n
+		}
+	}
+	return ""
+}
+
+// CleanupOrphanedBuildxBuilders removes buildx BuildKit builder containers
+// (named buildx_buildkit_*) older than maxAge, along with their named `_state`
+// volumes. Such builders are created by `docker buildx create` (e.g. via
+// docker/setup-buildx-action); on a persistent host sharing one Docker daemon
+// they accumulate when per-job cleanup never runs, each leaving behind a
+// multi-GB state volume. maxAge is kept well above any realistic build so a
+// sweep never disrupts an in-progress build. A no-op when maxAge <= 0.
+func CleanupOrphanedBuildxBuilders(ctx context.Context, client DockerAPI, maxAge time.Duration, logger *slog.Logger) error {
+	if maxAge <= 0 {
+		return nil
+	}
+
+	containers, err := client.ContainerList(ctx, container.ListOptions{All: true})
+	if err != nil {
+		return fmt.Errorf("list containers: %w", err)
+	}
+
+	cutoff := time.Now().Add(-maxAge)
+	var removedContainers, removedVolumes int
+
+	for _, c := range containers {
+		name := buildxContainerName(c)
+		if name == "" {
+			continue
+		}
+		// Created is unix seconds; skip young builders that may back an
+		// in-progress build.
+		if time.Unix(c.Created, 0).After(cutoff) {
+			continue
+		}
+
+		if err := client.ContainerRemove(ctx, c.ID, container.RemoveOptions{Force: true}); err != nil {
+			logger.Warn("Failed to remove orphaned buildx builder",
+				slog.String("container", name), slog.Any("error", err))
+			continue
+		}
+		removedContainers++
+
+		// `docker rm` leaves named volumes intact; the builder's state lives in
+		// "<container-name>_state", so remove it explicitly.
+		stateVol := name + "_state"
+		if err := client.VolumeRemove(ctx, stateVol, true); err != nil {
+			logger.Debug("Failed to remove buildx state volume",
+				slog.String("volume", stateVol), slog.Any("error", err))
+		} else {
+			removedVolumes++
+		}
+	}
+
+	// Also reap dangling buildx state volumes whose containers were already
+	// gone (e.g. from a partial manual cleanup). Dangling means unreferenced,
+	// so removal is safe regardless of age.
+	danglingFilter := filters.NewArgs(filters.Arg("dangling", "true"))
+	if volList, err := client.VolumeList(ctx, volume.ListOptions{Filters: danglingFilter}); err != nil {
+		logger.Debug("Failed to list volumes for buildx cleanup", slog.Any("error", err))
+	} else {
+		for _, v := range volList.Volumes {
+			if v == nil || !strings.HasPrefix(v.Name, buildxBuilderPrefix) {
+				continue
+			}
+			if err := client.VolumeRemove(ctx, v.Name, true); err != nil {
+				logger.Debug("Failed to remove dangling buildx volume",
+					slog.String("volume", v.Name), slog.Any("error", err))
+			} else {
+				removedVolumes++
+			}
+		}
+	}
+
+	if removedContainers > 0 || removedVolumes > 0 {
+		logger.Info("Removed orphaned buildx builders",
+			slog.Int("containers", removedContainers),
+			slog.Int("volumes", removedVolumes),
+			slog.Duration("max_age", maxAge),
+		)
+	}
+	return nil
 }
 
 // containerResources builds the resource constraints for a runner container.

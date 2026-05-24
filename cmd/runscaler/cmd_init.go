@@ -204,6 +204,12 @@ shared-volume = %q
 # memory = 8192   # MB (recommended: 6144+ for Android/Gradle builds)
 # cpu = 4         # cores
 
+# Orphaned buildx builder cleanup (on by default). docker buildx builders
+# leak state volumes on persistent hosts; runscaler removes ones older than
+# the TTL. Disable only if you run a persistent builder via keep-state.
+# buildx-cleanup = false
+# buildx-cleanup-ttl = "24h"
+
 # --- Global ---
 log-level = %q
 log-format = %q

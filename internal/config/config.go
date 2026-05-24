@@ -73,6 +73,19 @@ type DockerConfig struct {
 	// runscaler is up. Ignored when SharedVolumeTTL is 0. Defaults to
 	// DefaultSharedVolumeCleanupInterval when unset.
 	SharedVolumeCleanupInterval time.Duration `mapstructure:"shared-volume-cleanup-interval"`
+
+	// BuildxCleanup enables automatic removal of orphaned buildx BuildKit
+	// builder containers and their state volumes. Pointer: nil = inherit
+	// default (true). Disable (false) only if you run a persistent builder
+	// via `keep-state` + a fixed builder name, which this sweep would reclaim.
+	BuildxCleanup *bool `mapstructure:"buildx-cleanup"`
+	// BuildxCleanupTTL removes buildx builders older than this duration.
+	// Defaults to DefaultBuildxCleanupTTL when unset. Set generously above
+	// your longest build so in-progress builds are never disrupted.
+	BuildxCleanupTTL time.Duration `mapstructure:"buildx-cleanup-ttl"`
+	// BuildxCleanupInterval is how often the buildx cleanup sweep runs while
+	// runscaler is up. Defaults to DefaultBuildxCleanupInterval when unset.
+	BuildxCleanupInterval time.Duration `mapstructure:"buildx-cleanup-interval"`
 }
 
 // TartConfig holds Tart VM-specific backend settings.
@@ -155,6 +168,15 @@ func mergeDefaults(dst *ScaleSetConfig, defaults *ScaleSetConfig) {
 	if dst.Docker.SharedVolumeCleanupInterval == 0 {
 		dst.Docker.SharedVolumeCleanupInterval = defaults.Docker.SharedVolumeCleanupInterval
 	}
+	if dst.Docker.BuildxCleanup == nil {
+		dst.Docker.BuildxCleanup = defaults.Docker.BuildxCleanup
+	}
+	if dst.Docker.BuildxCleanupTTL == 0 {
+		dst.Docker.BuildxCleanupTTL = defaults.Docker.BuildxCleanupTTL
+	}
+	if dst.Docker.BuildxCleanupInterval == 0 {
+		dst.Docker.BuildxCleanupInterval = defaults.Docker.BuildxCleanupInterval
+	}
 
 	// Tart
 	if dst.Tart.RunnerDir == "" {
@@ -205,6 +227,15 @@ func (ss *ScaleSetConfig) IsDinD() bool {
 // IsTart returns whether this scale set uses the Tart VM backend.
 func (ss *ScaleSetConfig) IsTart() bool {
 	return ss.Backend == "tart"
+}
+
+// IsBuildxCleanupEnabled reports whether orphaned buildx builder cleanup is
+// enabled (default true unless explicitly disabled).
+func (ss *ScaleSetConfig) IsBuildxCleanupEnabled() bool {
+	if ss.Docker.BuildxCleanup != nil {
+		return *ss.Docker.BuildxCleanup
+	}
+	return DefaultBuildxCleanup
 }
 
 // resolveEnvToken resolves the token value from environment variables.

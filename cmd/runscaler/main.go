@@ -290,6 +290,10 @@ func run(ctx context.Context, cfg config.Config) error {
 	// first matching scaleset wins and others are ignored).
 	startSharedVolumeCleanup(ctx, dockerClient, scaleSets, logger)
 
+	// Start periodic buildx builder cleanup (orphaned BuildKit builders are
+	// global to the shared Docker daemon, so one sweeper covers all scalesets).
+	startBuildxCleanup(ctx, dockerClient, scaleSets, logger)
+
 	// Start periodic Tart cache cleanup (one sweeper per unique TART_HOME, so
 	// scalesets sharing a TART_HOME share a sweeper and won't race).
 	startTartCacheCleanup(ctx, scaleSets, logger)
@@ -548,6 +552,68 @@ func startSharedVolumeCleanup(ctx context.Context, client *dockerclient.Client, 
 			case <-ticker.C:
 				if err := backend.CleanupSharedVolumeStale(ctx, client, helperImage, mountPath, ttl, logger); err != nil {
 					logger.Warn("Periodic shared volume cleanup failed", slog.Any("error", err))
+				}
+			}
+		}
+	}()
+}
+
+// startBuildxCleanup launches a background goroutine that periodically removes
+// orphaned buildx BuildKit builder containers (and their state volumes) from
+// the shared Docker daemon. Builders are global to the daemon — like the
+// shared volume — so a single sweeper covers all Docker scalesets; the first
+// Docker scaleset with cleanup enabled provides the settings. Enabled by
+// default; no-op when explicitly disabled or when Docker is unavailable.
+func startBuildxCleanup(ctx context.Context, client *dockerclient.Client, scaleSets []config.ScaleSetConfig, logger *slog.Logger) {
+	if client == nil {
+		return
+	}
+
+	var (
+		ttl      time.Duration
+		interval time.Duration
+		enabled  bool
+	)
+	for _, ss := range scaleSets {
+		if ss.IsTart() || !ss.IsBuildxCleanupEnabled() {
+			continue
+		}
+		enabled = true
+		ttl = ss.Docker.BuildxCleanupTTL
+		if ttl <= 0 {
+			ttl = config.DefaultBuildxCleanupTTL
+		}
+		interval = ss.Docker.BuildxCleanupInterval
+		if interval <= 0 {
+			interval = config.DefaultBuildxCleanupInterval
+		}
+		break
+	}
+	if !enabled {
+		return
+	}
+
+	logger.Info("Buildx builder cleanup enabled",
+		slog.Duration("max_age", ttl),
+		slog.Duration("interval", interval),
+	)
+
+	// Run an initial sweep so a bloated daemon is reclaimed promptly at startup
+	// rather than after a full interval.
+	go func() {
+		if err := backend.CleanupOrphanedBuildxBuilders(ctx, client, ttl, logger); err != nil {
+			logger.Warn("Initial buildx cleanup failed", slog.Any("error", err))
+		}
+
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if err := backend.CleanupOrphanedBuildxBuilders(ctx, client, ttl, logger); err != nil {
+					logger.Warn("Periodic buildx cleanup failed", slog.Any("error", err))
 				}
 			}
 		}

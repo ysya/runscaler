@@ -216,7 +216,20 @@ log-format = "text"
 socket = "/var/run/docker.sock"
 dind = true
 shared-volume = "/shared"
+# shared-volume-ttl = "168h"            # delete shared-volume files older than this (0 = disabled)
+# buildx-cleanup = true                 # remove orphaned buildx builders (default: on)
+# buildx-cleanup-ttl = "24h"            # remove buildx builders older than this
+# buildx-cleanup-interval = "6h"        # how often the buildx sweep runs
 ```
+
+When runners build images with `docker buildx` (e.g. via
+`docker/setup-buildx-action`), each run can leave behind a BuildKit builder
+container plus a multi-GB `buildx_buildkit_*_state` volume. On a persistent host
+sharing one Docker daemon these accumulate until the disk fills. runscaler
+removes builders older than `buildx-cleanup-ttl` on a timer — the TTL is kept
+well above any realistic build so in-progress builds are never disrupted.
+Disable with `buildx-cleanup = false` only if you run a persistent builder via
+buildx `keep-state` + a fixed builder name.
 
 **Tart backend (macOS):**
 

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // mockCommandRunner records all command invocations for testing.
@@ -208,27 +209,25 @@ func TestTartBackend_RemoveRunner_DeleteFails(t *testing.T) {
 	}
 }
 
-func TestPruneTartCache_DisabledWhenBudgetZero(t *testing.T) {
+func TestPruneTartCache_DisabledWhenNoCriteria(t *testing.T) {
 	cmd := &mockCommandRunner{}
 	ctx := context.Background()
 
-	if err := pruneTartCacheWith(ctx, cmd, "/some/home", 0, slog.New(slog.DiscardHandler)); err != nil {
+	if err := pruneTartCacheWith(ctx, cmd, "/some/home", 0, 0, slog.New(slog.DiscardHandler)); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if got := len(cmd.getCalls()); got != 0 {
-		t.Errorf("expected 0 calls when budget=0, got %d", got)
+		t.Errorf("expected 0 calls when no criteria set, got %d", got)
 	}
 }
 
-func TestPruneTartCache_InvokesTartPruneWithBudget(t *testing.T) {
+func TestPruneTartCache_AgeOnly(t *testing.T) {
 	cmd := &mockCommandRunner{
-		results: map[string]cmdResult{
-			"tart prune": {output: nil, err: nil},
-		},
+		results: map[string]cmdResult{"tart prune": {}},
 	}
 	ctx := context.Background()
 
-	if err := pruneTartCacheWith(ctx, cmd, "/some/home", 50, slog.New(slog.DiscardHandler)); err != nil {
+	if err := pruneTartCacheWith(ctx, cmd, "/some/home", 7*24*time.Hour, 0, slog.New(slog.DiscardHandler)); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -236,19 +235,63 @@ func TestPruneTartCache_InvokesTartPruneWithBudget(t *testing.T) {
 	if len(calls) != 1 {
 		t.Fatalf("expected 1 call, got %d", len(calls))
 	}
-	c := calls[0]
-	if c.name != "tart" {
-		t.Errorf("command = %q, want tart", c.name)
+	want := []string{"prune", "--entries", "caches", "--older-than", "7"}
+	assertArgs(t, calls[0].args, want)
+}
+
+func TestPruneTartCache_AgeAndBudget(t *testing.T) {
+	cmd := &mockCommandRunner{
+		results: map[string]cmdResult{"tart prune": {}},
+	}
+	ctx := context.Background()
+
+	if err := pruneTartCacheWith(ctx, cmd, "/some/home", 7*24*time.Hour, 50, slog.New(slog.DiscardHandler)); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	calls := cmd.getCalls()
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(calls))
+	}
+	want := []string{"prune", "--entries", "caches", "--older-than", "7", "--space-budget", "50"}
+	assertArgs(t, calls[0].args, want)
+}
+
+// Sub-day windows must floor to 1 day; --older-than=0 would wipe the whole cache.
+func TestPruneTartCache_SubDayAgeFloorsToOneDay(t *testing.T) {
+	cmd := &mockCommandRunner{
+		results: map[string]cmdResult{"tart prune": {}},
+	}
+	ctx := context.Background()
+
+	if err := pruneTartCacheWith(ctx, cmd, "/some/home", 12*time.Hour, 0, slog.New(slog.DiscardHandler)); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	calls := cmd.getCalls()
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(calls))
+	}
+	want := []string{"prune", "--entries", "caches", "--older-than", "1"}
+	assertArgs(t, calls[0].args, want)
+}
+
+func TestPruneTartCache_BudgetOnly(t *testing.T) {
+	cmd := &mockCommandRunner{
+		results: map[string]cmdResult{"tart prune": {}},
+	}
+	ctx := context.Background()
+
+	if err := pruneTartCacheWith(ctx, cmd, "/some/home", 0, 50, slog.New(slog.DiscardHandler)); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	calls := cmd.getCalls()
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(calls))
 	}
 	want := []string{"prune", "--entries", "caches", "--space-budget", "50"}
-	if len(c.args) != len(want) {
-		t.Fatalf("args = %v, want %v", c.args, want)
-	}
-	for i := range want {
-		if c.args[i] != want[i] {
-			t.Errorf("args[%d] = %q, want %q", i, c.args[i], want[i])
-		}
-	}
+	assertArgs(t, calls[0].args, want)
 }
 
 func TestPruneTartCache_PropagatesError(t *testing.T) {
@@ -259,12 +302,24 @@ func TestPruneTartCache_PropagatesError(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	err := pruneTartCacheWith(ctx, cmd, "/some/home", 50, slog.New(slog.DiscardHandler))
+	err := pruneTartCacheWith(ctx, cmd, "/some/home", 7*24*time.Hour, 0, slog.New(slog.DiscardHandler))
 	if err == nil {
 		t.Fatal("expected error from failed prune, got nil")
 	}
 	if !strings.Contains(err.Error(), "disk full") {
 		t.Errorf("error does not wrap underlying: %v", err)
+	}
+}
+
+func assertArgs(t *testing.T, got, want []string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("args = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("args[%d] = %q, want %q", i, got[i], want[i])
+		}
 	}
 }
 

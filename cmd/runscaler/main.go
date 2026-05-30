@@ -621,13 +621,15 @@ func startBuildxCleanup(ctx context.Context, client *dockerclient.Client, scaleS
 }
 
 // startTartCacheCleanup launches one background goroutine per unique TART_HOME
-// among the Tart-backed scalesets, running `tart prune --space-budget` on a
-// timer. When two scalesets share a TART_HOME, the first one wins (with a warn
-// if its config differs) — two sweepers on the same cache would just race.
-// No-op when no Tart scaleset enables CacheSpaceBudgetGB.
+// among the Tart-backed scalesets, running `tart prune` on a timer to reclaim
+// OCI/IPSW layers left behind by image updates. When two scalesets share a
+// TART_HOME, the first one wins (with a warn if its config differs) — two
+// sweepers on the same cache would just race. Enabled by default; no-op when
+// no Tart scaleset has cleanup enabled.
 func startTartCacheCleanup(ctx context.Context, scaleSets []config.ScaleSetConfig, logger *slog.Logger) {
 	type sweeper struct {
 		home          string
+		maxAge        time.Duration
 		spaceBudgetGB int
 		interval      time.Duration
 	}
@@ -635,8 +637,12 @@ func startTartCacheCleanup(ctx context.Context, scaleSets []config.ScaleSetConfi
 	// Group by TART_HOME (empty string is a valid key — tart's default ~/.tart).
 	picked := make(map[string]sweeper)
 	for _, ss := range scaleSets {
-		if !ss.IsTart() || ss.Tart.CacheSpaceBudgetGB <= 0 {
+		if !ss.IsTart() || !ss.IsTartCacheCleanupEnabled() {
 			continue
+		}
+		maxAge := ss.Tart.CacheMaxAge
+		if maxAge <= 0 {
+			maxAge = config.DefaultTartCacheMaxAge
 		}
 		interval := ss.Tart.CacheCleanupInterval
 		if interval <= 0 {
@@ -644,6 +650,7 @@ func startTartCacheCleanup(ctx context.Context, scaleSets []config.ScaleSetConfi
 		}
 		s := sweeper{
 			home:          ss.Tart.Home,
+			maxAge:        maxAge,
 			spaceBudgetGB: ss.Tart.CacheSpaceBudgetGB,
 			interval:      interval,
 		}
@@ -651,8 +658,10 @@ func startTartCacheCleanup(ctx context.Context, scaleSets []config.ScaleSetConfi
 			if existing != s {
 				logger.Warn("Conflicting tart cache cleanup settings for TART_HOME, keeping first",
 					slog.String("home", ss.Tart.Home),
+					slog.Duration("kept_max_age", existing.maxAge),
 					slog.Int("kept_budget_gb", existing.spaceBudgetGB),
 					slog.Duration("kept_interval", existing.interval),
+					slog.Duration("ignored_max_age", s.maxAge),
 					slog.Int("ignored_budget_gb", s.spaceBudgetGB),
 					slog.Duration("ignored_interval", s.interval),
 				)
@@ -666,6 +675,7 @@ func startTartCacheCleanup(ctx context.Context, scaleSets []config.ScaleSetConfi
 		s := s
 		logger.Info("Tart cache cleanup enabled",
 			slog.String("home", s.home),
+			slog.Duration("max_age", s.maxAge),
 			slog.Int("space_budget_gb", s.spaceBudgetGB),
 			slog.Duration("interval", s.interval),
 		)
@@ -673,7 +683,7 @@ func startTartCacheCleanup(ctx context.Context, scaleSets []config.ScaleSetConfi
 			// Run an initial sweep so users don't wait `interval` for the
 			// first cleanup after startup (especially after a crash leaves
 			// the cache bloated).
-			if err := backend.PruneTartCache(ctx, s.home, s.spaceBudgetGB, logger); err != nil {
+			if err := backend.PruneTartCache(ctx, s.home, s.maxAge, s.spaceBudgetGB, logger); err != nil {
 				logger.Warn("Initial tart cache cleanup failed", slog.Any("error", err))
 			}
 
@@ -684,7 +694,7 @@ func startTartCacheCleanup(ctx context.Context, scaleSets []config.ScaleSetConfi
 				case <-ctx.Done():
 					return
 				case <-ticker.C:
-					if err := backend.PruneTartCache(ctx, s.home, s.spaceBudgetGB, logger); err != nil {
+					if err := backend.PruneTartCache(ctx, s.home, s.maxAge, s.spaceBudgetGB, logger); err != nil {
 						logger.Warn("Periodic tart cache cleanup failed", slog.Any("error", err))
 					}
 				}

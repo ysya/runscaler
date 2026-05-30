@@ -528,6 +528,8 @@ func TestTartCacheCleanup_TOMLDecoding(t *testing.T) {
 	if err := v.ReadConfig(strings.NewReader(`
 [tart]
 home = "/Volumes/Data/tart"
+cache-cleanup = false
+cache-max-age = "168h"
 cache-space-budget = 80
 cache-cleanup-interval = "12h"
 `)); err != nil {
@@ -541,6 +543,12 @@ cache-cleanup-interval = "12h"
 	if got := cfg.Defaults.Tart.Home; got != "/Volumes/Data/tart" {
 		t.Errorf("Tart.Home = %q, want /Volumes/Data/tart", got)
 	}
+	if cfg.Defaults.Tart.CacheCleanup == nil || *cfg.Defaults.Tart.CacheCleanup != false {
+		t.Errorf("Tart.CacheCleanup = %v, want explicit false", cfg.Defaults.Tart.CacheCleanup)
+	}
+	if got := cfg.Defaults.Tart.CacheMaxAge; got != 168*time.Hour {
+		t.Errorf("Tart.CacheMaxAge = %v, want 168h", got)
+	}
 	if got := cfg.Defaults.Tart.CacheSpaceBudgetGB; got != 80 {
 		t.Errorf("Tart.CacheSpaceBudgetGB = %d, want 80", got)
 	}
@@ -549,22 +557,51 @@ cache-cleanup-interval = "12h"
 	}
 }
 
+func TestIsTartCacheCleanupEnabled(t *testing.T) {
+	tr, fa := true, false
+
+	// nil → default true (safety net is on unless explicitly disabled).
+	var ss ScaleSetConfig
+	if !ss.IsTartCacheCleanupEnabled() {
+		t.Errorf("nil CacheCleanup should default to enabled")
+	}
+	ss.Tart.CacheCleanup = &tr
+	if !ss.IsTartCacheCleanupEnabled() {
+		t.Errorf("explicit true should be enabled")
+	}
+	ss.Tart.CacheCleanup = &fa
+	if ss.IsTartCacheCleanupEnabled() {
+		t.Errorf("explicit false should be disabled")
+	}
+}
+
 func TestMergeDefaults_TartCacheCleanup(t *testing.T) {
+	tr, fa := true, false
 	defaults := ScaleSetConfig{
 		Tart: TartConfig{
+			CacheCleanup:         &tr,
+			CacheMaxAge:          7 * 24 * time.Hour,
 			CacheSpaceBudgetGB:   50,
 			CacheCleanupInterval: 24 * time.Hour,
 		},
 	}
 
-	// Per-scaleset values should win when explicitly set.
+	// Per-scaleset values should win when explicitly set (including false).
 	override := ScaleSetConfig{
 		Tart: TartConfig{
+			CacheCleanup:         &fa,
+			CacheMaxAge:          48 * time.Hour,
 			CacheSpaceBudgetGB:   100,
 			CacheCleanupInterval: 6 * time.Hour,
 		},
 	}
 	mergeDefaults(&override, &defaults)
+	if override.Tart.CacheCleanup == nil || *override.Tart.CacheCleanup != false {
+		t.Errorf("explicit false should be preserved, got %v", override.Tart.CacheCleanup)
+	}
+	if override.Tart.CacheMaxAge != 48*time.Hour {
+		t.Errorf("override max age = %v, want 48h", override.Tart.CacheMaxAge)
+	}
 	if override.Tart.CacheSpaceBudgetGB != 100 {
 		t.Errorf("override budget = %d, want 100", override.Tart.CacheSpaceBudgetGB)
 	}
@@ -575,6 +612,12 @@ func TestMergeDefaults_TartCacheCleanup(t *testing.T) {
 	// Unset values should inherit from defaults.
 	inherit := ScaleSetConfig{}
 	mergeDefaults(&inherit, &defaults)
+	if inherit.Tart.CacheCleanup == nil || *inherit.Tart.CacheCleanup != true {
+		t.Errorf("nil override should inherit default true, got %v", inherit.Tart.CacheCleanup)
+	}
+	if inherit.Tart.CacheMaxAge != 7*24*time.Hour {
+		t.Errorf("inherited max age = %v, want 168h", inherit.Tart.CacheMaxAge)
+	}
 	if inherit.Tart.CacheSpaceBudgetGB != 50 {
 		t.Errorf("inherited budget = %d, want 50", inherit.Tart.CacheSpaceBudgetGB)
 	}

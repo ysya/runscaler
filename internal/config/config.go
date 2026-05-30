@@ -96,13 +96,21 @@ type TartConfig struct {
 	Memory    int    `mapstructure:"memory"`      // Memory in MB (0 = use image default)
 	PoolSize  int    `mapstructure:"pool-size"`   // Pre-warmed VM count (0 = disabled)
 
-	// CacheSpaceBudgetGB caps the OCI/IPSW cache size (in GB) under TART_HOME.
-	// Each sweep runs `tart prune --space-budget N` which removes the least
-	// recently used cache entries until the total fits the budget.
-	// 0 (default) disables cache cleanup.
+	// CacheCleanup enables periodic `tart prune` of the OCI/IPSW caches under
+	// TART_HOME. Pointer: nil = inherit default (true). Local VMs are never
+	// touched. Disable (false) only if you manage the cache yourself.
+	CacheCleanup *bool `mapstructure:"cache-cleanup"`
+	// CacheMaxAge removes cache entries not accessed within this window via
+	// `tart prune --older-than`. Defaults to DefaultTartCacheMaxAge when unset.
+	// Granularity is whole days; sub-day values floor to 1 day.
+	CacheMaxAge time.Duration `mapstructure:"cache-max-age"`
+	// CacheSpaceBudgetGB is an optional hard cap on the OCI/IPSW cache size
+	// (in GB), enforced via `tart prune --space-budget` on top of the age-based
+	// sweep — least-recently-used entries are removed until the total fits.
+	// 0 (default) means no size cap (age-based cleanup still runs).
 	CacheSpaceBudgetGB int `mapstructure:"cache-space-budget"`
 	// CacheCleanupInterval is how often the prune sweep runs while runscaler
-	// is up. Ignored when CacheSpaceBudgetGB is 0. Defaults to
+	// is up. Ignored when cache cleanup is disabled. Defaults to
 	// DefaultTartCacheCleanupInterval when unset.
 	CacheCleanupInterval time.Duration `mapstructure:"cache-cleanup-interval"`
 }
@@ -194,6 +202,12 @@ func mergeDefaults(dst *ScaleSetConfig, defaults *ScaleSetConfig) {
 	if dst.Tart.Home == "" {
 		dst.Tart.Home = defaults.Tart.Home
 	}
+	if dst.Tart.CacheCleanup == nil {
+		dst.Tart.CacheCleanup = defaults.Tart.CacheCleanup
+	}
+	if dst.Tart.CacheMaxAge == 0 {
+		dst.Tart.CacheMaxAge = defaults.Tart.CacheMaxAge
+	}
 	if dst.Tart.CacheSpaceBudgetGB == 0 {
 		dst.Tart.CacheSpaceBudgetGB = defaults.Tart.CacheSpaceBudgetGB
 	}
@@ -236,6 +250,15 @@ func (ss *ScaleSetConfig) IsBuildxCleanupEnabled() bool {
 		return *ss.Docker.BuildxCleanup
 	}
 	return DefaultBuildxCleanup
+}
+
+// IsTartCacheCleanupEnabled reports whether Tart OCI/IPSW cache cleanup is
+// enabled (default true unless explicitly disabled).
+func (ss *ScaleSetConfig) IsTartCacheCleanupEnabled() bool {
+	if ss.Tart.CacheCleanup != nil {
+		return *ss.Tart.CacheCleanup
+	}
+	return DefaultTartCacheCleanup
 }
 
 // resolveEnvToken resolves the token value from environment variables.

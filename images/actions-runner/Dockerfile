@@ -65,6 +65,24 @@ RUN mkdir -p ${ANDROID_HOME}/cmdline-tools \
        "ndk;27.1.12297006" \
        "cmake;3.22.1"
 
+# ── Multi-arch: amd64 libs for x86_64-only tools (e.g. Android AGP aapt2) ────
+# Google still ships aapt2 as a single linux-x64 binary in maven (artifact
+# com.android.tools.build:aapt2:<ver>:linux). On arm64 hosts the dynamic loader
+# /lib64/ld-linux-x86-64.so.2 is missing, so AGP processDebugResources fails.
+# Install amd64 glibc/libstdc++/zlib so OrbStack Rosetta (or qemu) can run them.
+ARG TARGETARCH
+RUN if [ "$TARGETARCH" = "arm64" ]; then \
+        sudo sed -i 's|^URIs:|Architectures: arm64\nURIs:|' /etc/apt/sources.list.d/ubuntu.sources \
+        && printf 'Types: deb\nURIs: http://archive.ubuntu.com/ubuntu\nSuites: noble noble-updates noble-security\nComponents: main restricted universe multiverse\nArchitectures: amd64\nSigned-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n' | sudo tee /etc/apt/sources.list.d/amd64.sources > /dev/null \
+        && sudo dpkg --add-architecture amd64 \
+        && sudo apt-get update \
+        && sudo apt-get install -y --no-install-recommends \
+            libc6:amd64 \
+            libstdc++6:amd64 \
+            zlib1g:amd64 \
+        && sudo rm -rf /var/lib/apt/lists/*; \
+    fi
+
 # ── Temp directory owned by runner ─────────────────────────────────────────
 # Redirect all temp file creation to a runner-owned directory so that any
 # tool (Gradle, EAS CLI, npx, etc.) can freely create subdirectories

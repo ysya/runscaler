@@ -15,11 +15,16 @@ import (
 	"strings"
 )
 
+// assetName returns the release archive filename for a given os/arch.
+func assetName(goos, goarch string) string {
+	return fmt.Sprintf("runner-%s-%s.tar.gz", goos, goarch)
+}
+
 // DownloadURL returns the archive download URL for a given version/os/arch.
 func DownloadURL(version, goos, goarch string) string {
 	return fmt.Sprintf(
-		"https://github.com/%s/releases/download/%s/runscaler-%s-%s.tar.gz",
-		githubRepo, version, goos, goarch,
+		"https://github.com/%s/releases/download/%s/%s",
+		githubRepo, version, assetName(goos, goarch),
 	)
 }
 
@@ -38,11 +43,11 @@ func Update(ctx context.Context, version string, destPath string) error {
 	goos := runtime.GOOS
 	goarch := runtime.GOARCH
 
-	archiveName := fmt.Sprintf("runscaler-%s-%s.tar.gz", goos, goarch)
+	archiveName := assetName(goos, goarch)
 	archiveURL := DownloadURL(version, goos, goarch)
 	checksumURL := ChecksumURL(version)
 
-	tmpDir, err := os.MkdirTemp("", "runscaler-update-*")
+	tmpDir, err := os.MkdirTemp("", "runner-update-*")
 	if err != nil {
 		return fmt.Errorf("failed to create temp dir: %w", err)
 	}
@@ -74,15 +79,15 @@ func Update(ctx context.Context, version string, destPath string) error {
 	}
 
 	// Extract binary from archive
-	binaryPath := filepath.Join(tmpDir, "runscaler")
-	if err := extractBinary(archivePath, "runscaler", binaryPath); err != nil {
+	binaryPath := filepath.Join(tmpDir, "runner")
+	if err := extractBinary(archivePath, "runner", binaryPath); err != nil {
 		return fmt.Errorf("failed to extract binary: %w", err)
 	}
 
 	// Atomically replace the running binary
 	// Write to a temp file in the same directory (same filesystem) so Rename is atomic.
 	destDir := filepath.Dir(destPath)
-	tmp, err := os.CreateTemp(destDir, ".runscaler-update-*")
+	tmp, err := os.CreateTemp(destDir, ".runner-update-*")
 	if err != nil {
 		return fmt.Errorf("failed to create temp file in %s: %w", destDir, err)
 	}

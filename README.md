@@ -1,4 +1,4 @@
-# runscaler
+# runner
 
 [![Release](https://img.shields.io/github/v/release/ysya/runscaler)](https://github.com/ysya/runscaler/releases)
 [![Go Version](https://img.shields.io/github/go-mod/go-version/ysya/runscaler)](https://go.dev)
@@ -26,13 +26,14 @@ Runners are **ephemeral** — each container/VM handles exactly one job and is r
 - [Deployment](#deployment)
 - [Building](#building)
 - [Architecture](#architecture)
+- [Upgrading from runscaler](#upgrading-from-runscaler)
 - [License](#license)
 
 ## How It Works
 
 ```mermaid
 flowchart LR
-    A["GitHub Actions<br/>(job queue)"] -- long poll --> B["runscaler<br/>(this tool)"]
+    A["GitHub Actions<br/>(job queue)"] -- long poll --> B["runner<br/>(this tool)"]
     B -- Docker API --> C["Runner Containers<br/>(ephemeral)"]
     B -- Tart CLI --> D["macOS VMs<br/>(ephemeral)"]
 ```
@@ -98,20 +99,20 @@ flowchart LR
 curl -fsSL https://raw.githubusercontent.com/ysya/runscaler/main/install.sh | sh
 ```
 
-Installs to `~/.local/bin` by default (no sudo required). Set `INSTALL_DIR` to customize, or `RUNSCALER_VERSION` to pin a version:
+Installs to `~/.local/bin` by default (no sudo required). Set `INSTALL_DIR` to customize, or `RUNNER_VERSION` to pin a version:
 
 ```bash
 # Install to a custom location (e.g. system-wide)
 curl -fsSL https://raw.githubusercontent.com/ysya/runscaler/main/install.sh | INSTALL_DIR=/usr/local/bin sh
 
 # Pin a specific version
-curl -fsSL https://raw.githubusercontent.com/ysya/runscaler/main/install.sh | RUNSCALER_VERSION=v1.2.3 sh
+curl -fsSL https://raw.githubusercontent.com/ysya/runscaler/main/install.sh | RUNNER_VERSION=v1.2.3 sh
 ```
 
 **Go install:**
 
 ```bash
-go install github.com/ysya/runscaler@latest
+go install github.com/ysya/runscaler/cmd/runner@latest
 ```
 
 **Binary releases:**
@@ -122,23 +123,23 @@ Download from [Releases](https://github.com/ysya/runscaler/releases) and add to 
 
 ```bash
 # Generate config interactively
-runscaler init
+runner init
 
 # Validate everything before starting
-runscaler validate --config config.toml
+runner validate --config config.toml
 
 # Start scaling
-runscaler --config config.toml
+runner run --config config.toml
 
 # Or using CLI flags directly
-runscaler \
+runner run \
   --url https://github.com/your-org \
   --name my-runners \
   --token ghp_xxx \
   --max-runners 10
 
 # Dry run — validate config, Docker, and images without starting listeners
-runscaler --dry-run --config config.toml
+runner run --dry-run --config config.toml
 ```
 
 Then in your workflow:
@@ -154,42 +155,42 @@ jobs:
 
 ## Commands
 
-| Command                    | Description                                            |
-| -------------------------- | ------------------------------------------------------ |
-| `runscaler`                | Start the auto-scaler (default)                        |
-| `runscaler init`           | Generate a config file interactively                   |
-| `runscaler validate`       | Validate configuration and connectivity                |
-| `runscaler status`         | Show current runner status via health endpoint         |
-| `runscaler doctor`         | Diagnose and clean up orphaned containers/VMs          |
-| `runscaler version`        | Show version, commit, build date, and runtime info     |
-| `runscaler update`         | Update runscaler to the latest release                 |
-| `runscaler update --check` | Check for updates without installing                   |
+| Command                  | Description                                            |
+| ------------------------ | ------------------------------------------------------ |
+| `runner run`             | Start the auto-scaler                                  |
+| `runner init`            | Generate a config file interactively                   |
+| `runner validate`        | Validate configuration and connectivity                |
+| `runner status`          | Show current runner status via health endpoint         |
+| `runner doctor`          | Diagnose and clean up orphaned containers/VMs          |
+| `runner version`         | Show version, commit, build date, and runtime info     |
+| `runner update`          | Update runner to the latest release                    |
+| `runner update --check`  | Check for updates without installing                   |
 
 ### Updating
 
 ```bash
 # Update to the latest release (downloads, verifies checksum, replaces binary in-place)
-runscaler update
+runner update
 
 # Check if a newer version is available without installing
-runscaler update --check
+runner update --check
 ```
 
-`runscaler update` downloads the archive for your platform, verifies its SHA-256 checksum against the release's `checksums.txt`, then atomically replaces the running binary. Restart runscaler after updating.
+`runner update` downloads the archive for your platform, verifies its SHA-256 checksum against the release's `checksums.txt`, then atomically replaces the running binary. Restart runner after updating.
 
 ### Troubleshooting with `doctor`
 
-If runscaler is killed unexpectedly (e.g. `kill -9`, crash, power loss), Docker containers or Tart VMs may be left behind. Use `doctor` to detect and clean them up:
+If runner is killed unexpectedly (e.g. `kill -9`, crash, power loss), Docker containers or Tart VMs may be left behind. Use `doctor` to detect and clean them up:
 
 ```bash
 # Check for orphaned resources
-runscaler doctor
+runner doctor
 
 # Auto-remove orphaned containers, VMs, and volumes
-runscaler doctor --fix
+runner doctor --fix
 ```
 
-The `--fix` flag will refuse to run if runscaler is currently active (detected via health endpoint), preventing accidental removal of in-use resources.
+The `--fix` flag will refuse to run if runner is currently active (detected via health endpoint), preventing accidental removal of in-use resources.
 
 ## Configuration
 
@@ -225,7 +226,7 @@ shared-volume = "/shared"
 When runners build images with `docker buildx` (e.g. via
 `docker/setup-buildx-action`), each run can leave behind a BuildKit builder
 container plus a multi-GB `buildx_buildkit_*_state` volume. On a persistent host
-sharing one Docker daemon these accumulate until the disk fills. runscaler
+sharing one Docker daemon these accumulate until the disk fills. runner
 removes builders older than `buildx-cleanup-ttl` on a timer — the TTL is kept
 well above any realistic build so in-progress builds are never disrupted.
 Disable with `buildx-cleanup = false` only if you run a persistent builder via
@@ -262,11 +263,11 @@ bounded. The sweeper only touches OCI/IPSW caches, never your local VMs.
 
 Avoid passing tokens as CLI flags (visible in `ps` output). Two alternatives:
 
-**Option 1: `RUNSCALER_TOKEN` environment variable** — automatically used when no `--token` flag or config value is set:
+**Option 1: `RUNNER_TOKEN` environment variable** — automatically used when no `--token` flag or config value is set (the old `RUNSCALER_TOKEN` name still works but is deprecated):
 
 ```bash
-export RUNSCALER_TOKEN=ghp_xxx
-runscaler --url https://github.com/org --name my-runners
+export RUNNER_TOKEN=ghp_xxx
+runner run --url https://github.com/org --name my-runners
 ```
 
 **Option 2: `env:` syntax in config file** — reference any environment variable by name:
@@ -275,7 +276,7 @@ runscaler --url https://github.com/org --name my-runners
 token = "env:GITHUB_TOKEN"  # reads from $GITHUB_TOKEN at startup
 ```
 
-Priority: `--token` flag > `RUNSCALER_TOKEN` env var > config file value (including `env:` resolution).
+Priority: `--token` flag > `RUNNER_TOKEN` env var > config file value (including `env:` resolution).
 
 **Multiple scale sets (mixed Docker + Tart):**
 
@@ -348,7 +349,7 @@ Requires=docker.service
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/runscaler --config /etc/runscaler/config.toml
+ExecStart=/usr/local/bin/runner run --config /etc/runner/config.toml
 Restart=on-failure
 RestartSec=10s
 
@@ -373,7 +374,7 @@ Built on top of [actions/scaleset](https://github.com/actions/scaleset), the off
 Key components:
 
 ```
-cmd/runscaler/       CLI entry point, commands (init, validate, status, doctor, version)
+cmd/runner/          CLI entry point, commands (run, init, validate, status, doctor, version)
 internal/
   config/            Configuration management with Viper (flags + TOML)
   backend/           RunnerBackend interface + Docker/Tart implementations
@@ -392,6 +393,20 @@ The scaler implements three methods from the scaleset `Scaler` interface:
 - `HandleDesiredRunnerCount` — Scales up runners to match job demand
 - `HandleJobStarted` — Marks runners as busy
 - `HandleJobCompleted` — Removes finished runners
+
+## Upgrading from runscaler
+
+The `runscaler` binary is now `runner`, and starting is a subcommand (`runner run`).
+To upgrade an existing install:
+
+1. Remove the old service with the OLD binary: `sudo runscaler service uninstall`
+2. Install the new binary (`./install.sh`, or download `runner-<os>-<arch>.tar.gz`).
+3. Move your config: `/etc/runscaler/config.toml` → `/etc/runner/config.toml` (or pass `--config`).
+4. Install the new service: `sudo runner service install`
+5. Clean up leftover docker resources: `runner doctor --fix` (removes the orphaned `runscaler-shared` volume — and any other orphaned runner containers/VMs; safe when the service is stopped).
+6. If you set `RUNSCALER_TOKEN`, rename it to `RUNNER_TOKEN` (old name still works, deprecated).
+
+> A `runner migrate` command that automates all of the above is coming soon.
 
 ## License
 

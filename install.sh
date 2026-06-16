@@ -2,7 +2,7 @@
 set -eu
 
 REPO="ysya/runscaler"
-BINARY="runscaler"
+BINARY="runner"
 INSTALL_DIR="${INSTALL_DIR:-${HOME}/.local/bin}"
 
 fail() { echo "Error: $1" >&2; exit 1; }
@@ -11,7 +11,7 @@ fail() { echo "Error: $1" >&2; exit 1; }
 case "$(uname -s)" in
     Linux*)  OS="linux" ;;
     Darwin*) OS="darwin" ;;
-    *)       fail "Unsupported OS: $(uname -s). Use 'go install github.com/${REPO}@latest' instead." ;;
+    *)       fail "Unsupported OS: $(uname -s). Use 'go install github.com/${REPO}/cmd/runner@latest' instead." ;;
 esac
 
 # Detect architecture
@@ -33,19 +33,19 @@ else
 fi
 
 # Resolve version
-if [ -z "${RUNSCALER_VERSION:-}" ]; then
-    RUNSCALER_VERSION=$(fetch "https://api.github.com/repos/${REPO}/releases/latest" \
+if [ -z "${RUNNER_VERSION:-}" ]; then
+    RUNNER_VERSION=$(fetch "https://api.github.com/repos/${REPO}/releases/latest" \
         | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"//;s/".*//')
-    [ -n "$RUNSCALER_VERSION" ] || fail "Could not determine latest version"
+    [ -n "$RUNNER_VERSION" ] || fail "Could not determine latest version"
 fi
 
 ARCHIVE="${BINARY}-${OS}-${ARCH}.tar.gz"
-BASE_URL="https://github.com/${REPO}/releases/download/${RUNSCALER_VERSION}"
+BASE_URL="https://github.com/${REPO}/releases/download/${RUNNER_VERSION}"
 
 TMPDIR=$(mktemp -d)
 trap 'rm -rf "$TMPDIR"' EXIT
 
-echo "Downloading ${BINARY} ${RUNSCALER_VERSION} (${OS}/${ARCH})..."
+echo "Downloading ${BINARY} ${RUNNER_VERSION} (${OS}/${ARCH})..."
 download "${TMPDIR}/${ARCHIVE}" "${BASE_URL}/${ARCHIVE}"
 download "${TMPDIR}/checksums.txt" "${BASE_URL}/checksums.txt"
 
@@ -69,7 +69,7 @@ tar xzf "${ARCHIVE}"
 install -d "${INSTALL_DIR}"
 install "${BINARY}" "${INSTALL_DIR}/${BINARY}"
 
-echo "Installed ${BINARY} ${RUNSCALER_VERSION} to ${INSTALL_DIR}/${BINARY}"
+echo "Installed ${BINARY} ${RUNNER_VERSION} to ${INSTALL_DIR}/${BINARY}"
 
 # Warn if INSTALL_DIR is not in PATH
 case ":${PATH}:" in

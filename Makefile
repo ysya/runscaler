@@ -1,4 +1,4 @@
-BINARY_NAME := runscaler
+BINARY_NAME := runner
 VERSION     := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 COMMIT      := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 BUILD_DATE  := $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
@@ -15,11 +15,11 @@ PLATFORMS := \
 
 ## dev: Run locally with debug logging (requires config.toml)
 dev:
-	go run ./cmd/runscaler --log-level debug
+	go run ./cmd/runner --log-level debug
 
 ## build: Build for current platform
 build:
-	go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BINARY_NAME) ./cmd/runscaler
+	go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BINARY_NAME) ./cmd/runner
 
 ## test: Run tests
 test:
@@ -36,7 +36,7 @@ $(PLATFORMS):
 	@mkdir -p dist
 	GOOS=$(OS) GOARCH=$(ARCH) go build \
 		$(GOFLAGS) -ldflags "$(LDFLAGS)" \
-		-o dist/$(BINARY_NAME)-$(OS)-$(ARCH)$(EXT) ./cmd/runscaler
+		-o dist/$(BINARY_NAME)-$(OS)-$(ARCH)$(EXT) ./cmd/runner
 
 ## clean: Remove build artifacts
 clean:

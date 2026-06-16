@@ -293,7 +293,7 @@ func run(ctx context.Context, cfg config.Config) error {
 	}
 
 	// Start periodic shared-volume TTL cleanup (one shared sweeper per process —
-	// all Docker scalesets share the same `runscaler-shared` volume, so the
+	// all Docker scalesets share the same `runner-shared` volume, so the
 	// first matching scaleset wins and others are ignored).
 	startSharedVolumeCleanup(ctx, dockerClient, scaleSets, logger)
 
@@ -506,7 +506,7 @@ func runScaleSet(ctx context.Context, ss config.ScaleSetConfig, dockerClient *do
 
 // startSharedVolumeCleanup launches a background goroutine that runs the
 // shared-volume TTL sweeper periodically. The first Docker scaleset with a
-// shared volume and TTL > 0 wins — runscaler uses one global `runscaler-shared`
+// shared volume and TTL > 0 wins — runner uses one global `runner-shared`
 // volume, so a single sweeper covers all scalesets. No-op when no scaleset
 // enables TTL or when the Docker client is unavailable.
 func startSharedVolumeCleanup(ctx context.Context, client *dockerclient.Client, scaleSets []config.ScaleSetConfig, logger *slog.Logger) {

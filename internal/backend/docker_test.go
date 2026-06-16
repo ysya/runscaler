@@ -165,8 +165,8 @@ func TestDockerBackend_StartRunner_WithSharedVolume(t *testing.T) {
 	if sharedMount.Type != mount.TypeVolume {
 		t.Errorf("mount type = %v, want %v", sharedMount.Type, mount.TypeVolume)
 	}
-	if sharedMount.Source != "runscaler-shared" {
-		t.Errorf("mount source = %q, want %q", sharedMount.Source, "runscaler-shared")
+	if sharedMount.Source != "runner-shared" {
+		t.Errorf("mount source = %q, want %q", sharedMount.Source, "runner-shared")
 	}
 
 	// Verify command wraps with chown
@@ -252,8 +252,8 @@ func TestDockerBackend_StartRunner_MultipleShareVolume(t *testing.T) {
 		if m == nil {
 			t.Fatalf("runner %d: shared volume mount not found", i)
 		}
-		if m.Source != "runscaler-shared" {
-			t.Errorf("runner %d: mount source = %q, want %q", i, m.Source, "runscaler-shared")
+		if m.Source != "runner-shared" {
+			t.Errorf("runner %d: mount source = %q, want %q", i, m.Source, "runner-shared")
 		}
 		if m.Type != mount.TypeVolume {
 			t.Errorf("runner %d: mount type = %v, want %v", i, m.Type, mount.TypeVolume)
@@ -296,8 +296,8 @@ func TestCleanupSharedDocker_RemovesVolume(t *testing.T) {
 	if len(md.volumesRemoved) != 1 {
 		t.Fatalf("expected 1 volume removed, got %d", len(md.volumesRemoved))
 	}
-	if md.volumesRemoved[0] != "runscaler-shared" {
-		t.Errorf("volume removed = %q, want %q", md.volumesRemoved[0], "runscaler-shared")
+	if md.volumesRemoved[0] != "runner-shared" {
+		t.Errorf("volume removed = %q, want %q", md.volumesRemoved[0], "runner-shared")
 	}
 }
 
@@ -447,8 +447,8 @@ func TestCleanupSharedVolumeStale_RunsHelperContainer(t *testing.T) {
 	if m == nil {
 		t.Fatal("shared volume mount not found")
 	}
-	if m.Type != mount.TypeVolume || m.Source != "runscaler-shared" {
-		t.Errorf("mount = %+v, want named volume runscaler-shared", m)
+	if m.Type != mount.TypeVolume || m.Source != "runner-shared" {
+		t.Errorf("mount = %+v, want named volume runner-shared", m)
 	}
 
 	// Script must reference the configured TTL in days and the mount path.
@@ -548,7 +548,7 @@ func TestCleanupOrphanedBuildxBuilders_RemovesOldKeepsYoungAndOthers(t *testing.
 func TestCleanupOrphanedBuildxBuilders_ReapsDanglingVolumes(t *testing.T) {
 	md := &mockDocker{volumes: []*volume.Volume{
 		{Name: "buildx_buildkit_builder-gone0_state"},
-		{Name: "runscaler-shared"}, // must be left untouched
+		{Name: "runner-shared"}, // must be left untouched
 	}}
 
 	if err := CleanupOrphanedBuildxBuilders(context.Background(), md, 24*time.Hour, slog.New(slog.DiscardHandler)); err != nil {

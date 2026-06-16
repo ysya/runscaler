@@ -17,19 +17,19 @@ import (
 
 // Service file paths and identifiers.
 const (
-	serviceName        = "runscaler"
+	serviceName        = "runner"
 	serviceDescription = "GitHub Actions Runner Auto-Scaler"
 
-	defaultConfigPath = "/etc/runscaler/config.toml"
+	defaultConfigPath = "/etc/runner/config.toml"
 
 	// systemd
 	systemdSystemDir = "/etc/systemd/system"
-	systemdUnitFile  = "runscaler.service"
+	systemdUnitFile  = "runner.service"
 
 	// launchd
 	launchdSystemDir = "/Library/LaunchDaemons"
-	launchdLabel     = "com.runscaler.agent"
-	launchdPlistFile = "com.runscaler.agent.plist"
+	launchdLabel     = "io.github.ysya.runner"
+	launchdPlistFile = "io.github.ysya.runner.plist"
 )
 
 // serviceManager abstracts platform-specific service management.
@@ -66,58 +66,58 @@ func newServiceManager() (serviceManager, error) {
 
 var serviceCmd = &cobra.Command{
 	Use:   "service",
-	Short: "Manage runscaler as a system service",
-	Long: `Install, start, stop, and manage runscaler as a system service.
+	Short: "Manage runner as a system service",
+	Long: `Install, start, stop, and manage runner as a system service.
 
 On Linux, this uses systemd. On macOS, this uses launchd.
 By default, services are installed at the system level (requires root).
 Use --user for user-level services that don't require root.`,
-	Example: `  sudo runscaler service install              # Install as system service
-  runscaler service install --user             # Install as user service
-  runscaler service status                     # Show service status
-  runscaler service logs -f                    # Follow service logs
-  sudo runscaler service uninstall             # Remove system service`,
+	Example: `  sudo runner service install              # Install as system service
+  runner service install --user             # Install as user service
+  runner service status                     # Show service status
+  runner service logs -f                    # Follow service logs
+  sudo runner service uninstall             # Remove system service`,
 }
 
 var serviceInstallCmd = &cobra.Command{
 	Use:   "install",
-	Short: "Install and start runscaler as a system service",
+	Short: "Install and start runner as a system service",
 	RunE:  runServiceInstall,
 }
 
 var serviceUninstallCmd = &cobra.Command{
 	Use:   "uninstall",
-	Short: "Stop and remove the runscaler service",
+	Short: "Stop and remove the runner service",
 	RunE:  runServiceUninstall,
 }
 
 var serviceStartCmd = &cobra.Command{
 	Use:   "start",
-	Short: "Start the runscaler service",
+	Short: "Start the runner service",
 	RunE:  runServiceStart,
 }
 
 var serviceStopCmd = &cobra.Command{
 	Use:   "stop",
-	Short: "Stop the runscaler service",
+	Short: "Stop the runner service",
 	RunE:  runServiceStop,
 }
 
 var serviceRestartCmd = &cobra.Command{
 	Use:   "restart",
-	Short: "Restart the runscaler service",
+	Short: "Restart the runner service",
 	RunE:  runServiceRestart,
 }
 
 var serviceStatusCmd = &cobra.Command{
 	Use:   "status",
-	Short: "Show runscaler service status",
+	Short: "Show runner service status",
 	RunE:  runServiceStatus,
 }
 
 var serviceLogsCmd = &cobra.Command{
 	Use:   "logs",
-	Short: "Show runscaler service logs",
+	Short: "Show runner service logs",
 	RunE:  runServiceLogs,
 }
 
@@ -136,7 +136,7 @@ func init() {
 	f := serviceInstallCmd.Flags()
 	f.Bool("user", false, "Install as user-level service (no root required)")
 	f.String("config-path", "", "Config file path for the service (default: auto-detect)")
-	f.String("binary-path", "", "Path to runscaler binary (default: auto-detect)")
+	f.String("binary-path", "", "Path to runner binary (default: auto-detect)")
 	f.Bool("no-start", false, "Install and enable without starting")
 
 	// uninstall / start / stop / restart share --user
@@ -183,7 +183,7 @@ func runServiceInstall(cmd *cobra.Command, _ []string) error {
 	// Warn if config doesn't exist
 	if _, err := os.Stat(configPath); err != nil {
 		fmt.Fprintf(os.Stderr, "  ⚠ Config file not found at %s\n", configPath)
-		fmt.Fprintf(os.Stderr, "    Run 'runscaler init' to generate one first.\n\n")
+		fmt.Fprintf(os.Stderr, "    Run 'runner init' to generate one first.\n\n")
 	}
 
 	backend := detectBackend(configPath)
@@ -280,7 +280,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart={{.BinaryPath}} --config {{.ConfigPath}}
+ExecStart={{.BinaryPath}} run --config {{.ConfigPath}}
 Restart=on-failure
 RestartSec=10s
 {{- if not .User}}
@@ -318,7 +318,7 @@ func (m *systemdManager) install(opts installOpts) error {
 
 	// Check if already installed
 	if _, err := os.Stat(unitPath); err == nil {
-		return fmt.Errorf("service already installed at %s\n\n  Run 'runscaler service uninstall' first", unitPath)
+		return fmt.Errorf("service already installed at %s\n\n  Run 'runner service uninstall' first", unitPath)
 	}
 
 	rwPaths := filepath.Dir(opts.configPath)
@@ -366,8 +366,8 @@ func (m *systemdManager) install(opts installOpts) error {
 	}
 
 	fmt.Printf("\n  Next steps:\n")
-	fmt.Printf("    runscaler service status    # Check service status\n")
-	fmt.Printf("    runscaler service logs -f   # Follow logs\n")
+	fmt.Printf("    runner service status    # Check service status\n")
+	fmt.Printf("    runner service logs -f   # Follow logs\n")
 	return nil
 }
 
@@ -443,6 +443,7 @@ var launchdTmpl = template.Must(template.New("launchd").Parse(`<?xml version="1.
     <key>ProgramArguments</key>
     <array>
         <string>{{.BinaryPath}}</string>
+        <string>run</string>
         <string>--config</string>
         <string>{{.ConfigPath}}</string>
     </array>
@@ -483,9 +484,9 @@ func (m *launchdManager) plistPath(user bool) string {
 func (m *launchdManager) logPath(user bool) string {
 	if user {
 		home, _ := os.UserHomeDir()
-		return filepath.Join(home, "Library", "Logs", "runscaler.log")
+		return filepath.Join(home, "Library", "Logs", "runner.log")
 	}
-	return "/var/log/runscaler.log"
+	return "/var/log/runner.log"
 }
 
 func (m *launchdManager) install(opts installOpts) error {
@@ -500,7 +501,7 @@ func (m *launchdManager) install(opts installOpts) error {
 
 	// Check if already installed
 	if _, err := os.Stat(plist); err == nil {
-		return fmt.Errorf("service already installed at %s\n\n  Run 'runscaler service uninstall' first", plist)
+		return fmt.Errorf("service already installed at %s\n\n  Run 'runner service uninstall' first", plist)
 	}
 
 	data := launchdData{
@@ -529,8 +530,8 @@ func (m *launchdManager) install(opts installOpts) error {
 	}
 
 	fmt.Printf("\n  Next steps:\n")
-	fmt.Printf("    runscaler service status    # Check service status\n")
-	fmt.Printf("    runscaler service logs -f   # Follow logs\n")
+	fmt.Printf("    runner service status    # Check service status\n")
+	fmt.Printf("    runner service logs -f   # Follow logs\n")
 	return nil
 }
 
@@ -592,8 +593,8 @@ func checkPrivileges(user bool) error {
 	}
 	if os.Geteuid() != 0 {
 		return fmt.Errorf("system-level service management requires root privileges\n\n" +
-			"  Run with sudo:  sudo runscaler service install\n" +
-			"  Or use --user:  runscaler service install --user")
+			"  Run with sudo:  sudo runner service install\n" +
+			"  Or use --user:  runner service install --user")
 	}
 	return nil
 }

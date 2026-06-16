@@ -4,10 +4,11 @@ config.toml
 
 # Generated
 compose.yaml
-runner/
+# GitHub Actions runner install dir (repo root only — must not match cmd/runner/)
+/runner/
 
 # Build output
-/runscaler
+/runner
 dist/
 
 # IDE

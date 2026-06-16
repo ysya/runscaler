@@ -269,7 +269,9 @@ func runServiceLogs(cmd *cobra.Command, _ []string) error {
 
 var systemdTmpl = template.Must(template.New("systemd").Parse(`[Unit]
 Description={{.Description}}
-{{- if .AfterDocker}}
+{{- /* User units cannot depend on system units like docker.service —
+       systemd would fail with "Unit docker.service not found". */}}
+{{- if and .AfterDocker (not .User)}}
 After=docker.service
 Requires=docker.service
 {{- end}}

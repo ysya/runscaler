@@ -15,7 +15,7 @@ Custom GitHub Actions self-hosted runner image based on [`ghcr.io/actions/action
 
 ## Usage
 
-### With runscaler
+### With runner
 
 ```toml
 [[scaleset]]

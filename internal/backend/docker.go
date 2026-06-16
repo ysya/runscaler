@@ -102,7 +102,7 @@ func (b *DockerBackend) StartRunner(ctx context.Context, name string, jitConfig 
 	if b.sharedVolume != "" {
 		mounts = append(mounts, mount.Mount{
 			Type:   mount.TypeVolume,
-			Source: "runscaler-shared",
+			Source: "runner-shared",
 			Target: b.sharedVolume,
 		})
 	}
@@ -184,8 +184,8 @@ func (b *DockerBackend) buildContainerEnv(jitConfig string) []string {
 // prune operations.
 func CleanupSharedDocker(ctx context.Context, client DockerAPI, removeVolume bool, logger *slog.Logger) {
 	if removeVolume {
-		logger.Debug("Removing shared volume", slog.String("volume", "runscaler-shared"))
-		if err := client.VolumeRemove(ctx, "runscaler-shared", true); err != nil {
+		logger.Debug("Removing shared volume", slog.String("volume", "runner-shared"))
+		if err := client.VolumeRemove(ctx, "runner-shared", true); err != nil {
 			logger.Error("Failed to remove shared volume", slog.Any("error", err))
 		}
 	}
@@ -383,7 +383,7 @@ func CleanupSharedVolumeStale(ctx context.Context, client DockerAPI, helperImage
 		&container.HostConfig{
 			Mounts: []mount.Mount{{
 				Type:   mount.TypeVolume,
-				Source: "runscaler-shared",
+				Source: "runner-shared",
 				Target: mountPath,
 			}},
 		},

@@ -42,7 +42,7 @@ func init() {
 	// Persistent flags — available to all subcommands
 	cmd.PersistentFlags().String("config", "", "Path to config file (TOML)")
 
-	flags := cmd.Flags()
+	flags := runCommand.Flags()
 
 	// Per-scaleset (also used as legacy single mode)
 	flags.String("url", "", "Registration URL (e.g. https://github.com/org)")
@@ -106,7 +106,7 @@ func init() {
 	viper.BindPFlag("tart.pool-size", flags.Lookup("tart-pool-size"))
 
 	// Register subcommands
-	cmd.AddCommand(initCmd, validateCmd, statusCmd, doctorCmd, versionCmd, serviceCmd)
+	cmd.AddCommand(initCmd, validateCmd, statusCmd, doctorCmd, versionCmd, serviceCmd, runCommand)
 }
 
 func main() {
@@ -117,25 +117,32 @@ func main() {
 }
 
 var cmd = &cobra.Command{
-	Use:     "runscaler [flags]",
+	Use:     "runner",
 	Version: version,
-	Short:   "GitHub Actions Runner Auto-Scaler for Docker",
+	Short:   "GitHub Actions Runner Auto-Scaler",
 	Long: `Dynamically scales GitHub Actions self-hosted runners as Docker containers
-using the actions/scaleset library. Runners are ephemeral — each container
+or Tart VMs using the actions/scaleset library. Runners are ephemeral — each
 handles one job and is removed upon completion.
 
 Supports multiple scale sets via [[scaleset]] entries in TOML config,
-or a single scale set via CLI flags.`,
+or a single scale set via 'runner run' CLI flags.`,
 	Example: `  # Quick start
-  runscaler init                            # Generate config.toml interactively
-  runscaler validate --config config.toml   # Verify configuration
-  runscaler --config config.toml            # Start scaling
+  runner init                            # Generate config.toml interactively
+  runner validate --config config.toml   # Verify configuration
+  runner run --config config.toml        # Start scaling
 
   # Using CLI flags
-  runscaler --url https://github.com/org --name my-runners --token ghp_xxx
+  runner run --url https://github.com/org --name my-runners --token ghp_xxx`,
+}
 
-  # Dry run (validate everything without starting listeners)
-  runscaler --dry-run --config config.toml`,
+var runCommand = &cobra.Command{
+	Use:   "run [flags]",
+	Short: "Start scaling (run the listener in the foreground)",
+	Long: `Connect to GitHub, create or reuse the runner scale set(s), and listen for
+jobs — scaling runners up and down until interrupted.`,
+	Example: `  runner run --config config.toml
+  runner run --url https://github.com/org --name my-runners --token ghp_xxx
+  runner run --dry-run --config config.toml`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := loadConfig(cmd)
 		if err != nil {
@@ -307,7 +314,7 @@ func run(ctx context.Context, cfg config.Config) error {
 			return
 		}
 		if versioncheck.IsNewer(version, release.TagName) {
-			logger.Warn("A newer version of runscaler is available — run 'runscaler update' to upgrade",
+			logger.Warn("A newer version of runner is available — run 'runner update' to upgrade",
 				slog.String("current", version),
 				slog.String("latest", release.TagName),
 			)

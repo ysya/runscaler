@@ -124,7 +124,7 @@ func (b *DockerBackend) StartRunner(ctx context.Context, name string, jitConfig 
 			User:   "runner",
 			Cmd:    cmd,
 			Env:    b.buildContainerEnv(jitConfig),
-			Labels: map[string]string{"managed-by": "runscaler"},
+			Labels: map[string]string{"managed-by": "runner"},
 		},
 		&container.HostConfig{
 			Mounts:      mounts,
@@ -368,7 +368,7 @@ func CleanupSharedVolumeStale(ctx context.Context, client DockerAPI, helperImage
 	timeoutCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 
-	name := fmt.Sprintf("runscaler-cleanup-%d", time.Now().UnixNano())
+	name := fmt.Sprintf("runner-cleanup-%d", time.Now().UnixNano())
 	c, err := client.ContainerCreate(
 		timeoutCtx,
 		&container.Config{
@@ -376,7 +376,7 @@ func CleanupSharedVolumeStale(ctx context.Context, client DockerAPI, helperImage
 			User:  "root",
 			Cmd:   []string{"sh", "-c", script},
 			Labels: map[string]string{
-				"managed-by": "runscaler",
+				"managed-by": "runner",
 				"purpose":    "shared-volume-cleanup",
 			},
 		},

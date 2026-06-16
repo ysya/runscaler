@@ -18,10 +18,10 @@ var initCmd = &cobra.Command{
 	Short: "Generate a config file interactively",
 	Long:  "Create a config.toml file by answering a few questions. Flags can be used for non-interactive mode.",
 	Example: `  # Interactive mode
-  runscaler init
+  runner init
 
   # Non-interactive mode
-  runscaler init --url https://github.com/org --name my-runners --token ghp_xxx`,
+  runner init --url https://github.com/org --name my-runners --token ghp_xxx`,
 	RunE: runInit,
 }
 
@@ -111,7 +111,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 		if maxRunners > 2 {
 			fmt.Println("  ⚠ Note: macOS VMs are limited to 2 concurrent per Apple Silicon host")
 		}
-		configContent = fmt.Sprintf(`# runscaler configuration
+		configContent = fmt.Sprintf(`# runner configuration
 # See: https://github.com/ysya/runscaler
 
 # GitHub registration URL (organization or repository)
@@ -167,7 +167,7 @@ log-format = %q
 			}
 		}
 
-		configContent = fmt.Sprintf(`# runscaler configuration
+		configContent = fmt.Sprintf(`# runner configuration
 # See: https://github.com/ysya/runscaler
 
 # GitHub registration URL (organization or repository)
@@ -205,7 +205,7 @@ shared-volume = %q
 # cpu = 4         # cores
 
 # Orphaned buildx builder cleanup (on by default). docker buildx builders
-# leak state volumes on persistent hosts; runscaler removes ones older than
+# leak state volumes on persistent hosts; runner removes ones older than
 # the TTL. Disable only if you run a persistent builder via keep-state.
 # buildx-cleanup = false
 # buildx-cleanup-ttl = "24h"
@@ -247,8 +247,8 @@ log-format = %q
 
 	fmt.Printf("\nCreated %s\n", output)
 	fmt.Println("\nNext steps:")
-	fmt.Printf("  runscaler validate --config %s   # Verify configuration\n", output)
-	fmt.Printf("  runscaler --config %s            # Start scaling\n", output)
+	fmt.Printf("  runner validate --config %s   # Verify configuration\n", output)
+	fmt.Printf("  runner run --config %s        # Start scaling\n", output)
 	return nil
 }
 

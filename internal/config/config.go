@@ -16,7 +16,7 @@ import (
 	"github.com/hashicorp/go-retryablehttp"
 )
 
-// Config holds the complete runscaler configuration.
+// Config holds the complete runner configuration.
 //
 // Global-only fields (LogLevel, LogFormat, HealthPort, DryRun) are never
 // inherited by scale sets. The Defaults field is squashed so its keys
@@ -70,7 +70,7 @@ type DockerConfig struct {
 	// 0 (default) disables TTL cleanup. Accepts Go duration strings, e.g. "168h".
 	SharedVolumeTTL time.Duration `mapstructure:"shared-volume-ttl"`
 	// SharedVolumeCleanupInterval is how often the TTL sweep runs while
-	// runscaler is up. Ignored when SharedVolumeTTL is 0. Defaults to
+	// runner is up. Ignored when SharedVolumeTTL is 0. Defaults to
 	// DefaultSharedVolumeCleanupInterval when unset.
 	SharedVolumeCleanupInterval time.Duration `mapstructure:"shared-volume-cleanup-interval"`
 
@@ -84,7 +84,7 @@ type DockerConfig struct {
 	// your longest build so in-progress builds are never disrupted.
 	BuildxCleanupTTL time.Duration `mapstructure:"buildx-cleanup-ttl"`
 	// BuildxCleanupInterval is how often the buildx cleanup sweep runs while
-	// runscaler is up. Defaults to DefaultBuildxCleanupInterval when unset.
+	// runner is up. Defaults to DefaultBuildxCleanupInterval when unset.
 	BuildxCleanupInterval time.Duration `mapstructure:"buildx-cleanup-interval"`
 }
 
@@ -109,7 +109,7 @@ type TartConfig struct {
 	// sweep — least-recently-used entries are removed until the total fits.
 	// 0 (default) means no size cap (age-based cleanup still runs).
 	CacheSpaceBudgetGB int `mapstructure:"cache-space-budget"`
-	// CacheCleanupInterval is how often the prune sweep runs while runscaler
+	// CacheCleanupInterval is how often the prune sweep runs while runner
 	// is up. Ignored when cache cleanup is disabled. Defaults to
 	// DefaultTartCacheCleanupInterval when unset.
 	CacheCleanupInterval time.Duration `mapstructure:"cache-cleanup-interval"`
@@ -264,7 +264,8 @@ func (ss *ScaleSetConfig) IsTartCacheCleanupEnabled() bool {
 // resolveEnvToken resolves the token value from environment variables.
 // Supports two patterns:
 //   - token = "env:VARIABLE_NAME" — reads from the named env var
-//   - Empty token with RUNSCALER_TOKEN env var set — uses that as fallback
+//   - Empty token with RUNNER_TOKEN env var set — uses that as fallback
+//     (the legacy RUNSCALER_TOKEN is still honored during the transition)
 func (ss *ScaleSetConfig) resolveEnvToken() {
 	if strings.HasPrefix(ss.Token, "env:") {
 		envName := strings.TrimPrefix(ss.Token, "env:")
@@ -272,7 +273,11 @@ func (ss *ScaleSetConfig) resolveEnvToken() {
 		return
 	}
 	if ss.Token == "" {
-		if v := os.Getenv("RUNSCALER_TOKEN"); v != "" {
+		if v := os.Getenv("RUNNER_TOKEN"); v != "" {
+			ss.Token = v
+		} else if v := os.Getenv("RUNSCALER_TOKEN"); v != "" {
+			// Deprecated: kept so existing deployments keep working during the
+			// runscaler→runner transition. Remove in a future release.
 			ss.Token = v
 		}
 	}

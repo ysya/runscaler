@@ -626,6 +626,35 @@ func TestMergeDefaults_TartCacheCleanup(t *testing.T) {
 	}
 }
 
+func TestResolveEnvTokenPrefersRunnerToken(t *testing.T) {
+	t.Setenv("RUNNER_TOKEN", "new-token")
+	t.Setenv("RUNSCALER_TOKEN", "legacy-token")
+	ss := &ScaleSetConfig{}
+	ss.resolveEnvToken()
+	if ss.Token != "new-token" {
+		t.Errorf("Token = %q, want %q (RUNNER_TOKEN must win)", ss.Token, "new-token")
+	}
+}
+
+func TestResolveEnvTokenFallsBackToLegacy(t *testing.T) {
+	t.Setenv("RUNNER_TOKEN", "") // unset/empty → must fall back
+	t.Setenv("RUNSCALER_TOKEN", "legacy-token")
+	ss := &ScaleSetConfig{}
+	ss.resolveEnvToken()
+	if ss.Token != "legacy-token" {
+		t.Errorf("Token = %q, want %q (legacy RUNSCALER_TOKEN fallback)", ss.Token, "legacy-token")
+	}
+}
+
+func TestResolveEnvTokenExplicitEnvRef(t *testing.T) {
+	t.Setenv("MY_CUSTOM_TOKEN", "custom")
+	ss := &ScaleSetConfig{Token: "env:MY_CUSTOM_TOKEN"}
+	ss.resolveEnvToken()
+	if ss.Token != "custom" {
+		t.Errorf("Token = %q, want %q (env: ref)", ss.Token, "custom")
+	}
+}
+
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && searchString(s, substr)
 }

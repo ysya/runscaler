@@ -16,7 +16,7 @@ var validateCmd = &cobra.Command{
 	Use:   "validate",
 	Short: "Validate configuration and connectivity",
 	Long:  "Check that the config file is valid, Docker/Tart is reachable, and GitHub tokens work.",
-	Example: `  runscaler validate --config config.toml`,
+	Example: `  runner validate --config config.toml`,
 	RunE: runValidate,
 }
 

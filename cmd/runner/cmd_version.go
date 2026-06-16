@@ -12,9 +12,9 @@ var versionCmd = &cobra.Command{
 	Use:   "version",
 	Short: "Show version information",
 	Long:  `Display the version, commit hash, build date, and runtime info.`,
-	Example: `  runscaler version            # Show version info
-  runscaler version --short    # Print version number only
-  runscaler version --json     # Output as JSON`,
+	Example: `  runner version            # Show version info
+  runner version --short    # Print version number only
+  runner version --json     # Output as JSON`,
 	RunE: runVersion,
 }
 
@@ -55,7 +55,7 @@ func runVersion(cmd *cobra.Command, _ []string) error {
 		return enc.Encode(info)
 	}
 
-	fmt.Fprintf(cmd.OutOrStdout(), "runscaler %s\n", info.Version)
+	fmt.Fprintf(cmd.OutOrStdout(), "runner %s\n", info.Version)
 	if info.Commit != "" {
 		fmt.Fprintf(cmd.OutOrStdout(), "  commit: %s\n", info.Commit)
 	}

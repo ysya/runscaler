@@ -11,11 +11,11 @@ import (
 
 var updateCmd = &cobra.Command{
 	Use:   "update",
-	Short: "Update runscaler to the latest release",
+	Short: "Update runner to the latest release",
 	Long: `Check GitHub for the latest release and, if newer, download and replace
 the current binary in-place. The checksum is verified before installation.`,
-	Example: `  runscaler update            # Update to latest release
-  runscaler update --check    # Check for updates without installing`,
+	Example: `  runner update            # Update to latest release
+  runner update --check    # Check for updates without installing`,
 	RunE: runUpdate,
 }
 
@@ -61,6 +61,6 @@ func runUpdate(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("update failed: %w", err)
 	}
 
-	fmt.Fprintf(cmd.OutOrStdout(), "Updated to %s. Restart runscaler to use the new version.\n", release.TagName)
+	fmt.Fprintf(cmd.OutOrStdout(), "Updated to %s. Restart runner to use the new version.\n", release.TagName)
 	return nil
 }

@@ -191,8 +191,8 @@ func TestDockerBackend_StartRunner_WithSharedVolume(t *testing.T) {
 	}
 
 	// Verify managed-by label
-	if label := call.config.Labels["managed-by"]; label != "runscaler" {
-		t.Errorf("label managed-by = %q, want %q", label, "runscaler")
+	if label := call.config.Labels["managed-by"]; label != "runner" {
+		t.Errorf("label managed-by = %q, want %q", label, "runner")
 	}
 }
 
@@ -461,7 +461,7 @@ func TestCleanupSharedVolumeStale_RunsHelperContainer(t *testing.T) {
 	}
 
 	// Labels mark the helper for doctor / observability.
-	if call.config.Labels["managed-by"] != "runscaler" {
+	if call.config.Labels["managed-by"] != "runner" {
 		t.Errorf("missing managed-by label, got: %v", call.config.Labels)
 	}
 	if call.config.Labels["purpose"] != "shared-volume-cleanup" {

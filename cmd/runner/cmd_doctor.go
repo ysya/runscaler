@@ -22,11 +22,11 @@ var doctorCmd = &cobra.Command{
 	Use:   "doctor",
 	Short: "Diagnose and clean up orphaned runners",
 	Long: `Check for orphaned Docker containers, Tart VMs, and volumes
-left by runscaler after abnormal termination.
+left by runner after abnormal termination.
 
 By default, only reports what it finds. Use --fix to remove orphaned resources.`,
-	Example: `  runscaler doctor          # Diagnose only
-  runscaler doctor --fix    # Diagnose and clean up`,
+	Example: `  runner doctor          # Diagnose only
+  runner doctor --fix    # Diagnose and clean up`,
 	RunE: runDoctor,
 }
 
@@ -35,7 +35,7 @@ func init() {
 	doctorCmd.Flags().Int("health-port", config.DefaultHealthPort, "Health check port to detect running instance")
 }
 
-// runnerNamePattern matches container/VM names created by runscaler.
+// runnerNamePattern matches container/VM names created by runner.
 // scaler.go generates: runner-{uuid[:8]} where uuid[:8] is 8 hex chars.
 var runnerNamePattern = regexp.MustCompile(`^/?runner-[0-9a-f]{8}$`)
 
@@ -53,12 +53,12 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Safety check: refuse --fix if runscaler is currently running
+	// Safety check: refuse --fix if runner is currently running
 	if fix {
-		if isRunscalerRunning(healthPort) {
-			fmt.Println("  ✗ runscaler is currently running (health endpoint responded)")
-			fmt.Println("    Stop runscaler first before using --fix")
-			return fmt.Errorf("cannot fix while runscaler is running")
+		if isRunnerRunning(healthPort) {
+			fmt.Println("  ✗ runner is currently running (health endpoint responded)")
+			fmt.Println("    Stop runner first before using --fix")
+			return fmt.Errorf("cannot fix while runner is running")
 		}
 	}
 
@@ -90,7 +90,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	} else if fix {
 		fmt.Println("All clean.")
 	} else {
-		fmt.Printf("Found %d orphaned resource(s). Run 'runscaler doctor --fix' to clean up.\n", totalOrphans)
+		fmt.Printf("Found %d orphaned resource(s). Run 'runner doctor --fix' to clean up.\n", totalOrphans)
 		return fmt.Errorf("orphaned resources found")
 	}
 	return nil
@@ -126,8 +126,8 @@ func checkScalesetAPI(ctx context.Context, cfg *config.Config) {
 	fmt.Printf("    Debug: %s\n", client.DebugInfo())
 }
 
-// isRunscalerRunning checks if a runscaler instance is responding on the health port.
-func isRunscalerRunning(port int) bool {
+// isRunnerRunning checks if a runner instance is responding on the health port.
+func isRunnerRunning(port int) bool {
 	client := &http.Client{Timeout: 2 * time.Second}
 	resp, err := client.Get(fmt.Sprintf("http://localhost:%d/readyz", port))
 	if err != nil {
@@ -197,7 +197,7 @@ func checkDockerContainers(ctx context.Context, client *dockerclient.Client, fix
 
 	var orphans []container.Summary
 	for _, c := range containers {
-		if c.Labels["managed-by"] == "runscaler" {
+		if c.Labels["managed-by"] == "runner" {
 			orphans = append(orphans, c)
 			continue
 		}

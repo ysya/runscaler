@@ -18,9 +18,9 @@ var statusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "Show current runner status",
 	Long:  "Query the local health check endpoint to display runner status.",
-	Example: `  runscaler status
-  runscaler status --health-port 9090
-  runscaler status --json`,
+	Example: `  runner status
+  runner status --health-port 9090
+  runner status --json`,
 	RunE: runStatus,
 }
 
@@ -37,9 +37,9 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	url := fmt.Sprintf("http://localhost:%d/healthz", port)
 	resp, err := http.Get(url)
 	if err != nil {
-		return fmt.Errorf("cannot connect to runscaler at port %d — is it running?\n\n"+
-			"  Start runscaler first: runscaler --config config.toml\n"+
-			"  Or check the health port: runscaler --health-port %d --config config.toml",
+		return fmt.Errorf("cannot connect to runner at port %d — is it running?\n\n"+
+			"  Start runner first: runner run --config config.toml\n"+
+			"  Or check the health port: runner run --health-port %d --config config.toml",
 			port, port)
 	}
 	defer resp.Body.Close()
@@ -59,7 +59,7 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to parse response: %w", err)
 	}
 
-	fmt.Printf("runscaler %s (uptime: %s)\n\n", h.Version, h.Uptime)
+	fmt.Printf("runner %s (uptime: %s)\n\n", h.Version, h.Uptime)
 
 	if len(h.ScaleSets) == 0 {
 		fmt.Println("No scale sets registered yet.")

@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	cerrdefs "github.com/containerd/errdefs"
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/volume"
 	dockerclient "github.com/docker/docker/client"
 	"github.com/spf13/cobra"
 
@@ -236,30 +236,41 @@ func checkDockerContainers(ctx context.Context, client *dockerclient.Client, fix
 	return 0, nil
 }
 
-// checkDockerVolume checks for the runscaler-shared volume.
-func checkDockerVolume(ctx context.Context, client *dockerclient.Client, fix bool) (int, error) {
-	_, err := client.VolumeInspect(ctx, "runscaler-shared")
-	if err != nil {
-		if cerrdefs.IsNotFound(err) {
-			fmt.Println("  ✓ No orphaned Docker volumes")
-			return 0, nil
+// volumeAPI is the subset of the Docker client doctor needs (so it can be faked in tests).
+type volumeAPI interface {
+	VolumeInspect(ctx context.Context, id string) (volume.Volume, error)
+	VolumeRemove(ctx context.Context, id string, force bool) error
+}
+
+// sharedVolumeNames lists shared volumes doctor treats as orphaned: the current
+// name plus legacy names from before the runscaler→runner rename.
+var sharedVolumeNames = []string{"runner-shared", "runscaler-shared"}
+
+// checkDockerVolume reports/cleans orphaned shared volumes. Returns the number
+// of unresolved issues.
+func checkDockerVolume(ctx context.Context, client volumeAPI, fix bool) (int, error) {
+	found, issues := 0, 0
+	for _, name := range sharedVolumeNames {
+		if _, err := client.VolumeInspect(ctx, name); err != nil {
+			continue // not found (or unknown error treated as absent)
 		}
-		// Treat unknown errors as "no volume" rather than failing
+		found++
+		if !fix {
+			fmt.Printf("  ⚠ Found orphaned volume: %s\n", name)
+			issues++
+			continue
+		}
+		if err := client.VolumeRemove(ctx, name, true); err != nil {
+			fmt.Printf("  ✗ Failed to remove volume %s: %s\n", name, err)
+			issues++
+			continue
+		}
+		fmt.Printf("  ✓ Removed orphaned volume: %s\n", name)
+	}
+	if found == 0 {
 		fmt.Println("  ✓ No orphaned Docker volumes")
-		return 0, nil
 	}
-
-	if !fix {
-		fmt.Println("  ⚠ Found orphaned volume: runscaler-shared")
-		return 1, nil
-	}
-
-	if err := client.VolumeRemove(ctx, "runscaler-shared", true); err != nil {
-		fmt.Printf("  ✗ Failed to remove volume runscaler-shared: %s\n", err)
-		return 1, nil
-	}
-	fmt.Println("  ✓ Removed orphaned volume: runscaler-shared")
-	return 0, nil
+	return issues, nil
 }
 
 // tartListEntry represents a VM from `tart list --format json`.

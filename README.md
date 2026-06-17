@@ -396,17 +396,23 @@ The scaler implements three methods from the scaleset `Scaler` interface:
 
 ## Upgrading from runscaler
 
-The `runscaler` binary is now `runner`, and starting is a subcommand (`runner run`).
-To upgrade an existing install:
+The `runscaler` binary is now `runner` (start is a subcommand: `runner run`).
+After installing the new binary, run:
 
-1. Remove the old service with the OLD binary: `sudo runscaler service uninstall`
-2. Install the new binary (`./install.sh`, or download `runner-<os>-<arch>.tar.gz`).
-3. Move your config: `/etc/runscaler/config.toml` → `/etc/runner/config.toml` (or pass `--config`).
-4. Install the new service: `sudo runner service install`
-5. Clean up leftover docker resources: `runner doctor --fix` (removes the orphaned `runscaler-shared` volume — and any other orphaned runner containers/VMs; safe when the service is stopped).
-6. If you set `RUNSCALER_TOKEN`, rename it to `RUNNER_TOKEN` (old name still works, deprecated).
+    sudo runner migrate          # system-level install
+    runner migrate --user        # user-level install
 
-> A `runner migrate` command that automates all of the above is coming soon.
+`migrate` moves your config (`/etc/runscaler` → `/etc/runner`), reinstalls the
+service under the new name, and removes the old docker volume. It is idempotent.
+
+During the transition the old binary's `runscaler update` can still fetch this
+release (compat assets are published), a legacy `/etc/runscaler/config.toml` is
+still read (with a warning), and an old `runscaler --config` service invocation
+still starts (with a warning) — so nothing breaks before you migrate.
+
+Manual alternative: uninstall the old service with the old binary, move the
+config, run `sudo runner service install`, and `runner doctor --fix` to clean
+the old volume.
 
 ## License
 

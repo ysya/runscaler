@@ -371,32 +371,32 @@ func (m *systemdManager) install(opts installOpts) error {
 	return nil
 }
 
-func (m *systemdManager) uninstall(user bool) error {
+// removeSystemdUnit stops, disables, and removes a systemd unit by name.
+func removeSystemdUnit(user bool, unitFile, svcName string) error {
 	unitDir := systemdSystemDir
 	if user {
 		home, _ := os.UserHomeDir()
 		unitDir = filepath.Join(home, ".config", "systemd", "user")
 	}
-	unitPath := filepath.Join(unitDir, systemdUnitFile)
-
+	unitPath := filepath.Join(unitDir, unitFile)
 	if _, err := os.Stat(unitPath); os.IsNotExist(err) {
 		return fmt.Errorf("service not installed (no unit file at %s)", unitPath)
 	}
-
 	userFlag := systemdUserFlag(user)
-
-	_ = runCmd("systemctl", append(userFlag, "stop", serviceName)...)
-	fmt.Printf("  ✓ Service stopped\n")
-
-	_ = runCmd("systemctl", append(userFlag, "disable", serviceName)...)
-	fmt.Printf("  ✓ Service disabled\n")
-
+	_ = runCmd("systemctl", append(userFlag, "stop", svcName)...)
+	_ = runCmd("systemctl", append(userFlag, "disable", svcName)...)
 	if err := os.Remove(unitPath); err != nil {
 		return fmt.Errorf("failed to remove unit file: %w", err)
 	}
-	fmt.Printf("  ✓ Removed %s\n", unitPath)
-
 	_ = runCmd("systemctl", append(userFlag, "daemon-reload")...)
+	return nil
+}
+
+func (m *systemdManager) uninstall(user bool) error {
+	if err := removeSystemdUnit(user, systemdUnitFile, serviceName); err != nil {
+		return err
+	}
+	fmt.Printf("  ✓ Service stopped, disabled, and removed\n")
 	return nil
 }
 
@@ -535,20 +535,23 @@ func (m *launchdManager) install(opts installOpts) error {
 	return nil
 }
 
-func (m *launchdManager) uninstall(user bool) error {
-	plist := m.plistPath(user)
-
-	if _, err := os.Stat(plist); os.IsNotExist(err) {
-		return fmt.Errorf("service not installed (no plist at %s)", plist)
+// removeLaunchdPlist unloads and removes a launchd plist at the given path.
+func removeLaunchdPlist(plistPath string) error {
+	if _, err := os.Stat(plistPath); os.IsNotExist(err) {
+		return fmt.Errorf("service not installed (no plist at %s)", plistPath)
 	}
-
-	_ = runCmd("launchctl", "unload", plist)
-	fmt.Printf("  ✓ Service unloaded\n")
-
-	if err := os.Remove(plist); err != nil {
+	_ = runCmd("launchctl", "unload", plistPath)
+	if err := os.Remove(plistPath); err != nil {
 		return fmt.Errorf("failed to remove plist: %w", err)
 	}
-	fmt.Printf("  ✓ Removed %s\n", plist)
+	return nil
+}
+
+func (m *launchdManager) uninstall(user bool) error {
+	if err := removeLaunchdPlist(m.plistPath(user)); err != nil {
+		return err
+	}
+	fmt.Printf("  ✓ Service unloaded and removed\n")
 	return nil
 }
 

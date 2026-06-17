@@ -226,8 +226,8 @@ func TestLoadConfigFallsBackToLegacyDir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadConfig: %v", err)
 	}
-	if cfg.URL != "https://github.com/org" {
-		t.Errorf("expected config loaded from legacy dir, got URL=%q", cfg.URL)
+	if cfg.Defaults.RegistrationURL != "https://github.com/org" {
+		t.Errorf("expected config loaded from legacy dir, got url=%q", cfg.Defaults.RegistrationURL)
 	}
 }
 ```

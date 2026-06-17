@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -23,7 +24,12 @@ func loadConfig(cmd *cobra.Command) (config.Config, error) {
 		viper.SetConfigType("toml")
 		viper.AddConfigPath(".")
 		viper.AddConfigPath("/etc/runner")
-		_ = viper.ReadInConfig() // ignore error — default paths are optional
+		viper.AddConfigPath(legacyConfigDir) // legacy /etc/runscaler — deprecated
+		_ = viper.ReadInConfig()             // ignore error — default paths are optional
+
+		if used := viper.ConfigFileUsed(); used != "" && filepath.Dir(used) == filepath.Clean(legacyConfigDir) {
+			warnLegacy("config loaded from legacy path %s — run 'runner migrate' or move it to /etc/runner", used)
+		}
 	}
 
 	var cfg config.Config

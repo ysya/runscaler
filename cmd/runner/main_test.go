@@ -1,12 +1,59 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
 
-func TestRootHasNoRunE(t *testing.T) {
-	// Bare `runner` must print help, not start scaling. cobra prints usage
-	// for a command with neither Run nor RunE.
-	if cmd.RunE != nil || cmd.Run != nil {
-		t.Error("root command must not have Run/RunE so bare `runner` prints help")
+	"github.com/spf13/cobra"
+)
+
+func TestRootBareInvocationDoesNotStart(t *testing.T) {
+	called := false
+	orig := startScaling
+	startScaling = func(c *cobra.Command) error { called = true; return nil }
+	defer func() { startScaling = orig }()
+	defer func() {
+		if f := cmd.PersistentFlags().Lookup("config"); f != nil {
+			f.Changed = false
+			_ = f.Value.Set(f.DefValue)
+		}
+	}()
+
+	cmd.SetArgs([]string{})
+	cmd.SetOut(&strings.Builder{})
+	cmd.SetErr(&strings.Builder{})
+	defer cmd.SetArgs(nil)
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if called {
+		t.Error("bare `runner` must print help, not start scaling")
+	}
+}
+
+func TestRootConfigInvocationStartsViaDropIn(t *testing.T) {
+	called := false
+	orig := startScaling
+	startScaling = func(c *cobra.Command) error { called = true; return nil }
+	defer func() { startScaling = orig }()
+	defer func() {
+		if f := cmd.PersistentFlags().Lookup("config"); f != nil {
+			f.Changed = false
+			_ = f.Value.Set(f.DefValue)
+		}
+	}()
+
+	cmd.SetArgs([]string{"--config", "/nonexistent/x.toml"})
+	cmd.SetOut(&strings.Builder{})
+	cmd.SetErr(&strings.Builder{})
+	defer cmd.SetArgs(nil)
+
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if !called {
+		t.Error("`runner --config X` must start via drop-in compat")
 	}
 }
 

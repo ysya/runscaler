@@ -116,6 +116,31 @@ func main() {
 	}
 }
 
+// startScaling loads config, sets up signal handling, and runs the scaler.
+// Shared by `runner run` and the root drop-in compat path. var (not func) so
+// tests can stub it.
+var startScaling = func(cmd *cobra.Command) error {
+	cfg, err := loadConfig(cmd)
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+
+	// Force exit on second signal
+	go func() {
+		<-ctx.Done()
+		sig := make(chan os.Signal, 1)
+		signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+		<-sig
+		fmt.Fprintln(os.Stderr, "\nForce exit")
+		os.Exit(1)
+	}()
+
+	return run(ctx, cfg)
+}
+
 var cmd = &cobra.Command{
 	Use:     "runner",
 	Version: version,
@@ -133,6 +158,17 @@ or a single scale set via 'runner run' CLI flags.`,
 
   # Using CLI flags
   runner run --url https://github.com/org --name my-runners --token ghp_xxx`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		// Drop-in compat: an old `runscaler --config X` invocation (e.g. a
+		// pre-rename systemd unit after self-update) reaches the root with
+		// --config set and no subcommand. Warn and start anyway so the
+		// service keeps working; bare `runner` still just prints help.
+		if cmd.PersistentFlags().Changed("config") {
+			warnLegacy("starting via `runner --config` is deprecated — use `runner run` (or `runner migrate` to update your service)")
+			return startScaling(cmd)
+		}
+		return cmd.Help()
+	},
 }
 
 var runCommand = &cobra.Command{
@@ -144,25 +180,7 @@ jobs — scaling runners up and down until interrupted.`,
   runner run --url https://github.com/org --name my-runners --token ghp_xxx
   runner run --dry-run --config config.toml`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cfg, err := loadConfig(cmd)
-		if err != nil {
-			return err
-		}
-
-		ctx, cancel := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
-		defer cancel()
-
-		// Force exit on second signal
-		go func() {
-			<-ctx.Done()
-			sig := make(chan os.Signal, 1)
-			signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
-			<-sig
-			fmt.Fprintln(os.Stderr, "\nForce exit")
-			os.Exit(1)
-		}()
-
-		return run(ctx, cfg)
+		return startScaling(cmd)
 	},
 }
 

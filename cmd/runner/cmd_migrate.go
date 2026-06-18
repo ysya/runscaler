@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -18,9 +19,10 @@ var newConfigPath = defaultConfigPath // "/etc/runner/config.toml"
 var migrateCmd = &cobra.Command{
 	Use:   "migrate",
 	Short: "Migrate an existing runscaler install to runner",
-	Long: `Move config from /etc/runscaler to /etc/runner, reinstall the service
-under the new name, and clean up the old docker volume. Idempotent — safe to
-run multiple times; a fresh install has nothing to migrate.`,
+	Long: `Copy config from /etc/runscaler to /etc/runner (the legacy file is
+removed only after the service migration succeeds), reinstall the service under
+the new name, and clean up the old docker volume. Idempotent — safe to run
+multiple times; a fresh install has nothing to migrate.`,
 	RunE: runMigrate,
 }
 
@@ -37,12 +39,12 @@ func runMigrate(c *cobra.Command, _ []string) error {
 
 	did := false
 
-	moved, err := migrateConfig()
+	copied, err := migrateConfig()
 	if err != nil {
 		return fmt.Errorf("config migration failed: %w", err)
 	}
-	if moved {
-		fmt.Printf("  ✓ Moved config %s → %s\n", legacyConfigPath, newConfigPath)
+	if copied {
+		fmt.Printf("  ✓ Copied config %s → %s\n", legacyConfigPath, newConfigPath)
 		did = true
 	}
 
@@ -53,6 +55,18 @@ func runMigrate(c *cobra.Command, _ []string) error {
 	if migratedSvc {
 		fmt.Printf("  ✓ Reinstalled service under the new name\n")
 		did = true
+	}
+
+	// Service migration succeeded (or there was none) — now safe to remove the
+	// legacy config, but only if the new config is in place. Stat-based so a
+	// re-run also cleans it up.
+	if _, lerr := os.Stat(legacyConfigPath); lerr == nil {
+		if _, nerr := os.Stat(newConfigPath); nerr == nil {
+			if err := os.Remove(legacyConfigPath); err == nil {
+				fmt.Printf("  ✓ Removed legacy config %s\n", legacyConfigPath)
+				did = true
+			}
+		}
 	}
 
 	if cleaned := migrateVolume(c.Context()); cleaned {
@@ -70,64 +84,106 @@ func runMigrate(c *cobra.Command, _ []string) error {
 	return nil
 }
 
-// migrateConfig moves the legacy config to the new path. Returns whether it
-// moved anything. No-op if the legacy file is absent or the target exists.
+// copyFile copies src to dst. dst must not already exist (O_EXCL).
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
+}
+
+// migrateConfig copies the legacy config to the new path, KEEPING the legacy
+// file so an old service still works if a later step fails. runMigrate removes
+// the legacy config only after the service migration succeeds. Returns whether
+// it copied. No-op if legacy absent or target already exists.
 func migrateConfig() (bool, error) {
 	if _, err := os.Stat(legacyConfigPath); err != nil {
-		return false, nil // nothing at the old path
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
 	}
 	if _, err := os.Stat(newConfigPath); err == nil {
 		warnLegacy("legacy config %s exists but %s is already present — leaving both, not overwriting", legacyConfigPath, newConfigPath)
 		return false, nil
+	} else if !os.IsNotExist(err) {
+		return false, err
 	}
 	if err := os.MkdirAll(filepath.Dir(newConfigPath), 0o755); err != nil {
 		return false, err
 	}
-	if err := os.Rename(legacyConfigPath, newConfigPath); err != nil {
+	if err := copyFile(legacyConfigPath, newConfigPath); err != nil {
 		return false, err
 	}
 	return true, nil
 }
 
-// migrateService removes a legacy-named service and installs the new one.
-// Returns whether it did anything.
+// migrateService migrates the service atomically: install the new service
+// (without starting) BEFORE removing the legacy one, so a failure leaves the
+// OLD service intact and the migration re-runnable. Returns whether it acted.
 func migrateService(user bool) (bool, error) {
 	if !legacyServiceInstalled(user) {
+		// If the new service is installed but a previous migration's start step
+		// failed, ensure it's running (idempotent). Otherwise nothing to migrate.
+		if newServiceInstalled(user) {
+			if mgr, err := newServiceManager(); err == nil {
+				_ = mgr.start(user)
+			}
+		}
 		return false, nil
 	}
-	switch runtime.GOOS {
-	case "linux":
-		if err := removeSystemdUnit(user, legacySystemdUnit, legacyServiceName); err != nil {
-			return false, err
-		}
-	case "darwin":
-		if err := removeLaunchdPlist(legacyLaunchdPlistPath(user)); err != nil {
-			return false, err
-		}
-	default:
-		return false, fmt.Errorf("unsupported platform: %s", runtime.GOOS)
-	}
-
 	mgr, err := newServiceManager()
 	if err != nil {
 		return false, err
 	}
-	binaryPath, err := os.Executable()
-	if err != nil {
-		return false, fmt.Errorf("cannot detect binary path: %w", err)
+	// 1. Install the new service (not started) if not already present. On
+	//    failure the legacy service is untouched — host keeps running, re-runnable.
+	if !newServiceInstalled(user) {
+		binaryPath, err := os.Executable()
+		if err != nil {
+			return false, fmt.Errorf("cannot detect binary path: %w", err)
+		}
+		if resolved, rerr := filepath.EvalSymlinks(binaryPath); rerr == nil {
+			binaryPath = resolved
+		}
+		if err := mgr.install(installOpts{
+			user:       user,
+			configPath: newConfigPath,
+			binaryPath: binaryPath,
+			backend:    detectBackend(newConfigPath),
+			noStart:    true,
+		}); err != nil {
+			return false, err
+		}
 	}
-	if resolved, rerr := filepath.EvalSymlinks(binaryPath); rerr == nil {
-		binaryPath = resolved
+	// 2. Remove the legacy service now that the new one is in place.
+	switch runtime.GOOS {
+	case "linux":
+		if err := removeSystemdUnit(user, legacySystemdUnit, legacyServiceName); err != nil {
+			return true, err
+		}
+	case "darwin":
+		if err := removeLaunchdPlist(legacyLaunchdPlistPath(user)); err != nil {
+			return true, err
+		}
+	default:
+		return true, fmt.Errorf("unsupported platform: %s", runtime.GOOS)
 	}
-	configPath := newConfigPath
-	// noStart is left false: migrate removes the old service and activates the
-	// new one in a single step.
-	return true, mgr.install(installOpts{
-		user:       user,
-		configPath: configPath,
-		binaryPath: binaryPath,
-		backend:    detectBackend(configPath),
-	})
+	// 3. Start the new service.
+	if err := mgr.start(user); err != nil {
+		return true, fmt.Errorf("new service installed but failed to start (run `runner service start` to retry): %w", err)
+	}
+	return true, nil
 }
 
 // migrateVolume removes the legacy shared docker volume. Best-effort; returns

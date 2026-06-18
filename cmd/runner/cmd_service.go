@@ -674,3 +674,27 @@ func runCmdPassthrough(name string, args ...string) error {
 	}
 	return nil
 }
+
+// newServiceInstalled reports whether the new runner service is installed at
+// the given level.
+func newServiceInstalled(user bool) bool {
+	var paths []string
+	if user {
+		home, _ := os.UserHomeDir()
+		paths = []string{
+			filepath.Join(home, ".config", "systemd", "user", systemdUnitFile),
+			filepath.Join(home, "Library", "LaunchAgents", launchdPlistFile),
+		}
+	} else {
+		paths = []string{
+			filepath.Join(systemdSystemDir, systemdUnitFile),
+			filepath.Join(launchdSystemDir, launchdPlistFile),
+		}
+	}
+	for _, p := range paths {
+		if _, err := os.Stat(p); err == nil {
+			return true
+		}
+	}
+	return false
+}

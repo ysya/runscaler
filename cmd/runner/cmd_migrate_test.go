@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-func TestMigrateConfigMovesAndIsIdempotent(t *testing.T) {
+func TestMigrateConfigCopiesAndIsIdempotent(t *testing.T) {
 	oldDir := t.TempDir()
 	newDir := t.TempDir()
 	oldCfg := filepath.Join(oldDir, "config.toml")
@@ -19,26 +19,45 @@ func TestMigrateConfigMovesAndIsIdempotent(t *testing.T) {
 	legacyConfigPath, newConfigPath = oldCfg, newCfg
 	defer func() { legacyConfigPath, newConfigPath = origOld, origNew }()
 
-	moved, err := migrateConfig()
+	copied, err := migrateConfig()
 	if err != nil {
 		t.Fatalf("migrateConfig: %v", err)
 	}
-	if !moved {
-		t.Error("expected config to be moved")
+	if !copied {
+		t.Error("expected config to be copied")
 	}
 	if _, err := os.Stat(newCfg); err != nil {
 		t.Errorf("new config missing: %v", err)
 	}
-	if _, err := os.Stat(oldCfg); !os.IsNotExist(err) {
-		t.Errorf("old config should be gone after move")
+	if _, err := os.Stat(oldCfg); err != nil {
+		t.Errorf("legacy config should REMAIN after copy (atomicity): %v", err)
 	}
 
-	moved2, err := migrateConfig()
+	copied2, err := migrateConfig()
 	if err != nil {
 		t.Fatalf("second migrateConfig: %v", err)
 	}
-	if moved2 {
-		t.Error("second run should be a no-op")
+	if copied2 {
+		t.Error("second run should be a no-op (target exists)")
+	}
+}
+
+func TestNewServiceInstalledUserLevel(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	if newServiceInstalled(true) {
+		t.Error("should be false with no new unit/plist present")
+	}
+	unitDir := filepath.Join(home, ".config", "systemd", "user")
+	if err := os.MkdirAll(unitDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(unitDir, systemdUnitFile), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !newServiceInstalled(true) {
+		t.Error("should detect new user systemd unit")
 	}
 }
 

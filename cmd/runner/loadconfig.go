@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 
@@ -25,7 +26,14 @@ func loadConfig(cmd *cobra.Command) (config.Config, error) {
 		viper.AddConfigPath(".")
 		viper.AddConfigPath("/etc/runner")
 		viper.AddConfigPath(legacyConfigDir) // legacy /etc/runscaler — deprecated
-		_ = viper.ReadInConfig()             // ignore error — default paths are optional
+		if err := viper.ReadInConfig(); err != nil {
+			// A missing config is fine (single-mode via flags); anything else
+			// (parse error, permission denied) must surface.
+			var notFound viper.ConfigFileNotFoundError
+			if !errors.As(err, &notFound) {
+				return config.Config{}, fmt.Errorf("failed to read config file: %w", err)
+			}
+		}
 
 		if used := viper.ConfigFileUsed(); used != "" && filepath.Dir(used) == filepath.Clean(legacyConfigDir) {
 			warnLegacy("config loaded from legacy path %s — run 'runner migrate' or move it to /etc/runner", used)

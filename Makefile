@@ -15,7 +15,7 @@ PLATFORMS := \
 
 ## dev: Run locally with debug logging (requires config.toml)
 dev:
-	go run ./cmd/runner --log-level debug
+	go run ./cmd/runner run --log-level debug
 
 ## build: Build for current platform
 build:

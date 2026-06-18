@@ -14,4 +14,4 @@ RUN CGO_ENABLED=0 go build \
 FROM alpine:3
 RUN apk add --no-cache ca-certificates
 COPY --from=builder /build/runner /usr/local/bin/
-ENTRYPOINT ["runner"]
+ENTRYPOINT ["runner", "run"]

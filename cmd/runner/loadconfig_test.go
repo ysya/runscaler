@@ -27,7 +27,7 @@ func TestLoadConfigSurfacesParseError(t *testing.T) {
 	if err := os.Chdir(emptyCwd); err != nil {
 		t.Fatal(err)
 	}
-	defer os.Chdir(wd)
+	defer func() { _ = os.Chdir(wd) }()
 
 	c := &cobra.Command{}
 	c.PersistentFlags().String("config", "", "")
@@ -55,7 +55,7 @@ func TestLoadConfigFallsBackToLegacyDir(t *testing.T) {
 	if err := os.Chdir(emptyCwd); err != nil {
 		t.Fatal(err)
 	}
-	defer os.Chdir(wd)
+	defer func() { _ = os.Chdir(wd) }()
 
 	c := &cobra.Command{}
 	c.PersistentFlags().String("config", "", "")

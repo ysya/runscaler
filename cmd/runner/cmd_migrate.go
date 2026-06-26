@@ -84,22 +84,35 @@ func runMigrate(c *cobra.Command, _ []string) error {
 	return nil
 }
 
-// copyFile copies src to dst. dst must not already exist (O_EXCL).
+// copyFile copies src to dst atomically: it writes to a temp file in the
+// destination directory and renames it into place, so a partial copy never
+// leaves a corrupt dst (a re-run would otherwise mistake it for a finished
+// config). The file is created 0600 because the config may contain a token.
+// dst must not already exist (the caller checks).
 func copyFile(src, dst string) error {
 	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}
 	defer in.Close()
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	tmp, err := os.CreateTemp(filepath.Dir(dst), ".runner-config-*")
 	if err != nil {
 		return err
 	}
-	if _, err := io.Copy(out, in); err != nil {
-		out.Close()
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // no-op once renamed; cleans up on any failure
+	if _, err := io.Copy(tmp, in); err != nil {
+		tmp.Close()
 		return err
 	}
-	return out.Close()
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, dst)
 }
 
 // migrateConfig copies the legacy config to the new path, KEEPING the legacy

@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -32,14 +33,23 @@ func TestLegacyServiceInstalledUserLevel(t *testing.T) {
 	if legacyServiceInstalled(true) {
 		t.Error("should be false with no legacy unit/plist present")
 	}
-	unitDir := filepath.Join(home, ".config", "systemd", "user")
-	if err := os.MkdirAll(unitDir, 0o755); err != nil {
+
+	var p string
+	switch runtime.GOOS {
+	case "linux":
+		p = filepath.Join(home, ".config", "systemd", "user", legacySystemdUnit)
+	case "darwin":
+		p = filepath.Join(home, "Library", "LaunchAgents", legacyLaunchdPlist)
+	default:
+		t.Skip("unsupported OS")
+	}
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(unitDir, legacySystemdUnit), []byte("x"), 0o644); err != nil {
+	if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if !legacyServiceInstalled(true) {
-		t.Error("should detect legacy user systemd unit")
+		t.Error("should detect legacy service for current OS")
 	}
 }

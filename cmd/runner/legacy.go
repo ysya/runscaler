@@ -27,15 +27,6 @@ func legacyConfigExists() bool {
 	return err == nil
 }
 
-// legacySystemdUnitPath returns the legacy systemd unit path for the level.
-func legacySystemdUnitPath(user bool) string {
-	if user {
-		home, _ := os.UserHomeDir()
-		return filepath.Join(home, ".config", "systemd", "user", legacySystemdUnit)
-	}
-	return filepath.Join(systemdSystemDir, legacySystemdUnit)
-}
-
 // legacyLaunchdPlistPath returns the legacy launchd plist path for the level.
 func legacyLaunchdPlistPath(user bool) string {
 	if user {
@@ -45,15 +36,10 @@ func legacyLaunchdPlistPath(user bool) string {
 	return filepath.Join(launchdSystemDir, legacyLaunchdPlist)
 }
 
-// legacyServiceInstalled reports whether a legacy systemd unit or launchd plist
-// is present at the given level.
+// legacyServiceInstalled reports whether a legacy service is present at the
+// given level (current OS only).
 func legacyServiceInstalled(user bool) bool {
-	for _, p := range []string{legacySystemdUnitPath(user), legacyLaunchdPlistPath(user)} {
-		if _, err := os.Stat(p); err == nil {
-			return true
-		}
-	}
-	return false
+	return serviceFilePresent(user, legacySystemdUnit, legacyLaunchdPlist)
 }
 
 // warnLegacy prints a one-line deprecation notice to stderr.

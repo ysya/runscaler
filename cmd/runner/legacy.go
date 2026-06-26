@@ -15,7 +15,6 @@ var (
 	legacyConfigPath   = "/etc/runscaler/config.toml"
 	legacySystemdUnit  = "runscaler.service"
 	legacyServiceName  = "runscaler"
-	legacyLaunchdLabel = "com.runscaler.agent"
 	legacyLaunchdPlist = "com.runscaler.agent.plist"
 	legacySharedVolume = "runscaler-shared"
 	legacyTokenEnv     = "RUNSCALER_TOKEN"

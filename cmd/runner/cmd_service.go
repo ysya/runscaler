@@ -675,26 +675,36 @@ func runCmdPassthrough(name string, args ...string) error {
 	return nil
 }
 
+// serviceFilePresent reports whether a service file for the CURRENT OS exists
+// at the given level — a systemd unit on Linux, a launchd plist on macOS.
+// Checking only the current platform avoids false positives from stale files
+// left by a different OS.
+func serviceFilePresent(user bool, systemdUnit, launchdPlist string) bool {
+	var p string
+	switch runtime.GOOS {
+	case "linux":
+		if user {
+			home, _ := os.UserHomeDir()
+			p = filepath.Join(home, ".config", "systemd", "user", systemdUnit)
+		} else {
+			p = filepath.Join(systemdSystemDir, systemdUnit)
+		}
+	case "darwin":
+		if user {
+			home, _ := os.UserHomeDir()
+			p = filepath.Join(home, "Library", "LaunchAgents", launchdPlist)
+		} else {
+			p = filepath.Join(launchdSystemDir, launchdPlist)
+		}
+	default:
+		return false
+	}
+	_, err := os.Stat(p)
+	return err == nil
+}
+
 // newServiceInstalled reports whether the new runner service is installed at
-// the given level.
+// the given level (current OS only).
 func newServiceInstalled(user bool) bool {
-	var paths []string
-	if user {
-		home, _ := os.UserHomeDir()
-		paths = []string{
-			filepath.Join(home, ".config", "systemd", "user", systemdUnitFile),
-			filepath.Join(home, "Library", "LaunchAgents", launchdPlistFile),
-		}
-	} else {
-		paths = []string{
-			filepath.Join(systemdSystemDir, systemdUnitFile),
-			filepath.Join(launchdSystemDir, launchdPlistFile),
-		}
-	}
-	for _, p := range paths {
-		if _, err := os.Stat(p); err == nil {
-			return true
-		}
-	}
-	return false
+	return serviceFilePresent(user, systemdUnitFile, launchdPlistFile)
 }

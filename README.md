@@ -23,6 +23,8 @@ Runners are **ephemeral** — each container/VM handles exactly one job and is r
   - [Config File (TOML)](#config-file-toml)
   - [Token Security](#token-security)
   - [CLI Flags](#cli-flags)
+- [Caching](#caching)
+- [Security & Isolation](#security--isolation)
 - [Deployment](#deployment)
 - [Building](#building)
 - [Architecture](#architecture)
@@ -359,6 +361,47 @@ pool-size = 2
 | `--log-format`      | `log-format`         | `text`                                  | Log format (text/json)                            |
 | `--dry-run`         | `dry-run`            | `false`                                 | Validate everything without starting listeners    |
 | `--health-port`     | `health-port`        | `8080`                                  | Health check HTTP port (0 to disable)             |
+
+Advanced tuning keys (cleanup, cache volumes, isolation) are config-file only by design — see `config.example.toml` for the full list.
+
+## Caching
+
+Ephemeral runners start cold — nothing survives between jobs unless you opt in. Three mechanisms compose:
+
+**Docker layer cache (automatic).** With `dind = true` jobs talk to the host daemon directly, so `docker pull` and `docker build` layer caches are shared across all jobs and survive restarts. The runtime prune sweep keeps growth bounded (`prune-ttl`, `build-cache-max-age`, `build-cache-budget`).
+
+**Cache volumes (`cache-volumes`).** Named volumes mounted into every runner container at tool-default cache paths — workflows hit warm caches with zero workflow changes:
+
+```toml
+[docker]
+cache-volumes = [
+  "gradle-cache:/home/runner/.gradle",
+  "pnpm-store:/home/runner/.local/share/pnpm/store",
+  "go-build-cache:/home/runner/.cache/go-build",
+]
+```
+
+Volumes are created on first use and never swept — they are persistent caches; remove one with `docker volume rm` if it grows too large. Scale sets using the same volume name share the cache; different names isolate it.
+
+**Shared volume (`shared-volume`).** A general-purpose volume mounted at the same path in every runner (exposed as `$SHARED_DIR`) for workflows that pass files around explicitly, with optional TTL cleanup (`shared-volume-ttl`).
+
+> **BuildKit tip:** `docker/setup-buildx-action` creates a throwaway builder per job whose cache dies with the job (runner only garbage-collects the leftovers — see `buildx-cleanup`). To actually reuse build cache across jobs, build with the daemon's built-in BuildKit (plain `docker build`, or buildx with `driver: docker`) so the cache lands where `build-cache-*` retention manages it — or run one persistent named builder and set `buildx-cleanup = false`.
+
+## Security & Isolation
+
+**`dind = true` is Docker-socket sharing, not sandboxed Docker-in-Docker.** Runner containers mount the host's Docker socket, so any job can control the host daemon — start privileged containers, mount the host filesystem, inspect other jobs' containers. That is root-equivalent access to the host. Only run code you trust: **never expose these runners to pull requests from public forks**, and keep the daemon dedicated to runners (the cleanup sweepers assume this too). Set `dind = false` for scale sets that don't need to build images.
+
+Isolation knobs, all per scale set under `[docker]`:
+
+| Key | Effect |
+| --- | ------ |
+| `memory`, `cpu` | cgroup limits per runner container |
+| `pids-limit` | caps processes+threads per container (e.g. `4096`) so a fork bomb can't take down the host |
+| `network` | attach runners to a pre-created Docker network instead of the default bridge, e.g. `docker network create --opt com.docker.network.bridge.enable_icc=false runners` |
+| `shared-volume-name` | back each scale set's shared volume with a different named volume so scale sets of different trust levels don't share files |
+| `dind = false` | no socket mount at all — strongest container-level isolation, no image builds |
+
+The Tart backend isolates at the hypervisor boundary — each job gets a fresh macOS VM cloned from the base image and deleted afterwards.
 
 ## Deployment
 

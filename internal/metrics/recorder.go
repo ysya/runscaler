@@ -72,8 +72,8 @@ func (r *Recorder) Snapshot() Snapshot {
 	defer r.mu.RUnlock()
 	return Snapshot{
 		Statistics:     r.statistics,
-		JobsStarted:   r.jobsStarted,
-		JobsCompleted: r.jobsCompleted,
+		JobsStarted:    r.jobsStarted,
+		JobsCompleted:  r.jobsCompleted,
 		DesiredRunners: r.desiredRunners,
 		UpdatedAt:      r.updatedAt,
 	}

@@ -374,8 +374,8 @@ func TestDockerBackend_BuildContainerEnv(t *testing.T) {
 }
 
 func TestDockerBackend_StartRunner_WithResourceLimits(t *testing.T) {
-	memoryBytes := int64(8192) * 1024 * 1024  // 8GB
-	nanoCPUs := int64(4) * 1_000_000_000      // 4 cores
+	memoryBytes := int64(8192) * 1024 * 1024 // 8GB
+	nanoCPUs := int64(4) * 1_000_000_000     // 4 cores
 	b, md := newTestDockerBackendWithResources(memoryBytes, nanoCPUs)
 	ctx := context.Background()
 

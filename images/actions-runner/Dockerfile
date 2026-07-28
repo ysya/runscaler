@@ -1,7 +1,10 @@
 # Custom GitHub Actions runner image with Android SDK, Java, Node.js, Ruby, and C/C++ toolchains.
-# Based on the official actions-runner image (Ubuntu 22.04).
+# Based on the official actions-runner image (Ubuntu 24.04 "noble").
 
-FROM ghcr.io/actions/actions-runner:latest
+# Pinned to the multi-arch index digest for reproducible builds and stable layer caching
+# (covers both linux/amd64 and linux/arm64). Dependabot keeps the tag+digest fresh.
+# Refresh manually with: docker buildx imagetools inspect ghcr.io/actions/actions-runner:latest
+FROM ghcr.io/actions/actions-runner:2.336.0@sha256:0cfdcc701ce933c6d243c6b0b2da767366dc9f2e99961d4c3754b0b78084cdda
 
 # Avoid interactive prompts during package installation
 ENV DEBIAN_FRONTEND=noninteractive
@@ -27,6 +30,7 @@ RUN sudo apt-get update && sudo apt-get install -y --no-install-recommends \
     && sudo rm -rf /var/lib/apt/lists/*
 
 # ── Java 17 LTS (OpenJDK) ─────────────────────────────────────────────────────
+# Must precede the Android SDK layer: sdkmanager requires a JDK.
 RUN sudo apt-get update \
     && sudo apt-get install -y --no-install-recommends openjdk-17-jdk \
     && sudo rm -rf /var/lib/apt/lists/* \
@@ -35,18 +39,11 @@ RUN sudo apt-get update \
 ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk
 ENV PATH="${JAVA_HOME}/bin:${PATH}"
 
-# ── Node.js LTS (via NodeSource) ─────────────────────────────────────────────
-ARG NODE_MAJOR=24
-RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_MAJOR}.x | sudo -E bash - \
-    && sudo apt-get install -y --no-install-recommends nodejs \
-    && sudo rm -rf /var/lib/apt/lists/*
-
-# ── pnpm ──────────────────────────────────────────────────────────────────────
-RUN sudo npm install -g pnpm
-
 # ── Android SDK (command-line tools only) ─────────────────────────────────────
 # Install under runner's home so all runtime operations (Gradle auto-provisioning,
 # sdkmanager updates, license acceptance) work without sudo or chown.
+# Ordered before Node.js/pnpm so bumping NODE_MAJOR does not invalidate this
+# multi-GB layer in the build cache.
 ENV ANDROID_HOME=/home/runner/android-sdk
 ENV PATH="${ANDROID_HOME}/cmdline-tools/latest/bin:${ANDROID_HOME}/platform-tools:${PATH}"
 
@@ -82,6 +79,15 @@ RUN if [ "$TARGETARCH" = "arm64" ]; then \
             zlib1g:amd64 \
         && sudo rm -rf /var/lib/apt/lists/*; \
     fi
+
+# ── Node.js LTS (via NodeSource) ─────────────────────────────────────────────
+ARG NODE_MAJOR=24
+RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_MAJOR}.x | sudo -E bash - \
+    && sudo apt-get install -y --no-install-recommends nodejs \
+    && sudo rm -rf /var/lib/apt/lists/*
+
+# ── pnpm ──────────────────────────────────────────────────────────────────────
+RUN sudo npm install -g pnpm
 
 # ── Temp directory owned by runner ─────────────────────────────────────────
 # Redirect all temp file creation to a runner-owned directory so that any

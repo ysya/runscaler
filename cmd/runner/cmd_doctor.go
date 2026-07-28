@@ -48,6 +48,10 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	cfg, cfgErr := loadConfig(cmd)
 	if cfgErr == nil {
 		dockerSocket = cfg.Defaults.Docker.Socket
+		// Surface non-fatal config diagnostics in the doctor report.
+		for _, w := range cfg.Warnings {
+			fmt.Printf("  ⚠ config: %s\n", w)
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

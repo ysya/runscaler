@@ -19,10 +19,10 @@ import (
 	"github.com/docker/docker/api/types/image"
 	dockerclient "github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/jsonmessage"
-	"golang.org/x/term"
 	"github.com/google/uuid"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+	"golang.org/x/term"
 
 	"github.com/ysya/runscaler/internal/backend"
 	"github.com/ysya/runscaler/internal/config"
@@ -186,6 +186,13 @@ jobs — scaling runners up and down until interrupted.`,
 
 func run(ctx context.Context, cfg config.Config) error {
 	logger := config.NewLogger(cfg.LogLevel, cfg.LogFormat)
+
+	// Non-fatal config diagnostics (unknown keys, mixed single/multi mode).
+	// Warn only — a self-updated deployment with an older config must keep
+	// starting; `runner validate` fails on these instead.
+	for _, w := range cfg.Warnings {
+		logger.Warn(w)
+	}
 
 	scaleSets := cfg.ResolveScaleSets()
 	for i := range scaleSets {

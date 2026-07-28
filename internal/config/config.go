@@ -33,12 +33,20 @@ type Config struct {
 	// Squashed so TOML keys (url, name, backend, etc.) stay at the top level.
 	Defaults ScaleSetConfig `mapstructure:",squash"`
 
-	// Multi-scaleset mode: each entry inherits from Defaults.
+	// Multi-scaleset mode: entries as produced by Load, with map-level
+	// inheritance from the top-level defaults already applied.
 	ScaleSets []ScaleSetConfig `mapstructure:"scaleset"`
+
+	// Warnings carries non-fatal load diagnostics (unknown config keys,
+	// single-mode keys mixed with [[scaleset]] entries) surfaced by callers:
+	// `runner run` logs them, `runner validate` fails on them.
+	Warnings []string `mapstructure:"-"`
 }
 
 // ScaleSetConfig holds per-scale-set configuration.
-// In multi-mode, fields left at their zero value inherit from Config.Defaults.
+// In multi mode, inheritance from the top-level defaults happens in Load at
+// the map level: a key present in a [[scaleset]] entry always wins, even
+// when set to a zero value.
 type ScaleSetConfig struct {
 	RegistrationURL string   `mapstructure:"url"`
 	ScaleSetName    string   `mapstructure:"name"`
@@ -60,11 +68,11 @@ type ScaleSetConfig struct {
 // DockerConfig holds Docker-specific backend settings.
 type DockerConfig struct {
 	Socket       string `mapstructure:"socket"`
-	DinD         *bool  `mapstructure:"dind"`          // pointer: nil = inherit default (true)
+	DinD         *bool  `mapstructure:"dind"` // pointer: nil = inherit default (true)
 	SharedVolume string `mapstructure:"shared-volume"`
-	Memory       int    `mapstructure:"memory"`        // Memory limit in MB (0 = unlimited)
-	CPU          int    `mapstructure:"cpu"`            // CPU cores (0 = unlimited)
-	Platform     string `mapstructure:"platform"`      // e.g. "linux/amd64" to force architecture
+	Memory       int    `mapstructure:"memory"`   // Memory limit in MB (0 = unlimited)
+	CPU          int    `mapstructure:"cpu"`      // CPU cores (0 = unlimited)
+	Platform     string `mapstructure:"platform"` // e.g. "linux/amd64" to force architecture
 
 	// SharedVolumeTTL deletes files in shared-volume older than this duration.
 	// 0 (default) disables TTL cleanup. Accepts Go duration strings, e.g. "168h".
@@ -90,11 +98,11 @@ type DockerConfig struct {
 
 // TartConfig holds Tart VM-specific backend settings.
 type TartConfig struct {
-	Home      string `mapstructure:"home"`        // TART_HOME for tart CLI ("" = default ~/.tart)
-	RunnerDir string `mapstructure:"runner-dir"`  // Runner binary path in VM
-	CPU       int    `mapstructure:"cpu"`         // Number of CPU cores (0 = use image default)
-	Memory    int    `mapstructure:"memory"`      // Memory in MB (0 = use image default)
-	PoolSize  int    `mapstructure:"pool-size"`   // Pre-warmed VM count (0 = disabled)
+	Home      string `mapstructure:"home"`       // TART_HOME for tart CLI ("" = default ~/.tart)
+	RunnerDir string `mapstructure:"runner-dir"` // Runner binary path in VM
+	CPU       int    `mapstructure:"cpu"`        // Number of CPU cores (0 = use image default)
+	Memory    int    `mapstructure:"memory"`     // Memory in MB (0 = use image default)
+	PoolSize  int    `mapstructure:"pool-size"`  // Pre-warmed VM count (0 = disabled)
 
 	// CacheCleanup enables periodic `tart prune` of the OCI/IPSW caches under
 	// TART_HOME. Pointer: nil = inherit default (true). Local VMs are never
@@ -116,12 +124,15 @@ type TartConfig struct {
 }
 
 // ResolveScaleSets returns the resolved list of scale set configs.
-// If [[scaleset]] entries exist, each inherits unset fields from Defaults.
-// Otherwise, Defaults itself is returned as a single-element slice.
+// [[scaleset]] entries arrive from Load with inheritance already applied at
+// the map level (a key present in an entry wins, even when zero), so multi
+// mode only applies backend-dependent defaults and token resolution here.
+// Without [[scaleset]] entries, Defaults itself is the single scale set.
 func (c *Config) ResolveScaleSets() []ScaleSetConfig {
 	if len(c.ScaleSets) > 0 {
 		for i := range c.ScaleSets {
-			mergeDefaults(&c.ScaleSets[i], &c.Defaults)
+			c.ScaleSets[i].applyDefaults()
+			c.ScaleSets[i].resolveEnvToken()
 		}
 		return c.ScaleSets
 	}
@@ -131,92 +142,6 @@ func (c *Config) ResolveScaleSets() []ScaleSetConfig {
 	ss.applyDefaults()
 	ss.resolveEnvToken()
 	return []ScaleSetConfig{ss}
-}
-
-// mergeDefaults fills zero-valued fields in dst from defaults.
-// Identity fields (URL, Name, Token, Labels) are never inherited.
-// MinRunners is not inherited because 0 is a valid explicit value.
-func mergeDefaults(dst *ScaleSetConfig, defaults *ScaleSetConfig) {
-	// Common
-	if dst.RunnerImage == "" {
-		dst.RunnerImage = defaults.RunnerImage
-	}
-	if dst.RunnerGroup == "" {
-		dst.RunnerGroup = defaults.RunnerGroup
-	}
-	if dst.MaxRunners == 0 {
-		dst.MaxRunners = defaults.MaxRunners
-	}
-	if dst.Backend == "" {
-		dst.Backend = defaults.Backend
-	}
-
-	// Docker
-	if dst.Docker.Socket == "" {
-		dst.Docker.Socket = defaults.Docker.Socket
-	}
-	if dst.Docker.DinD == nil {
-		dst.Docker.DinD = defaults.Docker.DinD
-	}
-	if dst.Docker.SharedVolume == "" {
-		dst.Docker.SharedVolume = defaults.Docker.SharedVolume
-	}
-	if dst.Docker.Memory == 0 {
-		dst.Docker.Memory = defaults.Docker.Memory
-	}
-	if dst.Docker.CPU == 0 {
-		dst.Docker.CPU = defaults.Docker.CPU
-	}
-	if dst.Docker.Platform == "" {
-		dst.Docker.Platform = defaults.Docker.Platform
-	}
-	if dst.Docker.SharedVolumeTTL == 0 {
-		dst.Docker.SharedVolumeTTL = defaults.Docker.SharedVolumeTTL
-	}
-	if dst.Docker.SharedVolumeCleanupInterval == 0 {
-		dst.Docker.SharedVolumeCleanupInterval = defaults.Docker.SharedVolumeCleanupInterval
-	}
-	if dst.Docker.BuildxCleanup == nil {
-		dst.Docker.BuildxCleanup = defaults.Docker.BuildxCleanup
-	}
-	if dst.Docker.BuildxCleanupTTL == 0 {
-		dst.Docker.BuildxCleanupTTL = defaults.Docker.BuildxCleanupTTL
-	}
-	if dst.Docker.BuildxCleanupInterval == 0 {
-		dst.Docker.BuildxCleanupInterval = defaults.Docker.BuildxCleanupInterval
-	}
-
-	// Tart
-	if dst.Tart.RunnerDir == "" {
-		dst.Tart.RunnerDir = defaults.Tart.RunnerDir
-	}
-	if dst.Tart.CPU == 0 {
-		dst.Tart.CPU = defaults.Tart.CPU
-	}
-	if dst.Tart.Memory == 0 {
-		dst.Tart.Memory = defaults.Tart.Memory
-	}
-	if dst.Tart.PoolSize == 0 {
-		dst.Tart.PoolSize = defaults.Tart.PoolSize
-	}
-	if dst.Tart.Home == "" {
-		dst.Tart.Home = defaults.Tart.Home
-	}
-	if dst.Tart.CacheCleanup == nil {
-		dst.Tart.CacheCleanup = defaults.Tart.CacheCleanup
-	}
-	if dst.Tart.CacheMaxAge == 0 {
-		dst.Tart.CacheMaxAge = defaults.Tart.CacheMaxAge
-	}
-	if dst.Tart.CacheSpaceBudgetGB == 0 {
-		dst.Tart.CacheSpaceBudgetGB = defaults.Tart.CacheSpaceBudgetGB
-	}
-	if dst.Tart.CacheCleanupInterval == 0 {
-		dst.Tart.CacheCleanupInterval = defaults.Tart.CacheCleanupInterval
-	}
-
-	dst.applyDefaults()
-	dst.resolveEnvToken()
 }
 
 // applyDefaults fills in backend-specific defaults that depend on

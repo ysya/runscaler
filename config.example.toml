@@ -8,6 +8,8 @@ log-format = "text"
 health-port = 8080
 
 # --- Defaults (inherited by all scale sets unless overridden) ---
+# A key set in a [[scaleset]] always wins, even with a zero/empty value:
+# e.g. `memory = 0` (unlimited) or `shared-volume = ""` override the default.
 
 # Backend: "docker" (Linux containers) or "tart" (macOS VMs)
 backend = "docker"
@@ -50,6 +52,9 @@ dind = true
 # Use [[scaleset]] entries to manage multiple orgs/repos from one process.
 # Each entry inherits runner-image, runner-group, max-runners, [docker],
 # and [tart] from the defaults above unless explicitly overridden.
+# Identity fields (url, name, token, labels, min-runners) are per-scaleset
+# and never inherited from the top level.
+# Unknown keys warn at startup and fail `runner validate`.
 
 # [[scaleset]]
 # url = "https://github.com/org-a"

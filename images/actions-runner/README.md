@@ -37,8 +37,8 @@ docker pull ghcr.io/ysya/actions-runner:latest
 | Variable | Value |
 |----------|-------|
 | `JAVA_HOME` | `/usr/lib/jvm/java-17-openjdk` |
-| `ANDROID_HOME` | `/opt/android-sdk` |
-| `ANDROID_SDK_ROOT` | `/opt/android-sdk` |
+| `ANDROID_HOME` | `/home/runner/android-sdk` |
+| `TMPDIR` | `/home/runner/tmp` |
 
 ## Installing additional Android SDK components
 

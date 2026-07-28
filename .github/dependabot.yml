@@ -1,0 +1,30 @@
+# Keeps base-image digest pins, GitHub Actions, and Go modules up to date.
+version: 2
+updates:
+  # Root Dockerfile (runner CLI image)
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+
+  # Custom actions-runner image (pinned ghcr.io/actions/actions-runner digest)
+  - package-ecosystem: "docker"
+    directory: "/images/actions-runner"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+
+  # Workflow action versions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+
+  # Go dependencies
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5

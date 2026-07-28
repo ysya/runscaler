@@ -196,6 +196,12 @@ The `--fix` flag will refuse to run if runner is currently active (detected via 
 
 Configuration can be provided via a TOML config file (`--config`) or CLI flags. When both are provided, CLI flags take priority over config file values.
 
+Unknown config keys (typos, options from another version) are not silently
+ignored: `runner run` logs a warning for each and keeps starting, while
+`runner validate` fails on them. The same applies to single-mode keys
+(`url`, `name`, `token`, `labels`, `min-runners`) left at the top level
+when `[[scaleset]]` entries exist.
+
 ### Config File (TOML)
 
 **Docker backend (default):**

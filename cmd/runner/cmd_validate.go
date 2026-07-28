@@ -13,17 +13,26 @@ import (
 )
 
 var validateCmd = &cobra.Command{
-	Use:   "validate",
-	Short: "Validate configuration and connectivity",
-	Long:  "Check that the config file is valid, Docker/Tart is reachable, and GitHub tokens work.",
+	Use:     "validate",
+	Short:   "Validate configuration and connectivity",
+	Long:    "Check that the config file is valid, Docker/Tart is reachable, and GitHub tokens work.",
 	Example: `  runner validate --config config.toml`,
-	RunE: runValidate,
+	RunE:    runValidate,
 }
 
 func runValidate(cmd *cobra.Command, args []string) error {
 	cfg, err := loadConfig(cmd)
 	if err != nil {
 		return err
+	}
+
+	// Strict mode: what `runner run` merely warns about (unknown keys,
+	// mixed single/multi mode) fails validation.
+	if len(cfg.Warnings) > 0 {
+		for _, w := range cfg.Warnings {
+			fmt.Printf("  ✗ config: %s\n", w)
+		}
+		return fmt.Errorf("validation failed")
 	}
 
 	// Validate scale sets

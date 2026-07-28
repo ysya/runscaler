@@ -12,7 +12,8 @@ import (
 )
 
 // loadConfig reads the configuration from the config file (if any) and
-// unmarshals all sources (flag > config file > default) into a Config.
+// builds a Config from all sources (flag > config file > default) via
+// config.Load, which also collects non-fatal diagnostics into cfg.Warnings.
 // Both the root command and validate subcommand use this helper.
 func loadConfig(cmd *cobra.Command) (config.Config, error) {
 	if configFile, _ := cmd.Flags().GetString("config"); configFile != "" {
@@ -40,8 +41,8 @@ func loadConfig(cmd *cobra.Command) (config.Config, error) {
 		}
 	}
 
-	var cfg config.Config
-	if err := viper.Unmarshal(&cfg); err != nil {
+	cfg, err := config.Load(viper.GetViper())
+	if err != nil {
 		return config.Config{}, fmt.Errorf("failed to parse configuration: %w", err)
 	}
 	return cfg, nil

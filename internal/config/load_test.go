@@ -246,6 +246,62 @@ shared-volume-ttl = "24h"
 	}
 }
 
+// TestLoad_DockerPruneInheritanceAndOverride pins that brand-new [docker]
+// keys flow through the map-level merge with zero per-key code: they inherit
+// from the top-level table into [[scaleset]] entries, and explicit zero/false
+// values in an entry override non-zero defaults.
+func TestLoad_DockerPruneInheritanceAndOverride(t *testing.T) {
+	sets := resolveTOML(t, `
+[docker]
+prune = true
+prune-interval = "2h"
+prune-ttl = "48h"
+build-cache-max-age = "72h"
+build-cache-budget = 50
+
+[[scaleset]]
+url = "https://github.com/org-a"
+name = "runners-a"
+token = "token-a"
+
+[scaleset.docker]
+prune = false
+build-cache-budget = 0
+
+[[scaleset]]
+url = "https://github.com/org-b"
+name = "runners-b"
+token = "token-b"
+`)
+	// First entry: explicit false/zero win over the non-zero defaults...
+	if sets[0].IsDockerPruneEnabled() {
+		t.Error("sets[0] prune should be explicitly disabled")
+	}
+	if sets[0].Docker.BuildCacheBudgetGB != 0 {
+		t.Errorf("sets[0] budget = %d, want 0 (explicit override)", sets[0].Docker.BuildCacheBudgetGB)
+	}
+	// ...while untouched keys still inherit.
+	if sets[0].Docker.PruneTTL != 48*time.Hour {
+		t.Errorf("sets[0] prune-ttl = %v, want 48h (inherited)", sets[0].Docker.PruneTTL)
+	}
+	// Second entry inherits the whole table.
+	if !sets[1].IsDockerPruneEnabled() {
+		t.Error("sets[1] prune should inherit enabled")
+	}
+	if sets[1].Docker.PruneInterval != 2*time.Hour {
+		t.Errorf("sets[1] prune-interval = %v, want 2h (inherited)", sets[1].Docker.PruneInterval)
+	}
+	if sets[1].Docker.PruneTTL != 48*time.Hour {
+		t.Errorf("sets[1] prune-ttl = %v, want 48h (inherited)", sets[1].Docker.PruneTTL)
+	}
+	if sets[1].Docker.BuildCacheMaxAge != 72*time.Hour {
+		t.Errorf("sets[1] build-cache-max-age = %v, want 72h (inherited)", sets[1].Docker.BuildCacheMaxAge)
+	}
+	if sets[1].Docker.BuildCacheBudgetGB != 50 {
+		t.Errorf("sets[1] build-cache-budget = %d, want 50 (inherited)", sets[1].Docker.BuildCacheBudgetGB)
+	}
+}
+
 func TestLoad_IdentityKeysNotInherited(t *testing.T) {
 	t.Setenv("RUNNER_TOKEN", "")
 	t.Setenv("RUNSCALER_TOKEN", "")
@@ -387,6 +443,11 @@ shared-volume-cleanup-interval = "6h"
 buildx-cleanup = true
 buildx-cleanup-ttl = "24h"
 buildx-cleanup-interval = "6h"
+prune = true
+prune-interval = "6h"
+prune-ttl = "24h"
+build-cache-max-age = "168h"
+build-cache-budget = 50
 
 [tart]
 home = "/Volumes/tart"

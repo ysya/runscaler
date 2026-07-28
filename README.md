@@ -227,6 +227,11 @@ shared-volume = "/shared"
 # buildx-cleanup = true                 # remove orphaned buildx builders (default: on)
 # buildx-cleanup-ttl = "24h"            # remove buildx builders older than this
 # buildx-cleanup-interval = "6h"        # how often the buildx sweep runs
+# prune = true                          # periodic prune of the shared daemon (default: on)
+# prune-interval = "6h"                 # how often the runtime prune sweep runs
+# prune-ttl = "24h"                     # remove stopped containers and dangling images older than this
+# build-cache-max-age = "168h"          # prune build cache entries not used within this window
+# build-cache-budget = 0                # cap daemon build cache to N GB (0 = no cap)
 ```
 
 When runners build images with `docker buildx` (e.g. via
@@ -237,6 +242,18 @@ removes builders older than `buildx-cleanup-ttl` on a timer — the TTL is kept
 well above any realistic build so in-progress builds are never disrupted.
 Disable with `buildx-cleanup = false` only if you run a persistent builder via
 buildx `keep-state` + a fixed builder name.
+
+Beyond buildx builders, jobs mounting the host Docker socket leave dangling
+images, stopped containers, and daemon build cache behind on every build. The
+runtime prune sweep (enabled by default) reclaims these on a timer while
+runner is up: stopped containers and dangling images older than `prune-ttl`,
+build cache not used within `build-cache-max-age`, and — with
+`build-cache-budget` set — build cache above the GB cap. It assumes the daemon
+is dedicated to runners: matching objects are treated as job garbage
+regardless of what created them; disable with `prune = false` on a shared
+daemon. While the sweep is enabled it also owns build-cache retention, so the
+previous exit-time full build-cache wipe no longer runs — restarts (including
+self-updates) keep a warm cache.
 
 **Tart backend (macOS):**
 

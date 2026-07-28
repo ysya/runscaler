@@ -82,8 +82,8 @@ func TestHealthzWithMetrics(t *testing.T) {
 	h := newTestServer()
 	h.RegisterScaler("test-set", &stubScaler{idle: 1, busy: 0})
 	h.RegisterMetrics("test-set", &stubMetrics{snap: metrics.Snapshot{
-		JobsStarted:   10,
-		JobsCompleted: 8,
+		JobsStarted:    10,
+		JobsCompleted:  8,
 		DesiredRunners: 2,
 	}})
 

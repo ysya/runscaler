@@ -65,7 +65,7 @@ func (r execCommandRunner) RunStreaming(ctx context.Context, name string, args .
 type warmVM struct {
 	name    string
 	cancel  context.CancelFunc // cancels the `tart run` goroutine
-	done    <-chan struct{}     // closed when `tart run` exits (VM died)
+	done    <-chan struct{}    // closed when `tart run` exits (VM died)
 	slotIdx int                // index into vmSlots for deterministic MAC assignment
 }
 

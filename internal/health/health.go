@@ -35,20 +35,20 @@ type HealthServer struct {
 
 // ScaleSetStatus represents the status of a single scale set.
 type ScaleSetStatus struct {
-	Name           string          `json:"name"`
-	Idle           int             `json:"idle"`
-	Busy           int             `json:"busy"`
-	Metrics        *MetricsStatus  `json:"metrics,omitempty"`
+	Name    string         `json:"name"`
+	Idle    int            `json:"idle"`
+	Busy    int            `json:"busy"`
+	Metrics *MetricsStatus `json:"metrics,omitempty"`
 }
 
 // MetricsStatus holds listener-level metrics for a scale set.
 type MetricsStatus struct {
-	JobsStarted    int64  `json:"jobs_started"`
-	JobsCompleted  int64  `json:"jobs_completed"`
-	DesiredRunners int    `json:"desired_runners"`
-	AvailableJobs  int    `json:"available_jobs,omitempty"`
-	AssignedJobs   int    `json:"assigned_jobs,omitempty"`
-	RunningJobs    int    `json:"running_jobs,omitempty"`
+	JobsStarted    int64 `json:"jobs_started"`
+	JobsCompleted  int64 `json:"jobs_completed"`
+	DesiredRunners int   `json:"desired_runners"`
+	AvailableJobs  int   `json:"available_jobs,omitempty"`
+	AssignedJobs   int   `json:"assigned_jobs,omitempty"`
+	RunningJobs    int   `json:"running_jobs,omitempty"`
 }
 
 // HealthResponse is the JSON response for /healthz.

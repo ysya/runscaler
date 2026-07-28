@@ -43,8 +43,8 @@ type DockerBackend struct {
 	dockerSocket string
 	dind         bool
 	sharedVolume string
-	memoryBytes  int64 // container memory limit in bytes (0 = unlimited)
-	nanoCPUs     int64 // container CPU limit in nanoseconds (0 = unlimited)
+	memoryBytes  int64             // container memory limit in bytes (0 = unlimited)
+	nanoCPUs     int64             // container CPU limit in nanoseconds (0 = unlimited)
 	platform     *ocispec.Platform // nil = use host default
 	logger       *slog.Logger
 }
@@ -57,8 +57,8 @@ func NewDockerBackend(ss config.ScaleSetConfig, client DockerAPI, logger *slog.L
 		dockerSocket: ss.Docker.Socket,
 		dind:         ss.IsDinD(),
 		sharedVolume: ss.Docker.SharedVolume,
-		memoryBytes:  int64(ss.Docker.Memory) * 1024 * 1024,       // MB → bytes
-		nanoCPUs:     int64(ss.Docker.CPU) * 1_000_000_000,        // cores → nanoseconds
+		memoryBytes:  int64(ss.Docker.Memory) * 1024 * 1024, // MB → bytes
+		nanoCPUs:     int64(ss.Docker.CPU) * 1_000_000_000,  // cores → nanoseconds
 		logger:       logger,
 	}
 	if ss.Docker.Platform != "" {

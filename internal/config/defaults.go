@@ -46,6 +46,27 @@ const (
 	// each keeping a multi-GB state volume, and most users never notice.
 	DefaultBuildxCleanup = true
 
+	// DefaultDockerPrune enables the periodic Docker runtime prune by default.
+	// It acts as a safety net: with DooD, jobs create images, containers, and
+	// build cache directly on the shared host daemon, and an exit-time prune
+	// alone never reclaims disk while the process runs — long-lived hosts have
+	// filled up repeatedly. Assumes the daemon is dedicated to runners.
+	DefaultDockerPrune = true
+
+	// DefaultDockerPruneInterval is the period between Docker runtime prune
+	// sweeps when the prune is enabled and no explicit interval is set.
+	DefaultDockerPruneInterval = 6 * time.Hour
+
+	// DefaultDockerPruneTTL removes stopped containers and dangling images
+	// older than this. It is deliberately generous — well beyond any realistic
+	// job — so intermediates of an in-progress build are never disrupted.
+	DefaultDockerPruneTTL = 24 * time.Hour
+
+	// DefaultDockerBuildCacheMaxAge prunes daemon build cache entries not used
+	// within this window. Cache still hit by recurring builds keeps refreshing
+	// its last-used time and survives; only abandoned entries age out.
+	DefaultDockerBuildCacheMaxAge = 7 * 24 * time.Hour
+
 	// DefaultBuildxCleanupTTL removes buildx builders older than this. It is
 	// deliberately generous — well beyond any realistic build — so a sweep
 	// never disrupts an in-progress build.

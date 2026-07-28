@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -41,6 +42,17 @@ type mockDocker struct {
 	// Optional fixtures for ContainerList / VolumeList.
 	containers []container.Summary
 	volumes    []*volume.Volume
+
+	// Recorded prune calls, in order, for PruneDockerRuntime /
+	// CleanupSharedDocker assertions.
+	containersPruneFilters []filters.Args
+	imagesPruneFilters     []filters.Args
+	buildCachePruneOpts    []build.CachePruneOptions
+
+	// Optional error injection for the prune calls.
+	containersPruneErr error
+	imagesPruneErr     error
+	buildCachePruneErr error
 }
 
 func (m *mockDocker) ContainerCreate(_ context.Context, cfg *container.Config, hcfg *container.HostConfig, _ *network.NetworkingConfig, _ *ocispec.Platform, name string) (container.CreateResponse, error) {
@@ -60,11 +72,27 @@ func (m *mockDocker) ContainerRemove(_ context.Context, id string, _ container.R
 	return nil
 }
 
-func (m *mockDocker) ImagesPrune(_ context.Context, _ filters.Args) (image.PruneReport, error) {
+func (m *mockDocker) ContainersPrune(_ context.Context, pruneFilters filters.Args) (container.PruneReport, error) {
+	m.containersPruneFilters = append(m.containersPruneFilters, pruneFilters)
+	if m.containersPruneErr != nil {
+		return container.PruneReport{}, m.containersPruneErr
+	}
+	return container.PruneReport{}, nil
+}
+
+func (m *mockDocker) ImagesPrune(_ context.Context, pruneFilters filters.Args) (image.PruneReport, error) {
+	m.imagesPruneFilters = append(m.imagesPruneFilters, pruneFilters)
+	if m.imagesPruneErr != nil {
+		return image.PruneReport{}, m.imagesPruneErr
+	}
 	return image.PruneReport{}, nil
 }
 
-func (m *mockDocker) BuildCachePrune(_ context.Context, _ build.CachePruneOptions) (*build.CachePruneReport, error) {
+func (m *mockDocker) BuildCachePrune(_ context.Context, opts build.CachePruneOptions) (*build.CachePruneReport, error) {
+	m.buildCachePruneOpts = append(m.buildCachePruneOpts, opts)
+	if m.buildCachePruneErr != nil {
+		return nil, m.buildCachePruneErr
+	}
 	return &build.CachePruneReport{}, nil
 }
 
@@ -291,7 +319,7 @@ func TestCleanupSharedDocker_RemovesVolume(t *testing.T) {
 	md := &mockDocker{}
 	ctx := context.Background()
 
-	CleanupSharedDocker(ctx, md, true, slog.New(slog.DiscardHandler))
+	CleanupSharedDocker(ctx, md, true, true, slog.New(slog.DiscardHandler))
 
 	if len(md.volumesRemoved) != 1 {
 		t.Fatalf("expected 1 volume removed, got %d", len(md.volumesRemoved))
@@ -305,10 +333,43 @@ func TestCleanupSharedDocker_SkipsVolumeWhenDisabled(t *testing.T) {
 	md := &mockDocker{}
 	ctx := context.Background()
 
-	CleanupSharedDocker(ctx, md, false, slog.New(slog.DiscardHandler))
+	CleanupSharedDocker(ctx, md, false, true, slog.New(slog.DiscardHandler))
 
 	if len(md.volumesRemoved) != 0 {
 		t.Errorf("should not remove volume when disabled, removed %d", len(md.volumesRemoved))
+	}
+}
+
+func TestCleanupSharedDocker_WipesBuildCacheWhenRequested(t *testing.T) {
+	md := &mockDocker{}
+
+	CleanupSharedDocker(context.Background(), md, false, true, slog.New(slog.DiscardHandler))
+
+	// Dangling images are always pruned; the full build-cache wipe runs too.
+	if len(md.imagesPruneFilters) != 1 {
+		t.Fatalf("expected 1 images prune, got %d", len(md.imagesPruneFilters))
+	}
+	if len(md.buildCachePruneOpts) != 1 {
+		t.Fatalf("expected 1 build cache prune, got %d", len(md.buildCachePruneOpts))
+	}
+	got := md.buildCachePruneOpts[0]
+	if !got.All || got.ReservedSpace != 0 || got.Filters.Len() != 0 {
+		t.Errorf("build cache prune opts = %+v, want unfiltered All:true wipe", got)
+	}
+}
+
+func TestCleanupSharedDocker_SkipsBuildCacheWipeWhenRuntimePruneOwnsIt(t *testing.T) {
+	md := &mockDocker{}
+
+	CleanupSharedDocker(context.Background(), md, false, false, slog.New(slog.DiscardHandler))
+
+	// Dangling images are still pruned unconditionally...
+	if len(md.imagesPruneFilters) != 1 {
+		t.Fatalf("expected 1 images prune, got %d", len(md.imagesPruneFilters))
+	}
+	// ...but the build cache survives the restart for the next process run.
+	if len(md.buildCachePruneOpts) != 0 {
+		t.Errorf("expected no build cache prune, got %d", len(md.buildCachePruneOpts))
 	}
 }
 
@@ -557,6 +618,131 @@ func TestCleanupOrphanedBuildxBuilders_ReapsDanglingVolumes(t *testing.T) {
 
 	if len(md.volumesRemoved) != 1 || md.volumesRemoved[0] != "buildx_buildkit_builder-gone0_state" {
 		t.Errorf("expected only dangling buildx volume removed, got %v", md.volumesRemoved)
+	}
+}
+
+func TestPruneDockerRuntime(t *testing.T) {
+	const gb = int64(1024 * 1024 * 1024)
+	tests := []struct {
+		name        string
+		ttl         time.Duration
+		cacheMaxAge time.Duration
+		budgetGB    int
+
+		// Expected recorded calls, in order; nil means the prune must not run.
+		wantContainersFilters []filters.Args
+		wantImagesFilters     []filters.Args
+		wantCacheOpts         []build.CachePruneOptions
+	}{
+		{
+			name:        "all portions enabled",
+			ttl:         24 * time.Hour,
+			cacheMaxAge: 7 * 24 * time.Hour,
+			budgetGB:    20,
+			wantContainersFilters: []filters.Args{
+				filters.NewArgs(filters.Arg("until", "24h0m0s")),
+			},
+			wantImagesFilters: []filters.Args{
+				filters.NewArgs(filters.Arg("dangling", "true"), filters.Arg("until", "24h0m0s")),
+			},
+			wantCacheOpts: []build.CachePruneOptions{
+				{All: true, Filters: filters.NewArgs(filters.Arg("until", "168h0m0s"))},
+				{All: true, ReservedSpace: 20 * gb},
+			},
+		},
+		{
+			name:        "ttl zero skips containers and images",
+			ttl:         0,
+			cacheMaxAge: 48 * time.Hour,
+			wantCacheOpts: []build.CachePruneOptions{
+				{All: true, Filters: filters.NewArgs(filters.Arg("until", "48h0m0s"))},
+			},
+		},
+		{
+			name:        "negative ttl skips containers and images",
+			ttl:         -time.Hour,
+			cacheMaxAge: 48 * time.Hour,
+			wantCacheOpts: []build.CachePruneOptions{
+				{All: true, Filters: filters.NewArgs(filters.Arg("until", "48h0m0s"))},
+			},
+		},
+		{
+			name:     "cacheMaxAge zero skips age-based cache prune",
+			ttl:      time.Hour,
+			budgetGB: 5,
+			wantContainersFilters: []filters.Args{
+				filters.NewArgs(filters.Arg("until", "1h0m0s")),
+			},
+			wantImagesFilters: []filters.Args{
+				filters.NewArgs(filters.Arg("dangling", "true"), filters.Arg("until", "1h0m0s")),
+			},
+			wantCacheOpts: []build.CachePruneOptions{
+				{All: true, ReservedSpace: 5 * gb},
+			},
+		},
+		{
+			name:        "budget zero skips budget prune",
+			ttl:         time.Hour,
+			cacheMaxAge: time.Hour,
+			budgetGB:    0,
+			wantContainersFilters: []filters.Args{
+				filters.NewArgs(filters.Arg("until", "1h0m0s")),
+			},
+			wantImagesFilters: []filters.Args{
+				filters.NewArgs(filters.Arg("dangling", "true"), filters.Arg("until", "1h0m0s")),
+			},
+			wantCacheOpts: []build.CachePruneOptions{
+				{All: true, Filters: filters.NewArgs(filters.Arg("until", "1h0m0s"))},
+			},
+		},
+		{
+			name: "everything disabled prunes nothing",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			md := &mockDocker{}
+
+			err := PruneDockerRuntime(context.Background(), md, tt.ttl, tt.cacheMaxAge, tt.budgetGB, slog.New(slog.DiscardHandler))
+			if err != nil {
+				t.Fatalf("PruneDockerRuntime() error: %v", err)
+			}
+
+			if !reflect.DeepEqual(md.containersPruneFilters, tt.wantContainersFilters) {
+				t.Errorf("containers prune filters = %+v, want %+v", md.containersPruneFilters, tt.wantContainersFilters)
+			}
+			if !reflect.DeepEqual(md.imagesPruneFilters, tt.wantImagesFilters) {
+				t.Errorf("images prune filters = %+v, want %+v", md.imagesPruneFilters, tt.wantImagesFilters)
+			}
+			if !reflect.DeepEqual(md.buildCachePruneOpts, tt.wantCacheOpts) {
+				t.Errorf("build cache prune opts = %+v, want %+v", md.buildCachePruneOpts, tt.wantCacheOpts)
+			}
+		})
+	}
+}
+
+func TestPruneDockerRuntime_ContinuesAfterPruneErrors(t *testing.T) {
+	md := &mockDocker{
+		containersPruneErr: errors.New("containers boom"),
+		imagesPruneErr:     errors.New("images boom"),
+	}
+
+	err := PruneDockerRuntime(context.Background(), md, time.Hour, time.Hour, 1, slog.New(slog.DiscardHandler))
+	if err == nil {
+		t.Fatal("expected joined error, got nil")
+	}
+	// Both failures surface in the joined error...
+	if !strings.Contains(err.Error(), "containers boom") || !strings.Contains(err.Error(), "images boom") {
+		t.Errorf("error should include both prune failures, got: %v", err)
+	}
+	// ...and the failures did not stop the later prunes: the images prune ran
+	// after the containers failure, and both build cache prunes still ran.
+	if len(md.imagesPruneFilters) != 1 {
+		t.Errorf("expected images prune to run after containers failure, got %d calls", len(md.imagesPruneFilters))
+	}
+	if len(md.buildCachePruneOpts) != 2 {
+		t.Errorf("expected both build cache prunes to run, got %d calls", len(md.buildCachePruneOpts))
 	}
 }
 

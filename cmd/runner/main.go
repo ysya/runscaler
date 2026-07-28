@@ -326,6 +326,11 @@ func run(ctx context.Context, cfg config.Config) error {
 	// global to the shared Docker daemon, so one sweeper covers all scalesets).
 	startBuildxCleanup(ctx, dockerClient, scaleSets, logger)
 
+	// Start periodic Docker runtime prune (stopped containers, dangling
+	// images, and build cache are global to the shared daemon, so one
+	// sweeper covers all scalesets).
+	startDockerPrune(ctx, dockerClient, scaleSets, logger)
+
 	// Start periodic Tart cache cleanup (one sweeper per unique TART_HOME, so
 	// scalesets sharing a TART_HOME share a sweeper and won't race).
 	startTartCacheCleanup(ctx, scaleSets, logger)
@@ -375,7 +380,18 @@ func run(ctx context.Context, cfg config.Config) error {
 				break
 			}
 		}
-		backend.CleanupSharedDocker(context.WithoutCancel(ctx), dockerClient, removeVolume, logger)
+		// When the runtime prune sweep is enabled it owns build-cache
+		// retention (age/budget), so exit must not wipe a cache the next
+		// process run would reuse — self-update restarts previously
+		// destroyed all build cache.
+		wipeBuildCache := true
+		for _, ss := range scaleSets {
+			if !ss.IsTart() && ss.IsDockerPruneEnabled() {
+				wipeBuildCache = false
+				break
+			}
+		}
+		backend.CleanupSharedDocker(context.WithoutCancel(ctx), dockerClient, removeVolume, wipeBuildCache, logger)
 	}
 
 	// Collect errors
@@ -646,6 +662,78 @@ func startBuildxCleanup(ctx context.Context, client *dockerclient.Client, scaleS
 			case <-ticker.C:
 				if err := backend.CleanupOrphanedBuildxBuilders(ctx, client, ttl, logger); err != nil {
 					logger.Warn("Periodic buildx cleanup failed", slog.Any("error", err))
+				}
+			}
+		}
+	}()
+}
+
+// startDockerPrune launches a background goroutine that periodically reclaims
+// disk on the shared Docker daemon: stopped containers and dangling images
+// older than the TTL, plus age/budget-based build cache retention. With DooD,
+// job-created garbage lands directly on the host daemon — which is global,
+// like buildx builders — so a single sweeper covers all Docker scalesets and
+// the first Docker scaleset with prune enabled provides the settings. Enabled
+// by default; no-op when explicitly disabled or when Docker is unavailable.
+func startDockerPrune(ctx context.Context, client *dockerclient.Client, scaleSets []config.ScaleSetConfig, logger *slog.Logger) {
+	if client == nil {
+		return
+	}
+
+	var (
+		ttl         time.Duration
+		interval    time.Duration
+		cacheMaxAge time.Duration
+		budgetGB    int
+		enabled     bool
+	)
+	for _, ss := range scaleSets {
+		if ss.IsTart() || !ss.IsDockerPruneEnabled() {
+			continue
+		}
+		enabled = true
+		ttl = ss.Docker.PruneTTL
+		if ttl == 0 {
+			ttl = config.DefaultDockerPruneTTL
+		}
+		interval = ss.Docker.PruneInterval
+		if interval <= 0 {
+			interval = config.DefaultDockerPruneInterval
+		}
+		cacheMaxAge = ss.Docker.BuildCacheMaxAge
+		if cacheMaxAge == 0 {
+			cacheMaxAge = config.DefaultDockerBuildCacheMaxAge
+		}
+		budgetGB = ss.Docker.BuildCacheBudgetGB
+		break
+	}
+	if !enabled {
+		return
+	}
+
+	logger.Info("Docker runtime prune enabled",
+		slog.Duration("ttl", ttl),
+		slog.Duration("interval", interval),
+		slog.Duration("build_cache_max_age", cacheMaxAge),
+		slog.Int("build_cache_budget_gb", budgetGB),
+	)
+
+	// Run an initial sweep so a bloated daemon is reclaimed promptly at startup
+	// rather than after a full interval.
+	go func() {
+		if err := backend.PruneDockerRuntime(ctx, client, ttl, cacheMaxAge, budgetGB, logger); err != nil {
+			logger.Warn("Initial docker runtime prune failed", slog.Any("error", err))
+		}
+
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if err := backend.PruneDockerRuntime(ctx, client, ttl, cacheMaxAge, budgetGB, logger); err != nil {
+					logger.Warn("Periodic docker runtime prune failed", slog.Any("error", err))
 				}
 			}
 		}

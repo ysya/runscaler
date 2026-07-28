@@ -2,6 +2,7 @@ package backend
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -29,6 +30,7 @@ type DockerAPI interface {
 	ContainerStart(ctx context.Context, containerID string, options container.StartOptions) error
 	ContainerRemove(ctx context.Context, containerID string, options container.RemoveOptions) error
 	ContainerWait(ctx context.Context, containerID string, condition container.WaitCondition) (<-chan container.WaitResponse, <-chan error)
+	ContainersPrune(ctx context.Context, pruneFilters filters.Args) (container.PruneReport, error)
 	ImagesPrune(ctx context.Context, pruneFilters filters.Args) (image.PruneReport, error)
 	BuildCachePrune(ctx context.Context, opts build.CachePruneOptions) (*build.CachePruneReport, error)
 	VolumeRemove(ctx context.Context, volumeID string, force bool) error
@@ -178,11 +180,15 @@ func (b *DockerBackend) buildContainerEnv(jitConfig string) []string {
 }
 
 // CleanupSharedDocker removes the shared Docker volume (if removeVolume is
-// true) and prunes dangling images and build cache. It is safe to call once
+// true) and prunes dangling images. The full build-cache wipe only runs when
+// wipeBuildCache is true: when the runtime prune sweep is enabled it owns
+// build-cache retention (age/budget via PruneDockerRuntime), so exit no
+// longer wipes a cache the next process run would reuse — self-update
+// restarts previously destroyed all build cache. It is safe to call once
 // after all Docker-backed scale sets have finished shutting down; calling it
 // concurrently or per-backend will race with container removal and other
 // prune operations.
-func CleanupSharedDocker(ctx context.Context, client DockerAPI, removeVolume bool, logger *slog.Logger) {
+func CleanupSharedDocker(ctx context.Context, client DockerAPI, removeVolume bool, wipeBuildCache bool, logger *slog.Logger) {
 	if removeVolume {
 		logger.Debug("Removing shared volume", slog.String("volume", "runner-shared"))
 		if err := client.VolumeRemove(ctx, "runner-shared", true); err != nil {
@@ -203,14 +209,105 @@ func CleanupSharedDocker(ctx context.Context, client DockerAPI, removeVolume boo
 		)
 	}
 
-	buildReport, err := client.BuildCachePrune(ctx, build.CachePruneOptions{All: true})
-	if err != nil {
-		logger.Error("Failed to prune build cache", slog.Any("error", err))
-	} else if buildReport.SpaceReclaimed > 0 {
-		logger.Debug("Pruned build cache",
-			slog.String("reclaimed", FormatBytes(buildReport.SpaceReclaimed)),
-		)
+	if wipeBuildCache {
+		buildReport, err := client.BuildCachePrune(ctx, build.CachePruneOptions{All: true})
+		if err != nil {
+			logger.Error("Failed to prune build cache", slog.Any("error", err))
+		} else if buildReport.SpaceReclaimed > 0 {
+			logger.Debug("Pruned build cache",
+				slog.String("reclaimed", FormatBytes(buildReport.SpaceReclaimed)),
+			)
+		}
 	}
+}
+
+// PruneDockerRuntime reclaims disk on the shared daemon while runner is up:
+// stopped containers and dangling images older than ttl, build cache entries
+// not used within cacheMaxAge, and — when cacheBudgetGB > 0 — build cache
+// beyond the budget (least-recently-used entries are evicted down to the
+// cap). With DooD, job-created garbage lands directly on the host daemon, so
+// an exit-time prune alone never reclaims disk on a long-running process.
+// Like buildx cleanup, this assumes the daemon is dedicated to runners:
+// matching objects are treated as garbage regardless of what created them.
+//
+// ttl <= 0 skips the container/image prunes and cacheMaxAge <= 0 skips the
+// age-based cache prune. A failed prune does not stop the remaining ones;
+// the errors are joined and returned.
+func PruneDockerRuntime(ctx context.Context, client DockerAPI, ttl, cacheMaxAge time.Duration, cacheBudgetGB int, logger *slog.Logger) error {
+	timeoutCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
+
+	var (
+		errs              []error
+		containersRemoved int
+		imagesRemoved     int
+		reclaimed         uint64
+	)
+
+	if ttl > 0 {
+		// The daemon parses Go duration strings for `until` and prunes
+		// objects created before now-ttl (see getUntilFromPruneFilters
+		// in moby's daemon/prune.go).
+		untilFilter := filters.NewArgs(filters.Arg("until", ttl.String()))
+		if report, err := client.ContainersPrune(timeoutCtx, untilFilter); err != nil {
+			errs = append(errs, fmt.Errorf("prune stopped containers: %w", err))
+		} else {
+			containersRemoved = len(report.ContainersDeleted)
+			reclaimed += report.SpaceReclaimed
+		}
+
+		imageFilters := filters.NewArgs(
+			filters.Arg("dangling", "true"),
+			filters.Arg("until", ttl.String()),
+		)
+		if report, err := client.ImagesPrune(timeoutCtx, imageFilters); err != nil {
+			errs = append(errs, fmt.Errorf("prune dangling images: %w", err))
+		} else {
+			imagesRemoved = len(report.ImagesDeleted)
+			reclaimed += report.SpaceReclaimed
+		}
+	}
+
+	if cacheMaxAge > 0 {
+		// BuildKit maps `until` to KeepDuration: cache entries not used
+		// within the window are removed (`unused-for` is its deprecated
+		// synonym; v28+ daemons validate both, `until` is canonical).
+		opts := build.CachePruneOptions{
+			All:     true,
+			Filters: filters.NewArgs(filters.Arg("until", cacheMaxAge.String())),
+		}
+		if report, err := client.BuildCachePrune(timeoutCtx, opts); err != nil {
+			errs = append(errs, fmt.Errorf("prune build cache by age: %w", err))
+		} else {
+			reclaimed += report.SpaceReclaimed
+		}
+	}
+
+	if cacheBudgetGB > 0 {
+		// ReservedSpace is BuildKit's retention cap: least-recently-used
+		// cache is evicted until the total fits within the budget.
+		opts := build.CachePruneOptions{
+			All:           true,
+			ReservedSpace: int64(cacheBudgetGB) * 1024 * 1024 * 1024,
+		}
+		if report, err := client.BuildCachePrune(timeoutCtx, opts); err != nil {
+			errs = append(errs, fmt.Errorf("prune build cache to budget: %w", err))
+		} else {
+			reclaimed += report.SpaceReclaimed
+		}
+	}
+
+	summary := []any{
+		slog.Int("containers", containersRemoved),
+		slog.Int("images", imagesRemoved),
+		slog.String("reclaimed", FormatBytes(reclaimed)),
+	}
+	if containersRemoved > 0 || imagesRemoved > 0 || reclaimed > 0 {
+		logger.Info("Docker runtime prune reclaimed disk", summary...)
+	} else {
+		logger.Debug("Docker runtime prune found nothing to reclaim", summary...)
+	}
+	return errors.Join(errs...)
 }
 
 // buildxBuilderPrefix is the name prefix Docker gives to BuildKit builder

@@ -94,6 +94,30 @@ type DockerConfig struct {
 	// BuildxCleanupInterval is how often the buildx cleanup sweep runs while
 	// runner is up. Defaults to DefaultBuildxCleanupInterval when unset.
 	BuildxCleanupInterval time.Duration `mapstructure:"buildx-cleanup-interval"`
+
+	// Prune enables the periodic runtime prune of the shared Docker daemon:
+	// stopped containers and dangling images older than PruneTTL, plus
+	// age/budget-based build cache retention. Pointer: nil = inherit default
+	// (true). Like buildx-cleanup, this assumes the daemon is dedicated to
+	// runners: stopped containers and dangling images older than the TTL are
+	// treated as garbage regardless of what created them.
+	Prune *bool `mapstructure:"prune"`
+	// PruneInterval is how often the runtime prune sweep runs while runner
+	// is up. Defaults to DefaultDockerPruneInterval when unset.
+	PruneInterval time.Duration `mapstructure:"prune-interval"`
+	// PruneTTL is the age threshold of the sweep: dangling images and stopped
+	// containers older than this are removed. Defaults to DefaultDockerPruneTTL
+	// when unset (0); <= 0 (i.e. negative) disables the image/container
+	// portion while keeping build cache retention.
+	PruneTTL time.Duration `mapstructure:"prune-ttl"`
+	// BuildCacheMaxAge prunes daemon build cache entries not used within this
+	// window. Defaults to DefaultDockerBuildCacheMaxAge when unset (0);
+	// <= 0 (i.e. negative) disables the age-based cache prune.
+	BuildCacheMaxAge time.Duration `mapstructure:"build-cache-max-age"`
+	// BuildCacheBudgetGB is an optional hard cap on the daemon build cache
+	// (in GB) — least-recently-used entries are evicted down to the cap on
+	// each sweep. 0 (default) means no cap (age-based pruning still runs).
+	BuildCacheBudgetGB int `mapstructure:"build-cache-budget"`
 }
 
 // TartConfig holds Tart VM-specific backend settings.
@@ -175,6 +199,15 @@ func (ss *ScaleSetConfig) IsBuildxCleanupEnabled() bool {
 		return *ss.Docker.BuildxCleanup
 	}
 	return DefaultBuildxCleanup
+}
+
+// IsDockerPruneEnabled reports whether the periodic Docker runtime prune is
+// enabled (default true unless explicitly disabled).
+func (ss *ScaleSetConfig) IsDockerPruneEnabled() bool {
+	if ss.Docker.Prune != nil {
+		return *ss.Docker.Prune
+	}
+	return DefaultDockerPrune
 }
 
 // IsTartCacheCleanupEnabled reports whether Tart OCI/IPSW cache cleanup is

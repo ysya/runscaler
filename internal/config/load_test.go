@@ -302,6 +302,68 @@ token = "token-b"
 	}
 }
 
+// TestLoad_DockerContainerKeysInheritanceAndOverride pins that the container
+// isolation keys (network, pids-limit, shared-volume-name, cache-volumes)
+// flow through the map-level merge with zero per-key code: they inherit from
+// the top-level table into [[scaleset]] entries, and explicit empty values in
+// an entry override non-empty defaults.
+func TestLoad_DockerContainerKeysInheritanceAndOverride(t *testing.T) {
+	sets := resolveTOML(t, `
+[docker]
+network = "runners"
+pids-limit = 4096
+shared-volume-name = "team-shared"
+cache-volumes = ["gradle-cache:/home/runner/.gradle", "pnpm-store:/home/runner/.local/share/pnpm/store"]
+
+[[scaleset]]
+url = "https://github.com/org-a"
+name = "runners-a"
+token = "token-a"
+
+[scaleset.docker]
+network = ""
+cache-volumes = []
+
+[[scaleset]]
+url = "https://github.com/org-b"
+name = "runners-b"
+token = "token-b"
+`)
+	// First entry: explicit empty values win over the non-empty defaults...
+	if sets[0].Docker.Network != "" {
+		t.Errorf("sets[0] network = %q, want \"\" (explicit override)", sets[0].Docker.Network)
+	}
+	if len(sets[0].Docker.CacheVolumes) != 0 {
+		t.Errorf("sets[0] cache-volumes = %q, want none (explicit override)", sets[0].Docker.CacheVolumes)
+	}
+	// ...while untouched keys still inherit.
+	if sets[0].Docker.PidsLimit != 4096 {
+		t.Errorf("sets[0] pids-limit = %d, want 4096 (inherited)", sets[0].Docker.PidsLimit)
+	}
+	if got := sets[0].SharedVolumeName(); got != "team-shared" {
+		t.Errorf("sets[0] shared-volume-name = %q, want team-shared (inherited)", got)
+	}
+	// Second entry inherits the whole table.
+	if sets[1].Docker.Network != "runners" {
+		t.Errorf("sets[1] network = %q, want runners (inherited)", sets[1].Docker.Network)
+	}
+	if sets[1].Docker.PidsLimit != 4096 {
+		t.Errorf("sets[1] pids-limit = %d, want 4096 (inherited)", sets[1].Docker.PidsLimit)
+	}
+	if got := sets[1].SharedVolumeName(); got != "team-shared" {
+		t.Errorf("sets[1] shared-volume-name = %q, want team-shared (inherited)", got)
+	}
+	wantCaches := []string{"gradle-cache:/home/runner/.gradle", "pnpm-store:/home/runner/.local/share/pnpm/store"}
+	if len(sets[1].Docker.CacheVolumes) != len(wantCaches) {
+		t.Fatalf("sets[1] cache-volumes = %q, want %q (inherited)", sets[1].Docker.CacheVolumes, wantCaches)
+	}
+	for i, want := range wantCaches {
+		if sets[1].Docker.CacheVolumes[i] != want {
+			t.Errorf("sets[1] cache-volumes[%d] = %q, want %q (inherited)", i, sets[1].Docker.CacheVolumes[i], want)
+		}
+	}
+}
+
 func TestLoad_IdentityKeysNotInherited(t *testing.T) {
 	t.Setenv("RUNNER_TOKEN", "")
 	t.Setenv("RUNSCALER_TOKEN", "")
@@ -435,9 +497,13 @@ max-runners = 10
 socket = "/var/run/docker.sock"
 dind = true
 shared-volume = "/shared"
+shared-volume-name = "runner-shared"
 memory = 8192
 cpu = 4
+pids-limit = 4096
 platform = "linux/amd64"
+network = "runners"
+cache-volumes = ["gradle-cache:/home/runner/.gradle", "pnpm-store:/home/runner/.local/share/pnpm/store"]
 shared-volume-ttl = "168h"
 shared-volume-cleanup-interval = "6h"
 buildx-cleanup = true

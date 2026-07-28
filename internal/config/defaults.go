@@ -18,6 +18,10 @@ const (
 	DefaultHealthPort    = 8080
 	DefaultSystemName    = "dockerscaleset"
 
+	// DefaultSharedVolumeName is the named Docker volume backing the
+	// shared-volume mount when docker.shared-volume-name is unset.
+	DefaultSharedVolumeName = "runner-shared"
+
 	// DefaultSharedVolumeCleanupInterval is the period between shared-volume
 	// TTL sweeps when SharedVolumeTTL > 0 and no explicit interval is set.
 	DefaultSharedVolumeCleanupInterval = 6 * time.Hour

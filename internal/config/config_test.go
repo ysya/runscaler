@@ -63,6 +63,19 @@ func TestScaleSetConfigValidate(t *testing.T) {
 			},
 			wantErr: "min-runners (5) must be <= max-runners (3)",
 		},
+		{
+			name: "valid cache volumes",
+			modify: func(c *ScaleSetConfig) {
+				c.Docker.CacheVolumes = []string{"gradle-cache:/home/runner/.gradle"}
+			},
+		},
+		{
+			name: "bad cache volumes",
+			modify: func(c *ScaleSetConfig) {
+				c.Docker.CacheVolumes = []string{"gradle-cache"}
+			},
+			wantErr: "cache-volumes entry",
+		},
 	}
 
 	for _, tt := range tests {
@@ -270,6 +283,85 @@ func TestIsDinD_Default(t *testing.T) {
 	if !ss.IsDinD() {
 		t.Error("IsDinD() with explicit true should return true")
 	}
+}
+
+func TestSharedVolumeName_Default(t *testing.T) {
+	ss := ScaleSetConfig{} // SharedVolumeName is ""
+	if got := ss.SharedVolumeName(); got != DefaultSharedVolumeName {
+		t.Errorf("SharedVolumeName() = %q, want default %q", got, DefaultSharedVolumeName)
+	}
+
+	ss.Docker.SharedVolumeName = "team-a-shared"
+	if got := ss.SharedVolumeName(); got != "team-a-shared" {
+		t.Errorf("SharedVolumeName() = %q, want explicit override", got)
+	}
+}
+
+func TestParseCacheVolumes(t *testing.T) {
+	t.Run("empty list parses to nil", func(t *testing.T) {
+		dc := DockerConfig{}
+		mounts, err := dc.ParseCacheVolumes()
+		if err != nil {
+			t.Fatalf("ParseCacheVolumes() error: %v", err)
+		}
+		if mounts != nil {
+			t.Errorf("mounts = %v, want nil", mounts)
+		}
+	})
+
+	t.Run("happy path splits on the first colon", func(t *testing.T) {
+		dc := DockerConfig{CacheVolumes: []string{
+			"gradle-cache:/home/runner/.gradle",
+			"pnpm-store:/home/runner/.local/share/pnpm/store",
+			"go-build-cache:/home/runner/.cache/go-build",
+		}}
+		mounts, err := dc.ParseCacheVolumes()
+		if err != nil {
+			t.Fatalf("ParseCacheVolumes() error: %v", err)
+		}
+		want := []CacheVolumeMount{
+			{Volume: "gradle-cache", Path: "/home/runner/.gradle"},
+			{Volume: "pnpm-store", Path: "/home/runner/.local/share/pnpm/store"},
+			{Volume: "go-build-cache", Path: "/home/runner/.cache/go-build"},
+		}
+		if len(mounts) != len(want) {
+			t.Fatalf("mounts = %v, want %v", mounts, want)
+		}
+		for i := range want {
+			if mounts[i] != want[i] {
+				t.Errorf("mounts[%d] = %+v, want %+v", i, mounts[i], want[i])
+			}
+		}
+	})
+
+	t.Run("error cases", func(t *testing.T) {
+		tests := []struct {
+			name  string
+			entry string
+		}{
+			{name: "no colon", entry: "gradle-cache"},
+			{name: "empty volume name", entry: ":/home/runner/.gradle"},
+			{name: "empty path", entry: "gradle-cache:"},
+			{name: "relative path", entry: "gradle-cache:home/runner/.gradle"},
+			{name: "invalid volume name character", entry: "gradle/cache:/home/runner/.gradle"},
+			{name: "volume name starts with separator", entry: "-gradle:/home/runner/.gradle"},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				dc := DockerConfig{CacheVolumes: []string{tt.entry}}
+				mounts, err := dc.ParseCacheVolumes()
+				if err == nil {
+					t.Fatalf("ParseCacheVolumes(%q) expected error, got %v", tt.entry, mounts)
+				}
+				if !contains(err.Error(), tt.entry) {
+					t.Errorf("error %q should reference the bad entry %q", err.Error(), tt.entry)
+				}
+				if mounts != nil {
+					t.Errorf("mounts = %v, want nil on error", mounts)
+				}
+			})
+		}
+	})
 }
 
 func TestApplyDefaults_BackendDefault(t *testing.T) {

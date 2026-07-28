@@ -23,8 +23,15 @@ max-runners = 10
 socket = "/var/run/docker.sock"
 dind = true
 # shared-volume = "/shared"
+# shared-volume-name = "runner-shared"     # named volume backing shared-volume; distinct names isolate scalesets (or two runner processes)
 # memory = 0     # MB, 0 = unlimited (e.g. 8192 for 8GB)
 # cpu = 0        # cores, 0 = unlimited (e.g. 4)
+# pids-limit = 0 # max pids (processes + threads) per container; 0 = unlimited (e.g. 4096 to stop fork bombs)
+# network = ""   # pre-existing docker network to attach runners to; "" = default bridge (e.g. one created with icc disabled)
+# cache-volumes = [                        # named volumes mounted at tool cache paths; persistent, never TTL-swept
+#   "gradle-cache:/home/runner/.gradle",
+#   "pnpm-store:/home/runner/.local/share/pnpm/store",
+# ]
 # shared-volume-ttl = "168h"               # delete shared-volume files older than this; 0 = disabled
 # shared-volume-cleanup-interval = "6h"    # how often to run the TTL sweep
 # prune = true                             # periodic prune of the shared daemon (assumes it is dedicated to runners); default: on

@@ -547,9 +547,12 @@ func (b *TartBackend) runRunner(ctx context.Context, vmName, jitConfig string) e
 		return fmt.Errorf("failed to write JIT config on %s: %w", vmName, err)
 	}
 
-	// Start runner in background, reading JIT config from file
+	// Start runner in background, reading JIT config from file. The file is
+	// removed right after: $(cat ...) is captured before nohup launches, and
+	// the config is a registration credential that should not linger in the
+	// VM for the rest of the job.
 	startCmd := fmt.Sprintf(
-		"ACTIONS_RUNNER_INPUT_JITCONFIG=$(cat /tmp/jitconfig) nohup %s > /tmp/runner.log 2>&1 &",
+		"ACTIONS_RUNNER_INPUT_JITCONFIG=$(cat /tmp/jitconfig) nohup %s > /tmp/runner.log 2>&1 & rm -f /tmp/jitconfig",
 		runScript,
 	)
 	if _, err := b.cmd.Run(ctx, "tart", "exec", vmName, "sh", "-c", startCmd); err != nil {

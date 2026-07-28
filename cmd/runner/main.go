@@ -317,9 +317,9 @@ func run(ctx context.Context, cfg config.Config) error {
 		logger.Info("Health check server started", slog.Int("port", cfg.HealthPort))
 	}
 
-	// Start periodic shared-volume TTL cleanup (one shared sweeper per process —
-	// all Docker scalesets share the same `runner-shared` volume, so the
-	// first matching scaleset wins and others are ignored).
+	// Start periodic shared-volume TTL cleanup (one sweeper per unique
+	// shared-volume name, so scalesets sharing a volume share a sweeper
+	// and won't race).
 	startSharedVolumeCleanup(ctx, dockerClient, scaleSets, logger)
 
 	// Start periodic buildx builder cleanup (orphaned BuildKit builders are
@@ -373,11 +373,18 @@ func run(ctx context.Context, cfg config.Config) error {
 	// sets have finished shutting down. Doing this per-backend races with
 	// container removal and concurrent prune operations.
 	if needsDocker && dockerClient != nil {
-		removeVolume := false
+		// Unique named volumes backing the shared-volume mounts of Docker
+		// scalesets; each is removed at exit. Cache volumes are persistent
+		// and deliberately survive.
+		var volumeNames []string
+		seenVolumes := make(map[string]bool)
 		for _, ss := range scaleSets {
-			if !ss.IsTart() && ss.Docker.SharedVolume != "" {
-				removeVolume = true
-				break
+			if ss.IsTart() || ss.Docker.SharedVolume == "" {
+				continue
+			}
+			if name := ss.SharedVolumeName(); !seenVolumes[name] {
+				seenVolumes[name] = true
+				volumeNames = append(volumeNames, name)
 			}
 		}
 		// When the runtime prune sweep is enabled it owns build-cache
@@ -391,7 +398,7 @@ func run(ctx context.Context, cfg config.Config) error {
 				break
 			}
 		}
-		backend.CleanupSharedDocker(context.WithoutCancel(ctx), dockerClient, removeVolume, wipeBuildCache, logger)
+		backend.CleanupSharedDocker(context.WithoutCancel(ctx), dockerClient, volumeNames, wipeBuildCache, logger)
 	}
 
 	// Collect errors
@@ -545,65 +552,90 @@ func runScaleSet(ctx context.Context, ss config.ScaleSetConfig, dockerClient *do
 	}
 }
 
-// startSharedVolumeCleanup launches a background goroutine that runs the
-// shared-volume TTL sweeper periodically. The first Docker scaleset with a
-// shared volume and TTL > 0 wins — runner uses one global `runner-shared`
-// volume, so a single sweeper covers all scalesets. No-op when no scaleset
-// enables TTL or when the Docker client is unavailable.
+// startSharedVolumeCleanup launches one background goroutine per unique
+// shared-volume name among the Docker scalesets with a shared volume and
+// TTL > 0, running the TTL sweeper periodically. When two scalesets share a
+// volume name, the first one wins (with a warn if its config differs) — two
+// sweepers on the same volume would just race. Cache volumes are never swept.
+// No-op when no scaleset enables TTL or when the Docker client is unavailable.
 func startSharedVolumeCleanup(ctx context.Context, client *dockerclient.Client, scaleSets []config.ScaleSetConfig, logger *slog.Logger) {
 	if client == nil {
 		return
 	}
 
-	var (
+	type sweeper struct {
+		volumeName  string
 		ttl         time.Duration
 		interval    time.Duration
 		mountPath   string
 		helperImage string
-	)
+	}
+
+	// Group by the named volume backing the mount — scalesets may isolate
+	// themselves on distinct volumes, each needing its own sweeper.
+	picked := make(map[string]sweeper)
 	for _, ss := range scaleSets {
 		if ss.IsTart() || ss.Docker.SharedVolume == "" || ss.Docker.SharedVolumeTTL <= 0 {
 			continue
 		}
-		ttl = ss.Docker.SharedVolumeTTL
-		interval = ss.Docker.SharedVolumeCleanupInterval
+		interval := ss.Docker.SharedVolumeCleanupInterval
 		if interval <= 0 {
 			interval = config.DefaultSharedVolumeCleanupInterval
 		}
-		mountPath = ss.Docker.SharedVolume
-		helperImage = ss.RunnerImage
-		break
-	}
-	if ttl <= 0 {
-		return
-	}
-
-	logger.Info("Shared volume TTL cleanup enabled",
-		slog.Duration("ttl", ttl),
-		slog.Duration("interval", interval),
-		slog.String("path", mountPath),
-	)
-
-	// Run an initial sweep so users don't wait `interval` for the first cleanup
-	// after startup (especially relevant after a crash leaves the volume bloated).
-	go func() {
-		if err := backend.CleanupSharedVolumeStale(ctx, client, helperImage, mountPath, ttl, logger); err != nil {
-			logger.Warn("Initial shared volume cleanup failed", slog.Any("error", err))
+		s := sweeper{
+			volumeName:  ss.SharedVolumeName(),
+			ttl:         ss.Docker.SharedVolumeTTL,
+			interval:    interval,
+			mountPath:   ss.Docker.SharedVolume,
+			helperImage: ss.RunnerImage,
 		}
+		if existing, ok := picked[s.volumeName]; ok {
+			if existing != s {
+				logger.Warn("Conflicting shared volume cleanup settings for volume, keeping first",
+					slog.String("volume", s.volumeName),
+					slog.Duration("kept_ttl", existing.ttl),
+					slog.Duration("kept_interval", existing.interval),
+					slog.String("kept_path", existing.mountPath),
+					slog.Duration("ignored_ttl", s.ttl),
+					slog.Duration("ignored_interval", s.interval),
+					slog.String("ignored_path", s.mountPath),
+				)
+			}
+			continue
+		}
+		picked[s.volumeName] = s
+	}
 
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				if err := backend.CleanupSharedVolumeStale(ctx, client, helperImage, mountPath, ttl, logger); err != nil {
-					logger.Warn("Periodic shared volume cleanup failed", slog.Any("error", err))
+	for _, s := range picked {
+		s := s
+		logger.Info("Shared volume TTL cleanup enabled",
+			slog.String("volume", s.volumeName),
+			slog.Duration("ttl", s.ttl),
+			slog.Duration("interval", s.interval),
+			slog.String("path", s.mountPath),
+		)
+
+		// Run an initial sweep so users don't wait `interval` for the first cleanup
+		// after startup (especially relevant after a crash leaves the volume bloated).
+		go func() {
+			if err := backend.CleanupSharedVolumeStale(ctx, client, s.helperImage, s.volumeName, s.mountPath, s.ttl, logger); err != nil {
+				logger.Warn("Initial shared volume cleanup failed", slog.Any("error", err))
+			}
+
+			ticker := time.NewTicker(s.interval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					if err := backend.CleanupSharedVolumeStale(ctx, client, s.helperImage, s.volumeName, s.mountPath, s.ttl, logger); err != nil {
+						logger.Warn("Periodic shared volume cleanup failed", slog.Any("error", err))
+					}
 				}
 			}
-		}
-	}()
+		}()
+	}
 }
 
 // startBuildxCleanup launches a background goroutine that periodically removes

@@ -40,29 +40,39 @@ type DockerAPI interface {
 
 // DockerBackend runs GitHub Actions runners as Docker containers.
 type DockerBackend struct {
-	dockerClient DockerAPI
-	runnerImage  string
-	dockerSocket string
-	dind         bool
-	sharedVolume string
-	memoryBytes  int64             // container memory limit in bytes (0 = unlimited)
-	nanoCPUs     int64             // container CPU limit in nanoseconds (0 = unlimited)
-	platform     *ocispec.Platform // nil = use host default
-	logger       *slog.Logger
+	dockerClient     DockerAPI
+	runnerImage      string
+	dockerSocket     string
+	dind             bool
+	sharedVolume     string                    // container path of the shared volume ("" = disabled)
+	sharedVolumeName string                    // named volume backing the shared-volume mount
+	cacheVolumes     []config.CacheVolumeMount // persistent named cache volumes (never cleaned up)
+	network          string                    // pre-existing network to attach containers to ("" = default bridge)
+	memoryBytes      int64                     // container memory limit in bytes (0 = unlimited)
+	nanoCPUs         int64                     // container CPU limit in nanoseconds (0 = unlimited)
+	pidsLimit        int64                     // container pids limit (0 = unlimited)
+	platform         *ocispec.Platform         // nil = use host default
+	logger           *slog.Logger
 }
 
 // NewDockerBackend creates a DockerBackend from scale set config.
 func NewDockerBackend(ss config.ScaleSetConfig, client DockerAPI, logger *slog.Logger) *DockerBackend {
 	b := &DockerBackend{
-		dockerClient: client,
-		runnerImage:  ss.RunnerImage,
-		dockerSocket: ss.Docker.Socket,
-		dind:         ss.IsDinD(),
-		sharedVolume: ss.Docker.SharedVolume,
-		memoryBytes:  int64(ss.Docker.Memory) * 1024 * 1024, // MB → bytes
-		nanoCPUs:     int64(ss.Docker.CPU) * 1_000_000_000,  // cores → nanoseconds
-		logger:       logger,
+		dockerClient:     client,
+		runnerImage:      ss.RunnerImage,
+		dockerSocket:     ss.Docker.Socket,
+		dind:             ss.IsDinD(),
+		sharedVolume:     ss.Docker.SharedVolume,
+		sharedVolumeName: ss.SharedVolumeName(),
+		network:          ss.Docker.Network,
+		memoryBytes:      int64(ss.Docker.Memory) * 1024 * 1024, // MB → bytes
+		nanoCPUs:         int64(ss.Docker.CPU) * 1_000_000_000,  // cores → nanoseconds
+		pidsLimit:        ss.Docker.PidsLimit,
+		logger:           logger,
 	}
+	// Validate() already surfaced parse errors before startup; on error no
+	// cache volumes are mounted rather than a partial set.
+	b.cacheVolumes, _ = ss.Docker.ParseCacheVolumes()
 	if ss.Docker.Platform != "" {
 		b.platform = parsePlatform(ss.Docker.Platform)
 	}
@@ -101,22 +111,34 @@ func (b *DockerBackend) StartRunner(ctx context.Context, name string, jitConfig 
 		}
 		groupAdd = append(groupAdd, "0")
 	}
+	// Named volume mounts (shared + cache); their targets need ownership
+	// fixed before the runner starts.
+	var volumeTargets []string
 	if b.sharedVolume != "" {
 		mounts = append(mounts, mount.Mount{
 			Type:   mount.TypeVolume,
-			Source: "runner-shared",
+			Source: b.sharedVolumeName,
 			Target: b.sharedVolume,
 		})
+		volumeTargets = append(volumeTargets, b.sharedVolume)
+	}
+	for _, cv := range b.cacheVolumes {
+		mounts = append(mounts, mount.Mount{
+			Type:   mount.TypeVolume,
+			Source: cv.Volume,
+			Target: cv.Path,
+		})
+		volumeTargets = append(volumeTargets, cv.Path)
 	}
 
-	// Build command — fix shared volume ownership before starting runner.
-	var cmd []string
-	if b.sharedVolume != "" {
-		cmd = []string{"sh", "-c",
-			fmt.Sprintf("sudo chown -R 1001:123 %s && /home/runner/run.sh", b.sharedVolume),
-		}
-	} else {
-		cmd = []string{"/home/runner/run.sh"}
+	hostConfig := &container.HostConfig{
+		Mounts:      mounts,
+		GroupAdd:    groupAdd,
+		SecurityOpt: []string{"label:disable"},
+		Resources:   b.containerResources(),
+	}
+	if b.network != "" {
+		hostConfig.NetworkMode = container.NetworkMode(b.network)
 	}
 
 	c, err := b.dockerClient.ContainerCreate(
@@ -124,16 +146,11 @@ func (b *DockerBackend) StartRunner(ctx context.Context, name string, jitConfig 
 		&container.Config{
 			Image:  b.runnerImage,
 			User:   "runner",
-			Cmd:    cmd,
+			Cmd:    runnerCmd(volumeTargets),
 			Env:    b.buildContainerEnv(jitConfig),
 			Labels: map[string]string{"managed-by": "runner"},
 		},
-		&container.HostConfig{
-			Mounts:      mounts,
-			GroupAdd:    groupAdd,
-			SecurityOpt: []string{"label:disable"},
-			Resources:   b.containerResources(),
-		},
+		hostConfig,
 		nil, b.platform,
 		name,
 	)
@@ -168,6 +185,26 @@ func (b *DockerBackend) RemoveRunner(ctx context.Context, resourceID string) err
 // same Docker client and volume.
 func (b *DockerBackend) Shutdown(_ context.Context) {}
 
+// runnerCmd returns the container command: plain run.sh when no named
+// volumes are mounted, otherwise a shell prelude that fixes the ownership of
+// each volume mount point first. Freshly created named volumes are root-owned
+// at the top level, so the chown is conditional on the mount point's owner:
+// the first job on a fresh volume pays the recursive chown once and later
+// jobs skip the IO storm entirely. (stat -c is GNU coreutils — the runner
+// image is Ubuntu.)
+func runnerCmd(volumeTargets []string) []string {
+	if len(volumeTargets) == 0 {
+		return []string{"/home/runner/run.sh"}
+	}
+	var sb strings.Builder
+	sb.WriteString(`fix_own() { [ "$(stat -c %u "$1")" = "1001" ] || sudo chown -R 1001:123 "$1"; };`)
+	for _, target := range volumeTargets {
+		fmt.Fprintf(&sb, " fix_own %s;", target)
+	}
+	sb.WriteString(" exec /home/runner/run.sh")
+	return []string{"sh", "-c", sb.String()}
+}
+
 // buildContainerEnv returns the environment variables for a runner container.
 func (b *DockerBackend) buildContainerEnv(jitConfig string) []string {
 	env := []string{
@@ -179,20 +216,22 @@ func (b *DockerBackend) buildContainerEnv(jitConfig string) []string {
 	return env
 }
 
-// CleanupSharedDocker removes the shared Docker volume (if removeVolume is
-// true) and prunes dangling images. The full build-cache wipe only runs when
-// wipeBuildCache is true: when the runtime prune sweep is enabled it owns
-// build-cache retention (age/budget via PruneDockerRuntime), so exit no
-// longer wipes a cache the next process run would reuse — self-update
-// restarts previously destroyed all build cache. It is safe to call once
-// after all Docker-backed scale sets have finished shutting down; calling it
-// concurrently or per-backend will race with container removal and other
-// prune operations.
-func CleanupSharedDocker(ctx context.Context, client DockerAPI, removeVolume bool, wipeBuildCache bool, logger *slog.Logger) {
-	if removeVolume {
-		logger.Debug("Removing shared volume", slog.String("volume", "runner-shared"))
-		if err := client.VolumeRemove(ctx, "runner-shared", true); err != nil {
-			logger.Error("Failed to remove shared volume", slog.Any("error", err))
+// CleanupSharedDocker removes the shared Docker volumes named in volumeNames
+// (empty slice = nothing to remove) and prunes dangling images. Cache volumes
+// are deliberately not touched — they are persistent caches. The full
+// build-cache wipe only runs when wipeBuildCache is true: when the runtime
+// prune sweep is enabled it owns build-cache retention (age/budget via
+// PruneDockerRuntime), so exit no longer wipes a cache the next process run
+// would reuse — self-update restarts previously destroyed all build cache.
+// It is safe to call once after all Docker-backed scale sets have finished
+// shutting down; calling it concurrently or per-backend will race with
+// container removal and other prune operations.
+func CleanupSharedDocker(ctx context.Context, client DockerAPI, volumeNames []string, wipeBuildCache bool, logger *slog.Logger) {
+	for _, name := range volumeNames {
+		logger.Debug("Removing shared volume", slog.String("volume", name))
+		if err := client.VolumeRemove(ctx, name, true); err != nil {
+			logger.Error("Failed to remove shared volume",
+				slog.String("volume", name), slog.Any("error", err))
 		}
 	}
 
@@ -414,6 +453,12 @@ func (b *DockerBackend) containerResources() container.Resources {
 	if b.nanoCPUs > 0 {
 		r.NanoCPUs = b.nanoCPUs
 	}
+	if b.pidsLimit > 0 {
+		// Pids cgroup limit counts threads too — protects the host from
+		// fork bombs inside a job.
+		limit := b.pidsLimit
+		r.PidsLimit = &limit
+	}
 	return r
 }
 
@@ -431,16 +476,19 @@ func socketGroupID(path string) (int, error) {
 }
 
 // CleanupSharedVolumeStale runs an ephemeral helper container that mounts the
-// shared volume at mountPath and deletes files whose mtime is older than ttl.
-// Empty directories left behind are also pruned. The helper image must already
-// be available locally; the runner image is reused so no additional pull is
-// required. A no-op when ttl <= 0.
-func CleanupSharedVolumeStale(ctx context.Context, client DockerAPI, helperImage, mountPath string, ttl time.Duration, logger *slog.Logger) error {
+// named shared volume at mountPath and deletes files whose mtime is older
+// than ttl. Empty directories left behind are also pruned. The helper image
+// must already be available locally; the runner image is reused so no
+// additional pull is required. A no-op when ttl <= 0.
+func CleanupSharedVolumeStale(ctx context.Context, client DockerAPI, helperImage, volumeName, mountPath string, ttl time.Duration, logger *slog.Logger) error {
 	if ttl <= 0 {
 		return nil
 	}
 	if helperImage == "" {
 		return fmt.Errorf("helper image is required for shared-volume cleanup")
+	}
+	if volumeName == "" {
+		return fmt.Errorf("volume name is required for shared-volume cleanup")
 	}
 	if mountPath == "" {
 		return fmt.Errorf("mount path is required for shared-volume cleanup")
@@ -480,7 +528,7 @@ func CleanupSharedVolumeStale(ctx context.Context, client DockerAPI, helperImage
 		&container.HostConfig{
 			Mounts: []mount.Mount{{
 				Type:   mount.TypeVolume,
-				Source: "runner-shared",
+				Source: volumeName,
 				Target: mountPath,
 			}},
 		},
@@ -519,6 +567,7 @@ func CleanupSharedVolumeStale(ctx context.Context, client DockerAPI, helperImage
 
 	logger.Info("Shared volume cleanup completed",
 		slog.Int("ttl_days", days),
+		slog.String("volume", volumeName),
 		slog.String("path", mountPath),
 	)
 	return nil

@@ -17,6 +17,8 @@ import (
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/api/types/volume"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+
+	"github.com/ysya/runscaler/internal/config"
 )
 
 // --- Docker Mock ---
@@ -123,14 +125,29 @@ func (m *mockDocker) ContainerWait(_ context.Context, _ string, _ container.Wait
 func newTestDockerBackend(sharedVolume string, dind bool) (*DockerBackend, *mockDocker) {
 	md := &mockDocker{}
 	b := &DockerBackend{
-		dockerClient: md,
-		runnerImage:  "test-image:latest",
-		dockerSocket: "/var/run/docker.sock",
-		dind:         dind,
-		sharedVolume: sharedVolume,
-		logger:       slog.New(slog.DiscardHandler),
+		dockerClient:     md,
+		runnerImage:      "test-image:latest",
+		dockerSocket:     "/var/run/docker.sock",
+		dind:             dind,
+		sharedVolume:     sharedVolume,
+		sharedVolumeName: "runner-shared",
+		logger:           slog.New(slog.DiscardHandler),
 	}
 	return b, md
+}
+
+// newConfigDockerBackend builds a backend through NewDockerBackend so the
+// constructor path (volume-name default, cache-volume parsing) is exercised.
+// DinD is disabled to keep tests hermetic (no host socket stat).
+func newConfigDockerBackend(dc config.DockerConfig) (*DockerBackend, *mockDocker) {
+	md := &mockDocker{}
+	dind := false
+	dc.DinD = &dind
+	ss := config.ScaleSetConfig{
+		RunnerImage: "test-image:latest",
+		Docker:      dc,
+	}
+	return NewDockerBackend(ss, md, slog.New(slog.DiscardHandler)), md
 }
 
 func newTestDockerBackendWithResources(memory int64, cpu int64) (*DockerBackend, *mockDocker) {
@@ -157,6 +174,33 @@ func findMountByTarget(mounts []mount.Mount, target string) *mount.Mount {
 		}
 	}
 	return nil
+}
+
+// assertFixOwnCmd checks that cmd is a shell wrapper whose conditional-chown
+// prelude covers exactly the given volume mount targets before exec'ing the
+// runner. The chown must be gated on the mount point's owner so warm volumes
+// skip the recursive IO storm.
+func assertFixOwnCmd(t *testing.T, cmd []string, targets ...string) {
+	t.Helper()
+	if len(cmd) != 3 || cmd[0] != "sh" || cmd[1] != "-c" {
+		t.Fatalf("cmd = %v, want [sh -c <script>]", cmd)
+	}
+	script := cmd[2]
+	if !strings.Contains(script, `[ "$(stat -c %u "$1")" = "1001" ] || sudo chown -R 1001:123 "$1"`) {
+		t.Errorf("script should chown only when the owner is wrong, got: %q", script)
+	}
+	for _, target := range targets {
+		if !strings.Contains(script, "fix_own "+target+";") {
+			t.Errorf("script should fix ownership of %s, got: %q", target, script)
+		}
+	}
+	// The definition is "fix_own()" (no space), so "fix_own " counts calls only.
+	if got := strings.Count(script, "fix_own "); got != len(targets) {
+		t.Errorf("script has %d fix_own calls, want %d: %q", got, len(targets), script)
+	}
+	if !strings.HasSuffix(script, "exec /home/runner/run.sh") {
+		t.Errorf("script should end with exec run.sh, got: %q", script)
+	}
 }
 
 func TestDockerBackend_StartRunner_WithSharedVolume(t *testing.T) {
@@ -197,14 +241,8 @@ func TestDockerBackend_StartRunner_WithSharedVolume(t *testing.T) {
 		t.Errorf("mount source = %q, want %q", sharedMount.Source, "runner-shared")
 	}
 
-	// Verify command wraps with chown
-	cmd := strings.Join(call.config.Cmd, " ")
-	if !strings.Contains(cmd, "sudo chown") {
-		t.Errorf("cmd should contain sudo chown, got: %v", call.config.Cmd)
-	}
-	if !strings.Contains(cmd, "/home/runner/run.sh") {
-		t.Errorf("cmd should contain run.sh, got: %v", call.config.Cmd)
-	}
+	// Verify command wraps with the conditional-chown prelude
+	assertFixOwnCmd(t, call.config.Cmd, "/shared")
 
 	// Verify SHARED_DIR environment variable
 	foundSharedDir := false
@@ -289,6 +327,167 @@ func TestDockerBackend_StartRunner_MultipleShareVolume(t *testing.T) {
 	}
 }
 
+func TestDockerBackend_StartRunner_WithCacheVolumes(t *testing.T) {
+	b, md := newConfigDockerBackend(config.DockerConfig{
+		SharedVolume: "/shared",
+		CacheVolumes: []string{
+			"gradle-cache:/home/runner/.gradle",
+			"pnpm-store:/home/runner/.local/share/pnpm/store",
+		},
+	})
+
+	if _, err := b.StartRunner(context.Background(), "runner-1", "jit"); err != nil {
+		t.Fatalf("StartRunner() error: %v", err)
+	}
+	call := md.createCalls[0]
+
+	// Shared volume mount uses the default volume name.
+	shared := findMountByTarget(call.hostConfig.Mounts, "/shared")
+	if shared == nil {
+		t.Fatal("shared volume mount not found")
+	}
+	if shared.Type != mount.TypeVolume || shared.Source != "runner-shared" {
+		t.Errorf("shared mount = %+v, want named volume runner-shared", shared)
+	}
+
+	// Each cache volume is mounted as a named volume at its path.
+	wantCaches := map[string]string{
+		"/home/runner/.gradle":                 "gradle-cache",
+		"/home/runner/.local/share/pnpm/store": "pnpm-store",
+	}
+	for target, source := range wantCaches {
+		m := findMountByTarget(call.hostConfig.Mounts, target)
+		if m == nil {
+			t.Fatalf("cache volume mount %s not found", target)
+		}
+		if m.Type != mount.TypeVolume || m.Source != source {
+			t.Errorf("cache mount %s = %+v, want named volume %s", target, m, source)
+		}
+	}
+	// No DinD → shared + 2 cache mounts and nothing else.
+	if len(call.hostConfig.Mounts) != 3 {
+		t.Errorf("mounts = %d, want 3", len(call.hostConfig.Mounts))
+	}
+
+	// The fix_own prelude must cover every volume mount target.
+	assertFixOwnCmd(t, call.config.Cmd,
+		"/shared", "/home/runner/.gradle", "/home/runner/.local/share/pnpm/store")
+}
+
+func TestDockerBackend_StartRunner_CacheVolumesWithoutSharedVolume(t *testing.T) {
+	b, md := newConfigDockerBackend(config.DockerConfig{
+		CacheVolumes: []string{"go-build-cache:/home/runner/.cache/go-build"},
+	})
+
+	if _, err := b.StartRunner(context.Background(), "runner-1", "jit"); err != nil {
+		t.Fatalf("StartRunner() error: %v", err)
+	}
+	call := md.createCalls[0]
+
+	m := findMountByTarget(call.hostConfig.Mounts, "/home/runner/.cache/go-build")
+	if m == nil {
+		t.Fatal("cache volume mount not found")
+	}
+	if m.Type != mount.TypeVolume || m.Source != "go-build-cache" {
+		t.Errorf("cache mount = %+v, want named volume go-build-cache", m)
+	}
+
+	// The prelude covers the cache path even without a shared volume.
+	assertFixOwnCmd(t, call.config.Cmd, "/home/runner/.cache/go-build")
+
+	// SHARED_DIR stays unset without a shared volume.
+	for _, env := range call.config.Env {
+		if strings.HasPrefix(env, "SHARED_DIR=") {
+			t.Errorf("env should not contain SHARED_DIR, got: %v", call.config.Env)
+		}
+	}
+}
+
+func TestNewDockerBackend_InvalidCacheVolumesMountsNone(t *testing.T) {
+	// Validate() rejects such a config before startup; if a backend is built
+	// anyway, the bad list must yield no cache mounts rather than a partial set.
+	b, md := newConfigDockerBackend(config.DockerConfig{
+		CacheVolumes: []string{"gradle-cache:/home/runner/.gradle", "not-an-entry"},
+	})
+
+	if _, err := b.StartRunner(context.Background(), "runner-1", "jit"); err != nil {
+		t.Fatalf("StartRunner() error: %v", err)
+	}
+	call := md.createCalls[0]
+
+	if len(call.hostConfig.Mounts) != 0 {
+		t.Errorf("mounts = %+v, want none for an invalid cache-volumes list", call.hostConfig.Mounts)
+	}
+	// No volume mounts → the bare cmd, no shell wrapper.
+	if len(call.config.Cmd) != 1 || call.config.Cmd[0] != "/home/runner/run.sh" {
+		t.Errorf("cmd = %v, want [/home/runner/run.sh]", call.config.Cmd)
+	}
+}
+
+func TestDockerBackend_StartRunner_CustomSharedVolumeName(t *testing.T) {
+	b, md := newConfigDockerBackend(config.DockerConfig{
+		SharedVolume:     "/shared",
+		SharedVolumeName: "team-a-shared",
+	})
+
+	if _, err := b.StartRunner(context.Background(), "runner-1", "jit"); err != nil {
+		t.Fatalf("StartRunner() error: %v", err)
+	}
+
+	m := findMountByTarget(md.createCalls[0].hostConfig.Mounts, "/shared")
+	if m == nil {
+		t.Fatal("shared volume mount not found")
+	}
+	if m.Source != "team-a-shared" {
+		t.Errorf("mount source = %q, want %q", m.Source, "team-a-shared")
+	}
+}
+
+func TestDockerBackend_StartRunner_NetworkMode(t *testing.T) {
+	t.Run("set", func(t *testing.T) {
+		b, md := newConfigDockerBackend(config.DockerConfig{Network: "runners"})
+		if _, err := b.StartRunner(context.Background(), "runner-1", "jit"); err != nil {
+			t.Fatalf("StartRunner() error: %v", err)
+		}
+		if got := md.createCalls[0].hostConfig.NetworkMode; got != "runners" {
+			t.Errorf("NetworkMode = %q, want %q", got, "runners")
+		}
+	})
+
+	t.Run("unset keeps daemon default", func(t *testing.T) {
+		b, md := newConfigDockerBackend(config.DockerConfig{})
+		if _, err := b.StartRunner(context.Background(), "runner-1", "jit"); err != nil {
+			t.Fatalf("StartRunner() error: %v", err)
+		}
+		if got := md.createCalls[0].hostConfig.NetworkMode; got != "" {
+			t.Errorf("NetworkMode = %q, want empty (daemon default)", got)
+		}
+	})
+}
+
+func TestDockerBackend_StartRunner_PidsLimit(t *testing.T) {
+	t.Run("set", func(t *testing.T) {
+		b, md := newConfigDockerBackend(config.DockerConfig{PidsLimit: 4096})
+		if _, err := b.StartRunner(context.Background(), "runner-1", "jit"); err != nil {
+			t.Fatalf("StartRunner() error: %v", err)
+		}
+		got := md.createCalls[0].hostConfig.Resources.PidsLimit
+		if got == nil || *got != 4096 {
+			t.Errorf("PidsLimit = %v, want 4096", got)
+		}
+	})
+
+	t.Run("unset leaves limit nil", func(t *testing.T) {
+		b, md := newConfigDockerBackend(config.DockerConfig{})
+		if _, err := b.StartRunner(context.Background(), "runner-1", "jit"); err != nil {
+			t.Fatalf("StartRunner() error: %v", err)
+		}
+		if got := md.createCalls[0].hostConfig.Resources.PidsLimit; got != nil {
+			t.Errorf("PidsLimit = %v, want nil (unlimited)", *got)
+		}
+	})
+}
+
 func TestDockerBackend_RemoveRunner(t *testing.T) {
 	b, md := newTestDockerBackend("", true)
 	ctx := context.Background()
@@ -319,7 +518,7 @@ func TestCleanupSharedDocker_RemovesVolume(t *testing.T) {
 	md := &mockDocker{}
 	ctx := context.Background()
 
-	CleanupSharedDocker(ctx, md, true, true, slog.New(slog.DiscardHandler))
+	CleanupSharedDocker(ctx, md, []string{"runner-shared"}, true, slog.New(slog.DiscardHandler))
 
 	if len(md.volumesRemoved) != 1 {
 		t.Fatalf("expected 1 volume removed, got %d", len(md.volumesRemoved))
@@ -329,21 +528,33 @@ func TestCleanupSharedDocker_RemovesVolume(t *testing.T) {
 	}
 }
 
-func TestCleanupSharedDocker_SkipsVolumeWhenDisabled(t *testing.T) {
+func TestCleanupSharedDocker_RemovesMultipleVolumes(t *testing.T) {
 	md := &mockDocker{}
 	ctx := context.Background()
 
-	CleanupSharedDocker(ctx, md, false, true, slog.New(slog.DiscardHandler))
+	CleanupSharedDocker(ctx, md, []string{"runner-shared", "team-a-shared"}, true, slog.New(slog.DiscardHandler))
+
+	want := []string{"runner-shared", "team-a-shared"}
+	if !reflect.DeepEqual(md.volumesRemoved, want) {
+		t.Errorf("volumes removed = %v, want %v", md.volumesRemoved, want)
+	}
+}
+
+func TestCleanupSharedDocker_SkipsVolumesWhenNoneNamed(t *testing.T) {
+	md := &mockDocker{}
+	ctx := context.Background()
+
+	CleanupSharedDocker(ctx, md, nil, true, slog.New(slog.DiscardHandler))
 
 	if len(md.volumesRemoved) != 0 {
-		t.Errorf("should not remove volume when disabled, removed %d", len(md.volumesRemoved))
+		t.Errorf("should not remove volumes when none are named, removed %d", len(md.volumesRemoved))
 	}
 }
 
 func TestCleanupSharedDocker_WipesBuildCacheWhenRequested(t *testing.T) {
 	md := &mockDocker{}
 
-	CleanupSharedDocker(context.Background(), md, false, true, slog.New(slog.DiscardHandler))
+	CleanupSharedDocker(context.Background(), md, nil, true, slog.New(slog.DiscardHandler))
 
 	// Dangling images are always pruned; the full build-cache wipe runs too.
 	if len(md.imagesPruneFilters) != 1 {
@@ -361,7 +572,7 @@ func TestCleanupSharedDocker_WipesBuildCacheWhenRequested(t *testing.T) {
 func TestCleanupSharedDocker_SkipsBuildCacheWipeWhenRuntimePruneOwnsIt(t *testing.T) {
 	md := &mockDocker{}
 
-	CleanupSharedDocker(context.Background(), md, false, false, slog.New(slog.DiscardHandler))
+	CleanupSharedDocker(context.Background(), md, nil, false, slog.New(slog.DiscardHandler))
 
 	// Dangling images are still pruned unconditionally...
 	if len(md.imagesPruneFilters) != 1 {
@@ -474,7 +685,7 @@ func TestDockerBackend_StartRunner_WithoutResourceLimits(t *testing.T) {
 
 func TestCleanupSharedVolumeStale_NoOpWhenTTLZero(t *testing.T) {
 	md := &mockDocker{}
-	if err := CleanupSharedVolumeStale(context.Background(), md, "img", "/shared", 0, slog.New(slog.DiscardHandler)); err != nil {
+	if err := CleanupSharedVolumeStale(context.Background(), md, "img", "runner-shared", "/shared", 0, slog.New(slog.DiscardHandler)); err != nil {
 		t.Fatalf("CleanupSharedVolumeStale() error: %v", err)
 	}
 	if len(md.created) != 0 {
@@ -486,7 +697,7 @@ func TestCleanupSharedVolumeStale_RunsHelperContainer(t *testing.T) {
 	md := &mockDocker{}
 	logger := slog.New(slog.DiscardHandler)
 
-	if err := CleanupSharedVolumeStale(context.Background(), md, "runner-img", "/shared", 7*24*time.Hour, logger); err != nil {
+	if err := CleanupSharedVolumeStale(context.Background(), md, "runner-img", "runner-shared", "/shared", 7*24*time.Hour, logger); err != nil {
 		t.Fatalf("CleanupSharedVolumeStale() error: %v", err)
 	}
 
@@ -538,9 +749,24 @@ func TestCleanupSharedVolumeStale_RunsHelperContainer(t *testing.T) {
 	}
 }
 
+func TestCleanupSharedVolumeStale_CustomVolumeName(t *testing.T) {
+	md := &mockDocker{}
+	if err := CleanupSharedVolumeStale(context.Background(), md, "img", "team-a-shared", "/shared", 24*time.Hour, slog.New(slog.DiscardHandler)); err != nil {
+		t.Fatalf("CleanupSharedVolumeStale() error: %v", err)
+	}
+
+	m := findMountByTarget(md.createCalls[0].hostConfig.Mounts, "/shared")
+	if m == nil {
+		t.Fatal("shared volume mount not found")
+	}
+	if m.Type != mount.TypeVolume || m.Source != "team-a-shared" {
+		t.Errorf("mount = %+v, want named volume team-a-shared", m)
+	}
+}
+
 func TestCleanupSharedVolumeStale_RoundsSubDayTTLUp(t *testing.T) {
 	md := &mockDocker{}
-	if err := CleanupSharedVolumeStale(context.Background(), md, "img", "/shared", 6*time.Hour, slog.New(slog.DiscardHandler)); err != nil {
+	if err := CleanupSharedVolumeStale(context.Background(), md, "img", "runner-shared", "/shared", 6*time.Hour, slog.New(slog.DiscardHandler)); err != nil {
 		t.Fatalf("CleanupSharedVolumeStale() error: %v", err)
 	}
 	cmd := strings.Join(md.createCalls[0].config.Cmd, " ")
@@ -551,7 +777,7 @@ func TestCleanupSharedVolumeStale_RoundsSubDayTTLUp(t *testing.T) {
 
 func TestCleanupSharedVolumeStale_PropagatesNonZeroExit(t *testing.T) {
 	md := &mockDocker{waitStatus: 2}
-	err := CleanupSharedVolumeStale(context.Background(), md, "img", "/shared", time.Hour, slog.New(slog.DiscardHandler))
+	err := CleanupSharedVolumeStale(context.Background(), md, "img", "runner-shared", "/shared", time.Hour, slog.New(slog.DiscardHandler))
 	if err == nil {
 		t.Fatal("expected error for non-zero exit, got nil")
 	}
@@ -566,7 +792,7 @@ func TestCleanupSharedVolumeStale_PropagatesNonZeroExit(t *testing.T) {
 
 func TestCleanupSharedVolumeStale_PropagatesWaitError(t *testing.T) {
 	md := &mockDocker{waitErr: errors.New("docker died")}
-	err := CleanupSharedVolumeStale(context.Background(), md, "img", "/shared", time.Hour, slog.New(slog.DiscardHandler))
+	err := CleanupSharedVolumeStale(context.Background(), md, "img", "runner-shared", "/shared", time.Hour, slog.New(slog.DiscardHandler))
 	if err == nil || !strings.Contains(err.Error(), "docker died") {
 		t.Errorf("expected wait error to propagate, got: %v", err)
 	}

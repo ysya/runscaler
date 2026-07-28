@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -70,9 +71,32 @@ type DockerConfig struct {
 	Socket       string `mapstructure:"socket"`
 	DinD         *bool  `mapstructure:"dind"` // pointer: nil = inherit default (true)
 	SharedVolume string `mapstructure:"shared-volume"`
-	Memory       int    `mapstructure:"memory"`   // Memory limit in MB (0 = unlimited)
-	CPU          int    `mapstructure:"cpu"`      // CPU cores (0 = unlimited)
-	Platform     string `mapstructure:"platform"` // e.g. "linux/amd64" to force architecture
+	Memory       int    `mapstructure:"memory"`     // Memory limit in MB (0 = unlimited)
+	CPU          int    `mapstructure:"cpu"`        // CPU cores (0 = unlimited)
+	PidsLimit    int64  `mapstructure:"pids-limit"` // Max pids (processes + threads) per container (0 = unlimited)
+	Platform     string `mapstructure:"platform"`   // e.g. "linux/amd64" to force architecture
+
+	// Network is the name of a pre-existing Docker network to attach runner
+	// containers to ("" = the daemon's default bridge). Lets operators isolate
+	// runners from the rest of the host network, e.g.
+	// `docker network create --opt com.docker.network.bridge.enable_icc=false runners`.
+	// Not validated here — the daemon fails container creation with a clear
+	// error if the network does not exist.
+	Network string `mapstructure:"network"`
+
+	// SharedVolumeName is the named Docker volume backing the shared-volume
+	// mount ("" = DefaultSharedVolumeName). Different scalesets — or two
+	// runner processes on one host — can use isolated volumes by picking
+	// distinct names.
+	SharedVolumeName string `mapstructure:"shared-volume-name"`
+
+	// CacheVolumes are named volumes mounted into every runner container at
+	// tool-default cache paths, so workflows hit warm caches with zero
+	// workflow changes. Entry format "volume-name:/absolute/container/path",
+	// e.g. "gradle-cache:/home/runner/.gradle". Cache volumes are persistent
+	// caches: they are deliberately never removed at exit and never swept by
+	// any TTL. Same name across scalesets = shared cache, different = isolated.
+	CacheVolumes []string `mapstructure:"cache-volumes"`
 
 	// SharedVolumeTTL deletes files in shared-volume older than this duration.
 	// 0 (default) disables TTL cleanup. Accepts Go duration strings, e.g. "168h".
@@ -118,6 +142,41 @@ type DockerConfig struct {
 	// (in GB) — least-recently-used entries are evicted down to the cap on
 	// each sweep. 0 (default) means no cap (age-based pruning still runs).
 	BuildCacheBudgetGB int `mapstructure:"build-cache-budget"`
+}
+
+// CacheVolumeMount is one parsed cache-volumes entry: a named Docker volume
+// and the absolute container path it is mounted at.
+type CacheVolumeMount struct {
+	Volume string
+	Path   string
+}
+
+// volumeNameRe matches Docker's volume-name pattern.
+var volumeNameRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
+
+// ParseCacheVolumes parses the "volume-name:/absolute/container/path" entries
+// in CacheVolumes. The entry is split on the first colon; an entry with an
+// empty volume name or path, a non-absolute path, or a volume name outside
+// Docker's volume-name pattern is an error.
+func (dc DockerConfig) ParseCacheVolumes() ([]CacheVolumeMount, error) {
+	if len(dc.CacheVolumes) == 0 {
+		return nil, nil
+	}
+	mounts := make([]CacheVolumeMount, 0, len(dc.CacheVolumes))
+	for _, entry := range dc.CacheVolumes {
+		name, path, ok := strings.Cut(entry, ":")
+		if !ok || name == "" || path == "" {
+			return nil, fmt.Errorf("cache-volumes entry %q must be \"volume-name:/absolute/container/path\"", entry)
+		}
+		if !volumeNameRe.MatchString(name) {
+			return nil, fmt.Errorf("cache-volumes entry %q: invalid volume name %q", entry, name)
+		}
+		if !strings.HasPrefix(path, "/") {
+			return nil, fmt.Errorf("cache-volumes entry %q: container path %q must be absolute", entry, path)
+		}
+		mounts = append(mounts, CacheVolumeMount{Volume: name, Path: path})
+	}
+	return mounts, nil
 }
 
 // TartConfig holds Tart VM-specific backend settings.
@@ -185,6 +244,15 @@ func (ss *ScaleSetConfig) IsDinD() bool {
 		return *ss.Docker.DinD
 	}
 	return DefaultDinD
+}
+
+// SharedVolumeName returns the named Docker volume backing the shared-volume
+// mount, falling back to DefaultSharedVolumeName when unset.
+func (ss *ScaleSetConfig) SharedVolumeName() string {
+	if ss.Docker.SharedVolumeName != "" {
+		return ss.Docker.SharedVolumeName
+	}
+	return DefaultSharedVolumeName
 }
 
 // IsTart returns whether this scale set uses the Tart VM backend.
@@ -267,7 +335,9 @@ func (ss *ScaleSetConfig) Validate() error {
 
 	switch ss.Backend {
 	case DefaultBackend:
-		// Docker backend: no additional validation
+		if _, err := ss.Docker.ParseCacheVolumes(); err != nil {
+			return err
+		}
 	case "tart":
 		if ss.RunnerImage == "" {
 			return fmt.Errorf("runner-image is required when backend is \"tart\"")

@@ -55,6 +55,10 @@ type mockDocker struct {
 	containersPruneErr error
 	imagesPruneErr     error
 	buildCachePruneErr error
+
+	// When true, VolumeRemove blocks until its context is done, simulating a
+	// wedged daemon that never answers.
+	volumeRemoveBlocks bool
 }
 
 func (m *mockDocker) ContainerCreate(_ context.Context, cfg *container.Config, hcfg *container.HostConfig, _ *network.NetworkingConfig, _ *ocispec.Platform, name string) (container.CreateResponse, error) {
@@ -98,8 +102,12 @@ func (m *mockDocker) BuildCachePrune(_ context.Context, opts build.CachePruneOpt
 	return &build.CachePruneReport{}, nil
 }
 
-func (m *mockDocker) VolumeRemove(_ context.Context, volumeID string, _ bool) error {
+func (m *mockDocker) VolumeRemove(ctx context.Context, volumeID string, _ bool) error {
 	m.volumesRemoved = append(m.volumesRemoved, volumeID)
+	if m.volumeRemoveBlocks {
+		<-ctx.Done()
+		return ctx.Err()
+	}
 	return nil
 }
 
@@ -581,6 +589,36 @@ func TestCleanupSharedDocker_SkipsBuildCacheWipeWhenRuntimePruneOwnsIt(t *testin
 	// ...but the build cache survives the restart for the next process run.
 	if len(md.buildCachePruneOpts) != 0 {
 		t.Errorf("expected no build cache prune, got %d", len(md.buildCachePruneOpts))
+	}
+}
+
+func TestCleanupSharedDocker_BoundedWhenDaemonWedges(t *testing.T) {
+	// A daemon that never answers VolumeRemove used to hang shutdown forever:
+	// the exit-time cleanup ran on a context with no deadline.
+	md := &mockDocker{volumeRemoveBlocks: true}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		cleanupSharedDockerWith(context.Background(), md, []string{"runner-shared"},
+			true, 50*time.Millisecond, slog.New(slog.DiscardHandler))
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("cleanup never returned — a wedged daemon still hangs shutdown")
+	}
+}
+
+func TestCleanupSharedDockerTimeout_FitsSystemdStopWindow(t *testing.T) {
+	// systemd's default TimeoutStopSec is 90s and the scale set + scaler
+	// shutdowns may already have spent ~40s before cleanup starts. Raising
+	// this constant past the remainder means systemd SIGKILLs runner mid
+	// cleanup instead of letting it exit on its own terms.
+	if cleanupSharedDockerTimeout > 45*time.Second {
+		t.Errorf("cleanupSharedDockerTimeout = %s, want <= 45s so shutdown fits systemd's 90s stop window",
+			cleanupSharedDockerTimeout)
 	}
 }
 

@@ -226,7 +226,37 @@ func (b *DockerBackend) buildContainerEnv(jitConfig string) []string {
 // It is safe to call once after all Docker-backed scale sets have finished
 // shutting down; calling it concurrently or per-backend will race with
 // container removal and other prune operations.
+//
+// The whole sweep is bounded by cleanupSharedDockerTimeout so an unresponsive
+// daemon cannot hang shutdown.
 func CleanupSharedDocker(ctx context.Context, client DockerAPI, volumeNames []string, wipeBuildCache bool, logger *slog.Logger) {
+	cleanupSharedDockerWith(ctx, client, volumeNames, wipeBuildCache, cleanupSharedDockerTimeout, logger)
+}
+
+// cleanupSharedDockerTimeout bounds the exit-time cleanup. The Docker API
+// calls below carry no deadline of their own, so a slow or wedged daemon
+// would otherwise block shutdown indefinitely — a large dangling-image
+// backlog has taken about a minute in practice, and the process looks hung
+// while it works. Kept under systemd's default 90s TimeoutStopSec (minus the
+// ~40s the scale set and scaler shutdowns may already have used) so runner
+// still exits on its own terms instead of being SIGKILLed.
+const cleanupSharedDockerTimeout = 45 * time.Second
+
+// cleanupSharedDockerWith is the testable core: it performs the sweep under
+// the supplied timeout. The exported wrapper above supplies the default.
+func cleanupSharedDockerWith(ctx context.Context, client DockerAPI, volumeNames []string, wipeBuildCache bool, timeout time.Duration, logger *slog.Logger) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	// Anything the deadline cuts short is reclaimed by the next run's prune
+	// sweep, so report it as a warning rather than an error.
+	defer func() {
+		if ctx.Err() != nil {
+			logger.Warn("Exit cleanup timed out — remaining garbage will be reclaimed on the next run",
+				slog.Duration("timeout", timeout))
+		}
+	}()
+
 	for _, name := range volumeNames {
 		logger.Debug("Removing shared volume", slog.String("volume", name))
 		if err := client.VolumeRemove(ctx, name, true); err != nil {

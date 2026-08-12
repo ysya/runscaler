@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"sort"
 	"sync"
 	"time"
 
@@ -31,14 +32,24 @@ type HealthServer struct {
 	mu        sync.RWMutex
 	scalers   map[string]RunnerCounter
 	metrics   map[string]MetricsProvider
+	states    map[string]connectionState
+}
+
+type connectionState struct {
+	Ready         bool
+	LastError     string
+	LastConnected time.Time
 }
 
 // ScaleSetStatus represents the status of a single scale set.
 type ScaleSetStatus struct {
-	Name    string         `json:"name"`
-	Idle    int            `json:"idle"`
-	Busy    int            `json:"busy"`
-	Metrics *MetricsStatus `json:"metrics,omitempty"`
+	Name          string         `json:"name"`
+	Ready         bool           `json:"ready"`
+	LastError     string         `json:"last_error,omitempty"`
+	LastConnected string         `json:"last_connected,omitempty"`
+	Idle          int            `json:"idle"`
+	Busy          int            `json:"busy"`
+	Metrics       *MetricsStatus `json:"metrics,omitempty"`
 }
 
 // MetricsStatus holds listener-level metrics for a scale set.
@@ -67,6 +78,7 @@ func NewHealthServer(port int, version string, logger *slog.Logger) *HealthServe
 		logger:    logger,
 		scalers:   make(map[string]RunnerCounter),
 		metrics:   make(map[string]MetricsProvider),
+		states:    make(map[string]connectionState),
 	}
 
 	mux := http.NewServeMux()
@@ -74,7 +86,11 @@ func NewHealthServer(port int, version string, logger *slog.Logger) *HealthServe
 	mux.HandleFunc("GET /readyz", h.handleReadyz)
 
 	h.server = &http.Server{
-		Handler: mux,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 	return h
 }
@@ -93,6 +109,7 @@ func (h *HealthServer) Shutdown(ctx context.Context) error {
 func (h *HealthServer) RegisterScaler(name string, s RunnerCounter) {
 	h.mu.Lock()
 	h.scalers[name] = s
+	h.states[name] = connectionState{}
 	h.mu.Unlock()
 }
 
@@ -101,6 +118,26 @@ func (h *HealthServer) UnregisterScaler(name string) {
 	h.mu.Lock()
 	delete(h.scalers, name)
 	delete(h.metrics, name)
+	delete(h.states, name)
+	h.mu.Unlock()
+}
+
+func (h *HealthServer) MarkConnected(name string) {
+	h.mu.Lock()
+	state := h.states[name]
+	state.Ready = true
+	state.LastError = ""
+	state.LastConnected = time.Now()
+	h.states[name] = state
+	h.mu.Unlock()
+}
+
+func (h *HealthServer) MarkDisconnected(name, reason string) {
+	h.mu.Lock()
+	state := h.states[name]
+	state.Ready = false
+	state.LastError = reason
+	h.states[name] = state
 	h.mu.Unlock()
 }
 
@@ -115,19 +152,38 @@ func (h *HealthServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 
+	status := "ok"
+	for name := range h.scalers {
+		if !h.states[name].Ready {
+			status = "degraded"
+			break
+		}
+	}
 	resp := HealthResponse{
-		Status:    "ok",
+		Status:    status,
 		Version:   h.version,
 		Uptime:    time.Since(h.startTime).Truncate(time.Second).String(),
 		ScaleSets: make([]ScaleSetStatus, 0, len(h.scalers)),
 	}
 
-	for name, s := range h.scalers {
+	names := make([]string, 0, len(h.scalers))
+	for name := range h.scalers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		s := h.scalers[name]
 		idle, busy := s.RunnerCounts()
 		ss := ScaleSetStatus{
 			Name: name,
 			Idle: idle,
 			Busy: busy,
+		}
+		state := h.states[name]
+		ss.Ready = state.Ready
+		ss.LastError = state.LastError
+		if !state.LastConnected.IsZero() {
+			ss.LastConnected = state.LastConnected.Format(time.RFC3339)
 		}
 		if m, ok := h.metrics[name]; ok {
 			snap := m.Snapshot()
@@ -155,6 +211,12 @@ func (h *HealthServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
 func (h *HealthServer) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	h.mu.RLock()
 	ready := len(h.scalers) > 0
+	for name := range h.scalers {
+		if !h.states[name].Ready {
+			ready = false
+			break
+		}
+	}
 	h.mu.RUnlock()
 
 	w.Header().Set("Content-Type", "application/json")

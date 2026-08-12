@@ -47,3 +47,15 @@ func loadConfig(cmd *cobra.Command) (config.Config, error) {
 	}
 	return cfg, nil
 }
+
+// resolveLogFilePath applies the documented config-relative default. A nil
+// LogFile means no explicit setting; a pointer to "" explicitly disables it.
+func resolveLogFilePath(cfg config.Config) (string, bool) {
+	if cfg.LogFile != nil {
+		return *cfg.LogFile, *cfg.LogFile != ""
+	}
+	if used := viper.ConfigFileUsed(); used != "" {
+		return filepath.Join(filepath.Dir(used), config.DefaultLogFileName), true
+	}
+	return config.DefaultLogFileName, true
+}

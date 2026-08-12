@@ -5,7 +5,9 @@
 
 log-level = "info"
 log-format = "text"
+health-address = "127.0.0.1"              # set 0.0.0.0 explicitly for remote monitoring
 health-port = 8080
+# log-file = "/var/log/runner/runner.log" # default: runner.log beside this config; "" disables
 
 # --- Defaults (inherited by all scale sets unless overridden) ---
 # A key set in a [[scaleset]] always wins, even with a zero/empty value:
@@ -40,7 +42,10 @@ dind = true
 # ]
 # shared-volume-ttl = "168h"               # delete shared-volume files older than this; 0 = disabled
 # shared-volume-cleanup-interval = "6h"    # how often to run the TTL sweep
-# prune = true                             # periodic prune of the shared daemon (assumes it is dedicated to runners); default: on
+# buildx-cleanup = true                    # daemon-wide; opt in only when dedicated to runners
+# buildx-cleanup-ttl = "24h"
+# buildx-cleanup-interval = "6h"
+# prune = true                             # daemon-wide; opt in only when dedicated to runners
 # prune-interval = "6h"                    # how often the runtime prune sweep runs
 # prune-ttl = "24h"                        # remove stopped containers and dangling images older than this
 # build-cache-max-age = "168h"             # prune build cache entries not used within this window

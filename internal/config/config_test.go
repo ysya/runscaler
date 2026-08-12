@@ -12,6 +12,7 @@ func validScaleSetConfig() ScaleSetConfig {
 		MaxRunners:      10,
 		MinRunners:      0,
 		Backend:         DefaultBackend,
+		RunnerImage:     DefaultRunnerImage,
 	}
 }
 
@@ -101,6 +102,30 @@ func TestScaleSetConfigValidate(t *testing.T) {
 	}
 }
 
+func TestScaleSetConfigValidateRejectsMalformedDockerPlatform(t *testing.T) {
+	c := validScaleSetConfig()
+	c.Docker.Platform = "linux"
+	if err := c.Validate(); err == nil || !contains(err.Error(), "platform") {
+		t.Fatalf("Validate() error = %v, want platform error", err)
+	}
+}
+
+func TestValidateGlobal(t *testing.T) {
+	valid := Config{LogLevel: "info", LogFormat: "text", HealthPort: 8080}
+	if err := valid.ValidateGlobal(); err != nil {
+		t.Fatalf("valid global config: %v", err)
+	}
+	for _, cfg := range []Config{
+		{LogLevel: "verbose", LogFormat: "text", HealthPort: 8080},
+		{LogLevel: "info", LogFormat: "yaml", HealthPort: 8080},
+		{LogLevel: "info", LogFormat: "text", HealthPort: 70000},
+	} {
+		if err := cfg.ValidateGlobal(); err == nil {
+			t.Fatalf("ValidateGlobal(%+v) succeeded, want error", cfg)
+		}
+	}
+}
+
 func TestBuildLabels(t *testing.T) {
 	t.Run("custom labels", func(t *testing.T) {
 		labels := BuildLabels("my-runners", []string{"linux", "x64", "docker"})
@@ -185,7 +210,16 @@ func TestScaleSetConfigValidate_TartBackend(t *testing.T) {
 			modify: func(c *ScaleSetConfig) {
 				c.Backend = "tart"
 				c.RunnerImage = "macos-base:latest"
+				c.MaxRunners = 2
 			},
+		},
+		{
+			name: "tart exceeds host limit",
+			modify: func(c *ScaleSetConfig) {
+				c.Backend = "tart"
+				c.RunnerImage = "macos-base:latest"
+			},
+			wantErr: "max-runners must be <= 2",
 		},
 		{
 			name: "tart missing image",
@@ -387,6 +421,23 @@ func TestIsTartCacheCleanupEnabled(t *testing.T) {
 	ss.Tart.CacheCleanup = &fa
 	if ss.IsTartCacheCleanupEnabled() {
 		t.Errorf("explicit false should be disabled")
+	}
+}
+
+func TestDaemonWideDockerCleanupDefaultsOff(t *testing.T) {
+	var ss ScaleSetConfig
+	if ss.IsBuildxCleanupEnabled() {
+		t.Error("buildx cleanup must be opt-in")
+	}
+	if ss.IsDockerPruneEnabled() {
+		t.Error("Docker prune must be opt-in")
+	}
+
+	on := true
+	ss.Docker.BuildxCleanup = &on
+	ss.Docker.Prune = &on
+	if !ss.IsBuildxCleanupEnabled() || !ss.IsDockerPruneEnabled() {
+		t.Error("explicit cleanup opt-in was ignored")
 	}
 }
 

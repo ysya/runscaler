@@ -9,7 +9,7 @@ import (
 	"runtime"
 	"time"
 
-	dockerclient "github.com/docker/docker/client"
+	dockerclient "github.com/moby/moby/client"
 	"github.com/spf13/cobra"
 )
 
@@ -202,17 +202,17 @@ func migrateService(user bool) (bool, error) {
 // migrateVolume removes the legacy shared docker volume. Best-effort; returns
 // whether it removed anything.
 func migrateVolume(ctx context.Context) bool {
-	client, err := dockerclient.NewClientWithOpts(dockerclient.FromEnv, dockerclient.WithAPIVersionNegotiation())
+	client, err := dockerclient.New(dockerclient.FromEnv, dockerclient.WithAPIVersionNegotiation())
 	if err != nil {
 		return false
 	}
 	defer client.Close()
-	if _, err := client.VolumeInspect(ctx, legacySharedVolume); err != nil {
+	if _, err := client.VolumeInspect(ctx, legacySharedVolume, dockerclient.VolumeInspectOptions{}); err != nil {
 		return false
 	}
 	rmCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	if err := client.VolumeRemove(rmCtx, legacySharedVolume, true); err != nil {
+	if _, err := client.VolumeRemove(rmCtx, legacySharedVolume, dockerclient.VolumeRemoveOptions{Force: true}); err != nil {
 		warnLegacy("found legacy volume %s but could not remove it: %v", legacySharedVolume, err)
 		return false
 	}

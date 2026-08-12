@@ -16,6 +16,7 @@ const (
 	DefaultLogLevel      = "info"
 	DefaultLogFormat     = "text"
 	DefaultHealthPort    = 8080
+	DefaultHealthAddress = "127.0.0.1"
 	DefaultSystemName    = "dockerscaleset"
 
 	// DefaultSharedVolumeName is the named Docker volume backing the
@@ -51,18 +52,14 @@ const (
 	// GitHub's supported runner versions should override this to false.
 	DefaultDisableUpdate = true
 
-	// DefaultBuildxCleanup enables orphaned buildx builder cleanup by default.
-	// It acts as a safety net: `docker buildx create` builders (e.g. from
-	// docker/setup-buildx-action) leak on persistent hosts sharing one daemon,
-	// each keeping a multi-GB state volume, and most users never notice.
-	DefaultBuildxCleanup = true
+	// DefaultBuildxCleanup is disabled because buildx builders are daemon-global
+	// and may belong to workloads outside runner. Dedicated daemons can opt in.
+	DefaultBuildxCleanup = false
 
-	// DefaultDockerPrune enables the periodic Docker runtime prune by default.
-	// It acts as a safety net: with DooD, jobs create images, containers, and
-	// build cache directly on the shared host daemon, and an exit-time prune
-	// alone never reclaims disk while the process runs — long-lived hosts have
-	// filled up repeatedly. Assumes the daemon is dedicated to runners.
-	DefaultDockerPrune = true
+	// DefaultDockerPrune is disabled because pruning acts on the entire daemon,
+	// including objects not created by runner. Operators with a dedicated
+	// runner daemon can opt in explicitly.
+	DefaultDockerPrune = false
 
 	// DefaultDockerPruneInterval is the period between Docker runtime prune
 	// sweeps when the prune is enabled and no explicit interval is set.

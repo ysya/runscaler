@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"image/color"
+	"io"
 	"log/slog"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -25,10 +27,12 @@ import (
 // when no [[scaleset]] entries exist.
 type Config struct {
 	// Global settings (not inherited by scale sets)
-	LogLevel   string `mapstructure:"log-level"`
-	LogFormat  string `mapstructure:"log-format"`
-	HealthPort int    `mapstructure:"health-port"`
-	DryRun     bool   `mapstructure:"dry-run"`
+	LogLevel      string  `mapstructure:"log-level"`
+	LogFormat     string  `mapstructure:"log-format"`
+	HealthPort    int     `mapstructure:"health-port"`
+	HealthAddress string  `mapstructure:"health-address"`
+	DryRun        bool    `mapstructure:"dry-run"`
+	LogFile       *string `mapstructure:"log-file"`
 
 	// Default values for scale sets + single-mode fields.
 	// Squashed so TOML keys (url, name, backend, etc.) stay at the top level.
@@ -121,9 +125,8 @@ type DockerConfig struct {
 	SharedVolumeCleanupInterval time.Duration `mapstructure:"shared-volume-cleanup-interval"`
 
 	// BuildxCleanup enables automatic removal of orphaned buildx BuildKit
-	// builder containers and their state volumes. Pointer: nil = inherit
-	// default (true). Disable (false) only if you run a persistent builder
-	// via `keep-state` + a fixed builder name, which this sweep would reclaim.
+	// builder containers and their state volumes. Pointer: nil = inherit the
+	// safe default (false). Enable only on a daemon dedicated to runners.
 	BuildxCleanup *bool `mapstructure:"buildx-cleanup"`
 	// BuildxCleanupTTL removes buildx builders older than this duration.
 	// Defaults to DefaultBuildxCleanupTTL when unset. Set generously above
@@ -135,8 +138,8 @@ type DockerConfig struct {
 
 	// Prune enables the periodic runtime prune of the shared Docker daemon:
 	// stopped containers and dangling images older than PruneTTL, plus
-	// age/budget-based build cache retention. Pointer: nil = inherit default
-	// (true). Like buildx-cleanup, this assumes the daemon is dedicated to
+	// age/budget-based build cache retention. Pointer: nil = inherit the safe
+	// default (false). Like buildx-cleanup, this assumes the daemon is dedicated to
 	// runners: stopped containers and dangling images older than the TTL are
 	// treated as garbage regardless of what created them.
 	Prune *bool `mapstructure:"prune"`
@@ -177,6 +180,7 @@ func (dc DockerConfig) ParseCacheVolumes() ([]CacheVolumeMount, error) {
 		return nil, nil
 	}
 	mounts := make([]CacheVolumeMount, 0, len(dc.CacheVolumes))
+	paths := make(map[string]bool)
 	for _, entry := range dc.CacheVolumes {
 		name, path, ok := strings.Cut(entry, ":")
 		if !ok || name == "" || path == "" {
@@ -185,9 +189,13 @@ func (dc DockerConfig) ParseCacheVolumes() ([]CacheVolumeMount, error) {
 		if !volumeNameRe.MatchString(name) {
 			return nil, fmt.Errorf("cache-volumes entry %q: invalid volume name %q", entry, name)
 		}
-		if !strings.HasPrefix(path, "/") {
+		if !filepath.IsAbs(path) || filepath.Clean(path) != path || path == "/" {
 			return nil, fmt.Errorf("cache-volumes entry %q: container path %q must be absolute", entry, path)
 		}
+		if paths[path] {
+			return nil, fmt.Errorf("cache-volumes contains duplicate container path %q", path)
+		}
+		paths[path] = true
 		mounts = append(mounts, CacheVolumeMount{Volume: name, Path: path})
 	}
 	return mounts, nil
@@ -247,6 +255,9 @@ func (ss *ScaleSetConfig) applyDefaults() {
 	if ss.Backend == "" {
 		ss.Backend = DefaultBackend
 	}
+	if ss.Backend == DefaultBackend && ss.Docker.Socket == "" {
+		ss.Docker.Socket = DefaultDockerSocket
+	}
 	if ss.Backend == "tart" && ss.Tart.RunnerDir == "" {
 		ss.Tart.RunnerDir = DefaultTartRunnerDir
 	}
@@ -275,7 +286,7 @@ func (ss *ScaleSetConfig) IsTart() bool {
 }
 
 // IsBuildxCleanupEnabled reports whether orphaned buildx builder cleanup is
-// enabled (default true unless explicitly disabled).
+// enabled (default false unless explicitly enabled).
 func (ss *ScaleSetConfig) IsBuildxCleanupEnabled() bool {
 	if ss.Docker.BuildxCleanup != nil {
 		return *ss.Docker.BuildxCleanup
@@ -293,7 +304,7 @@ func (ss *ScaleSetConfig) IsUpdateDisabled() bool {
 }
 
 // IsDockerPruneEnabled reports whether the periodic Docker runtime prune is
-// enabled (default true unless explicitly disabled).
+// enabled (default false unless explicitly enabled).
 func (ss *ScaleSetConfig) IsDockerPruneEnabled() bool {
 	if ss.Docker.Prune != nil {
 		return *ss.Docker.Prune
@@ -337,8 +348,12 @@ func (ss *ScaleSetConfig) Validate() error {
 	if ss.RegistrationURL == "" {
 		return fmt.Errorf("registration URL (url) is required")
 	}
-	if _, err := url.ParseRequestURI(ss.RegistrationURL); err != nil {
+	parsedURL, err := url.ParseRequestURI(ss.RegistrationURL)
+	if err != nil {
 		return fmt.Errorf("invalid registration URL: %w", err)
+	}
+	if parsedURL.Scheme != "https" || parsedURL.Host == "" || parsedURL.User != nil {
+		return fmt.Errorf("registration URL must be an HTTPS URL without embedded credentials")
 	}
 	if ss.ScaleSetName == "" {
 		return fmt.Errorf("scale set name (name) is required")
@@ -355,20 +370,68 @@ func (ss *ScaleSetConfig) Validate() error {
 	if ss.MinRunners > ss.MaxRunners {
 		return fmt.Errorf("min-runners (%d) must be <= max-runners (%d)", ss.MinRunners, ss.MaxRunners)
 	}
+	if ss.RunnerImage == "" {
+		return fmt.Errorf("runner-image is required")
+	}
 
 	switch ss.Backend {
 	case DefaultBackend:
-		if _, err := ss.Docker.ParseCacheVolumes(); err != nil {
+		if ss.Docker.Platform != "" {
+			parts := strings.Split(ss.Docker.Platform, "/")
+			if (len(parts) != 2 && len(parts) != 3) || parts[0] == "" || parts[1] == "" || (len(parts) == 3 && parts[2] == "") {
+				return fmt.Errorf("docker platform must be os/arch or os/arch/variant")
+			}
+		}
+		mounts, err := ss.Docker.ParseCacheVolumes()
+		if err != nil {
 			return err
 		}
+		if ss.Docker.Memory < 0 || ss.Docker.CPU < 0 || ss.Docker.PidsLimit < 0 || ss.Docker.BuildCacheBudgetGB < 0 {
+			return fmt.Errorf("docker resource limits and cache budget must be >= 0")
+		}
+		if ss.Docker.SharedVolumeName != "" && !volumeNameRe.MatchString(ss.Docker.SharedVolumeName) {
+			return fmt.Errorf("invalid shared-volume-name %q", ss.Docker.SharedVolumeName)
+		}
+		if ss.Docker.SharedVolume != "" {
+			if !filepath.IsAbs(ss.Docker.SharedVolume) || filepath.Clean(ss.Docker.SharedVolume) != ss.Docker.SharedVolume || ss.Docker.SharedVolume == "/" {
+				return fmt.Errorf("shared-volume must be a clean absolute container path other than /")
+			}
+			for _, mount := range mounts {
+				if mount.Path == ss.Docker.SharedVolume {
+					return fmt.Errorf("shared-volume conflicts with cache-volumes path %q", mount.Path)
+				}
+			}
+		}
 	case "tart":
-		if ss.RunnerImage == "" {
-			return fmt.Errorf("runner-image is required when backend is \"tart\"")
+		if ss.MaxRunners > 2 {
+			return fmt.Errorf("max-runners must be <= 2 for the Tart backend (Apple host limit)")
+		}
+		if ss.Tart.PoolSize < 0 || ss.Tart.PoolSize > ss.MaxRunners {
+			return fmt.Errorf("tart pool-size must be between 0 and max-runners")
 		}
 	default:
 		return fmt.Errorf("unsupported backend %q (must be %q or \"tart\")", ss.Backend, DefaultBackend)
 	}
 
+	return nil
+}
+
+// ValidateGlobal checks process-wide settings that are not part of any scale
+// set and therefore would otherwise bypass ScaleSetConfig.Validate.
+func (c *Config) ValidateGlobal() error {
+	switch strings.ToLower(c.LogLevel) {
+	case "debug", "info", "warn", "error":
+	default:
+		return fmt.Errorf("log-level must be debug, info, warn, or error")
+	}
+	switch strings.ToLower(c.LogFormat) {
+	case "text", "json":
+	default:
+		return fmt.Errorf("log-format must be text or json")
+	}
+	if c.HealthPort < 0 || c.HealthPort > 65535 {
+		return fmt.Errorf("health-port must be between 0 and 65535")
+	}
 	return nil
 }
 
@@ -391,6 +454,12 @@ func parseLogLevel(level string) charmlog.Level {
 // NewLogger creates a structured logger with the given level and format,
 // and sets it as the process-wide default.
 func NewLogger(level, format string) *slog.Logger {
+	return NewLoggerWithWriter(level, format, nil)
+}
+
+// NewLoggerWithWriter creates a process logger that tees to file when one is
+// supplied. The writer may be shared safely with scale-set loggers.
+func NewLoggerWithWriter(level, format string, file io.Writer) *slog.Logger {
 	opts := charmlog.Options{
 		ReportTimestamp: true,
 		TimeFormat:      time.DateTime,
@@ -401,7 +470,7 @@ func NewLogger(level, format string) *slog.Logger {
 		opts.Formatter = charmlog.JSONFormatter
 	}
 
-	handler := charmlog.NewWithOptions(os.Stdout, opts)
+	handler := charmlog.NewWithOptions(outputWriter(file), opts)
 	logger := slog.New(&demoteHandler{inner: handler, demote: demoteMessages})
 	slog.SetDefault(logger)
 	return logger
@@ -421,6 +490,10 @@ var scaleSetColors = []color.Color{
 // NewScaleSetLogger creates a logger with a colored prefix for the given scale set.
 // The color is determined by the index, cycling through the palette.
 func NewScaleSetLogger(level, format string, name string, index int) *slog.Logger {
+	return NewScaleSetLoggerWithWriter(level, format, name, index, nil)
+}
+
+func NewScaleSetLoggerWithWriter(level, format string, name string, index int, file io.Writer) *slog.Logger {
 	opts := charmlog.Options{
 		ReportTimestamp: true,
 		TimeFormat:      time.DateTime,
@@ -432,7 +505,7 @@ func NewScaleSetLogger(level, format string, name string, index int) *slog.Logge
 		opts.Formatter = charmlog.JSONFormatter
 	}
 
-	handler := charmlog.NewWithOptions(os.Stdout, opts)
+	handler := charmlog.NewWithOptions(outputWriter(file), opts)
 
 	// Apply color only for text format (not JSON)
 	if strings.ToLower(format) != "json" {

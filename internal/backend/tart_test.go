@@ -78,16 +78,12 @@ func (m *mockCommandRunner) callCount(prefix string) int {
 }
 
 func newTestTartBackend(cmd *mockCommandRunner) *TartBackend {
-	slots := make(chan int, 10)
-	for i := 0; i < 10; i++ {
-		slots <- i
-	}
 	return &TartBackend{
-		baseImage: "macos-base:latest",
-		runnerDir: "/Users/admin/actions-runner",
-		logger:    slog.New(slog.DiscardHandler),
-		cmd:       cmd,
-		vmSlots:   slots,
+		baseImage:   "macos-base:latest",
+		runnerDir:   "/Users/admin/actions-runner",
+		logger:      slog.New(slog.DiscardHandler),
+		cmd:         cmd,
+		coordinator: NewTartHostCoordinator(10),
 	}
 }
 
@@ -382,5 +378,21 @@ func TestRunnerStartCmd_PassesJITConfigBeforeDeletingIt(t *testing.T) {
 		if _, err := os.Stat(jitPath); !os.IsNotExist(err) {
 			t.Errorf("iteration %d: JIT config still on disk after startup (stat err = %v)", i, err)
 		}
+	}
+}
+
+func TestWriteJITCmd_QuotesPayload(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "jit config")
+	want := "payload\nJITEOF\nprintf injected\n'quoted'"
+	cmd := exec.Command("sh", "-c", writeJITCmd(path, want))
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("write command failed: %v (%s)", err, out)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != want {
+		t.Fatalf("written JIT config = %q, want %q", got, want)
 	}
 }

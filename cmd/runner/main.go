@@ -4,22 +4,24 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/actions/scaleset"
 	"github.com/actions/scaleset/listener"
-	"github.com/docker/docker/api/types/image"
-	dockerclient "github.com/docker/docker/client"
-	"github.com/docker/docker/pkg/jsonmessage"
 	"github.com/google/uuid"
+	dockerclient "github.com/moby/moby/client"
+	"github.com/moby/moby/client/pkg/jsonmessage"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"golang.org/x/term"
@@ -27,6 +29,7 @@ import (
 	"github.com/ysya/runscaler/internal/backend"
 	"github.com/ysya/runscaler/internal/config"
 	"github.com/ysya/runscaler/internal/health"
+	runnerlock "github.com/ysya/runscaler/internal/lock"
 	"github.com/ysya/runscaler/internal/metrics"
 	"github.com/ysya/runscaler/internal/scaler"
 	"github.com/ysya/runscaler/internal/versioncheck"
@@ -76,6 +79,7 @@ func init() {
 	// Operational
 	flags.Bool("dry-run", false, "Validate everything without starting listeners")
 	flags.Int("health-port", config.DefaultHealthPort, "Health check HTTP port (0 to disable)")
+	flags.String("health-address", config.DefaultHealthAddress, "Health check listen address")
 
 	// Bind flags to viper keys explicitly.
 	// Flat keys (flag name == viper key):
@@ -92,6 +96,7 @@ func init() {
 	viper.BindPFlag("log-format", flags.Lookup("log-format"))
 	viper.BindPFlag("dry-run", flags.Lookup("dry-run"))
 	viper.BindPFlag("health-port", flags.Lookup("health-port"))
+	viper.BindPFlag("health-address", flags.Lookup("health-address"))
 
 	// Nested keys (flag name → nested viper key for backend sub-structs):
 	viper.BindPFlag("docker.socket", flags.Lookup("docker-socket"))
@@ -124,6 +129,19 @@ var startScaling = func(cmd *cobra.Command) error {
 	if err != nil {
 		return err
 	}
+
+	releaseLock, err := runnerlock.Acquire(runnerlock.DefaultPath, runnerlock.Info{
+		PID:        os.Getpid(),
+		StartedAt:  time.Now(),
+		ConfigPath: viper.ConfigFileUsed(),
+	})
+	if err != nil {
+		if errors.Is(err, runnerlock.ErrAlreadyRunning) {
+			return fmt.Errorf("%w\n\n  Only one runner may run per machine.\n  To manage multiple organizations, use multiple [[scaleset]] entries in one config", err)
+		}
+		return err
+	}
+	defer releaseLock()
 
 	ctx, cancel := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -185,7 +203,20 @@ jobs — scaling runners up and down until interrupted.`,
 }
 
 func run(ctx context.Context, cfg config.Config) error {
-	logger := config.NewLogger(cfg.LogLevel, cfg.LogFormat)
+	if err := cfg.ValidateGlobal(); err != nil {
+		return fmt.Errorf("invalid global configuration: %w", err)
+	}
+	var logFile *config.LogFileWriter
+	if path, enabled := resolveLogFilePath(cfg); enabled {
+		var err error
+		logFile, err = config.OpenLogFile(path)
+		if err != nil {
+			fmt.Fprintf(os.Stdout, "Warning: cannot open log file %s; continuing with stdout only: %v\n", path, err)
+		} else {
+			defer logFile.Close()
+		}
+	}
+	logger := config.NewLoggerWithWriter(cfg.LogLevel, cfg.LogFormat, logFile)
 
 	// Non-fatal config diagnostics (unknown keys, mixed single/multi mode).
 	// Warn only — a self-updated deployment with an older config must keep
@@ -211,47 +242,73 @@ func run(ctx context.Context, cfg config.Config) error {
 			needsDocker = true
 		}
 	}
+	if err := validateScaleSetCollection(scaleSets); err != nil {
+		return err
+	}
 
-	// Create shared Docker client if any scaleset uses Docker backend
-	var dockerClient *dockerclient.Client
+	// Create one Docker client per configured socket. Per-scale-set socket
+	// overrides are first-class; silently routing them all through the top-level
+	// default can launch privileged jobs on the wrong daemon.
+	dockerClients := make(map[string]*dockerclient.Client)
+	defer func() {
+		for _, client := range dockerClients {
+			_ = client.Close()
+		}
+	}()
 	if needsDocker {
-		var err error
-		dockerClient, err = dockerclient.NewClientWithOpts(
-			dockerclient.FromEnv,
-			dockerclient.WithHost("unix://"+cfg.Defaults.Docker.Socket),
-			dockerclient.WithAPIVersionNegotiation(),
-		)
-		if err != nil {
-			return fmt.Errorf("failed to create docker client: %w", err)
+		for _, ss := range scaleSets {
+			if ss.IsTart() || dockerClients[ss.Docker.Socket] != nil {
+				continue
+			}
+			client, err := dockerclient.New(
+				dockerclient.FromEnv,
+				dockerclient.WithHost("unix://"+ss.Docker.Socket),
+				dockerclient.WithAPIVersionNegotiation(),
+			)
+			if err != nil {
+				return fmt.Errorf("failed to create Docker client for %s: %w", ss.Docker.Socket, err)
+			}
+			if _, err := client.Ping(ctx, dockerclient.PingOptions{NegotiateAPIVersion: true}); err != nil {
+				client.Close()
+				return fmt.Errorf("cannot connect to Docker at %s: %w\n\n"+
+					"  Possible fixes:\n"+
+					"  1. Ensure Docker is running\n"+
+					"  2. Add your user to the docker group: sudo usermod -aG docker $USER\n"+
+					"  3. Re-login or run: newgrp docker\n"+
+					"  4. Or check the docker socket path in your config",
+					ss.Docker.Socket, err)
+			}
+			dockerClients[ss.Docker.Socket] = client
 		}
-		defer dockerClient.Close()
-
-		if _, err := dockerClient.Ping(ctx); err != nil {
-			return fmt.Errorf("cannot connect to Docker at %s: %w\n\n"+
-				"  Possible fixes:\n"+
-				"  1. Ensure Docker is running\n"+
-				"  2. Add your user to the docker group: sudo usermod -aG docker $USER\n"+
-				"  3. Re-login or run: newgrp docker\n"+
-				"  4. Or check the docker socket path in your config",
-				cfg.Defaults.Docker.Socket, err)
-		}
-
-		// Pull unique runner images for Docker scalesets
+		// Pull unique runner images on each target Docker daemon.
 		pulled := make(map[string]bool)
 		for _, ss := range scaleSets {
-			pullKey := ss.RunnerImage + "|" + ss.Docker.Platform
+			pullKey := ss.Docker.Socket + "|" + ss.RunnerImage + "|" + ss.Docker.Platform
 			if ss.IsTart() || pulled[pullKey] {
 				continue
 			}
 			logger.Info("Pulling runner image", slog.String("image", ss.RunnerImage), slog.String("platform", ss.Docker.Platform))
 			pullCtx, pullCancel := context.WithTimeout(ctx, 30*time.Minute)
-			pull, err := dockerClient.ImagePull(pullCtx, ss.RunnerImage, image.PullOptions{Platform: ss.Docker.Platform})
+			pullOptions := dockerclient.ImagePullOptions{}
+			if ss.Docker.Platform != "" {
+				parts := strings.SplitN(ss.Docker.Platform, "/", 3)
+				platform := ocispec.Platform{OS: parts[0], Architecture: parts[1]}
+				if len(parts) == 3 {
+					platform.Variant = parts[2]
+				}
+				pullOptions.Platforms = []ocispec.Platform{platform}
+			}
+			pull, err := dockerClients[ss.Docker.Socket].ImagePull(pullCtx, ss.RunnerImage, pullOptions)
 			if err != nil {
 				pullCancel()
 				return fmt.Errorf("failed to pull runner image %s: %w", ss.RunnerImage, err)
 			}
 			fd := os.Stdout.Fd()
-			pullErr := jsonmessage.DisplayJSONMessagesStream(pull, os.Stdout, fd, term.IsTerminal(int(fd)), nil)
+			pullOutput := io.Writer(os.Stdout)
+			if logFile != nil {
+				pullOutput = io.MultiWriter(os.Stdout, logFile)
+			}
+			pullErr := jsonmessage.DisplayJSONMessagesStream(pull, pullOutput, fd, term.IsTerminal(int(fd)), nil)
 			pull.Close()
 			pullCancel()
 			if pullErr != nil {
@@ -261,8 +318,12 @@ func run(ctx context.Context, cfg config.Config) error {
 		}
 	}
 
+	// One coordinator is shared by every Tart scale set so MAC slots and the
+	// Apple two-VM limit are host-wide rather than reset per scale set.
+	var tartCoordinator *backend.TartHostCoordinator
 	// Verify Tart binary exists if any scaleset uses Tart backend
 	if needsTart {
+		tartCoordinator = backend.NewTartHostCoordinator(2)
 		if _, err := exec.LookPath("tart"); err != nil {
 			return fmt.Errorf("tart binary not found in PATH: %w\n\n"+
 				"  Install Tart: brew install cirruslabs/cli/tart", err)
@@ -275,7 +336,7 @@ func run(ctx context.Context, cfg config.Config) error {
 			if !ss.IsTart() || pulled[ss.RunnerImage] {
 				continue
 			}
-			tb := backend.NewTartBackend(ss, logger)
+			tb := backend.NewTartBackendWithCoordinator(ss, logger, tartCoordinator)
 			if err := tb.EnsureImage(ctx); err != nil {
 				return err
 			}
@@ -304,7 +365,7 @@ func run(ctx context.Context, cfg config.Config) error {
 	var healthServer *health.HealthServer
 	if cfg.HealthPort > 0 {
 		healthServer = health.NewHealthServer(cfg.HealthPort, version, logger)
-		ln, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.HealthPort))
+		ln, err := net.Listen("tcp", net.JoinHostPort(cfg.HealthAddress, fmt.Sprintf("%d", cfg.HealthPort)))
 		if err != nil {
 			return fmt.Errorf("failed to start health server on port %d: %w", cfg.HealthPort, err)
 		}
@@ -314,22 +375,18 @@ func run(ctx context.Context, cfg config.Config) error {
 			}
 		}()
 		defer func() { _ = healthServer.Shutdown(context.WithoutCancel(ctx)) }()
-		logger.Info("Health check server started", slog.Int("port", cfg.HealthPort))
+		logger.Info("Health check server started", slog.String("address", cfg.HealthAddress), slog.Int("port", cfg.HealthPort))
 	}
 
-	// Start periodic shared-volume TTL cleanup (one sweeper per unique
-	// shared-volume name, so scalesets sharing a volume share a sweeper
-	// and won't race).
-	startSharedVolumeCleanup(ctx, dockerClient, scaleSets, logger)
-
-	// Start periodic buildx builder cleanup (orphaned BuildKit builders are
-	// global to the shared Docker daemon, so one sweeper covers all scalesets).
-	startBuildxCleanup(ctx, dockerClient, scaleSets, logger)
-
-	// Start periodic Docker runtime prune (stopped containers, dangling
-	// images, and build cache are global to the shared daemon, so one
-	// sweeper covers all scalesets).
-	startDockerPrune(ctx, dockerClient, scaleSets, logger)
+	// Cleanup ownership is per daemon. Group scale sets so distinct sockets
+	// never share a client or a global-daemon sweeper.
+	dockerSets := groupDockerScaleSets(scaleSets)
+	for socket, sets := range dockerSets {
+		client := dockerClients[socket]
+		startSharedVolumeCleanup(ctx, client, sets, logger)
+		startBuildxCleanup(ctx, client, sets, logger)
+		startDockerPrune(ctx, client, sets, logger)
+	}
 
 	// Start periodic Tart cache cleanup (one sweeper per unique TART_HOME, so
 	// scalesets sharing a TART_HOME share a sweeper and won't race).
@@ -354,14 +411,17 @@ func run(ctx context.Context, cfg config.Config) error {
 	// Run each scale set in its own goroutine
 	var wg sync.WaitGroup
 	errs := make(chan error, len(scaleSets))
+	runCtx, cancelRun := context.WithCancel(ctx)
+	defer cancelRun()
 
 	for i, ss := range scaleSets {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			ssLogger := config.NewScaleSetLogger(cfg.LogLevel, cfg.LogFormat, ss.ScaleSetName, i)
-			if err := runScaleSet(ctx, ss, dockerClient, ssLogger, healthServer); err != nil {
+			ssLogger := config.NewScaleSetLoggerWithWriter(cfg.LogLevel, cfg.LogFormat, ss.ScaleSetName, i, logFile)
+			if err := runScaleSet(runCtx, ss, dockerClients[ss.Docker.Socket], ssLogger, healthServer, tartCoordinator); err != nil {
 				errs <- fmt.Errorf("scaleset %q: %w", ss.ScaleSetName, err)
+				cancelRun()
 			}
 		}()
 	}
@@ -372,33 +432,27 @@ func run(ctx context.Context, cfg config.Config) error {
 	// Clean up shared Docker resources once, after all Docker-backed scale
 	// sets have finished shutting down. Doing this per-backend races with
 	// container removal and concurrent prune operations.
-	if needsDocker && dockerClient != nil {
-		// Unique named volumes backing the shared-volume mounts of Docker
-		// scalesets; each is removed at exit. Cache volumes are persistent
-		// and deliberately survive.
-		var volumeNames []string
-		seenVolumes := make(map[string]bool)
-		for _, ss := range scaleSets {
-			if ss.IsTart() || ss.Docker.SharedVolume == "" {
-				continue
+	if needsDocker {
+		for socket, sets := range dockerSets {
+			dockerClient := dockerClients[socket]
+			// Unique named volumes backing the shared-volume mounts of Docker
+			// scalesets; each is removed at exit. Cache volumes are persistent
+			// and deliberately survive.
+			var volumeNames []string
+			seenVolumes := make(map[string]bool)
+			for _, ss := range sets {
+				if ss.IsTart() || ss.Docker.SharedVolume == "" {
+					continue
+				}
+				if name := ss.SharedVolumeName(); !seenVolumes[name] {
+					seenVolumes[name] = true
+					volumeNames = append(volumeNames, name)
+				}
 			}
-			if name := ss.SharedVolumeName(); !seenVolumes[name] {
-				seenVolumes[name] = true
-				volumeNames = append(volumeNames, name)
-			}
+			// Build cache belongs to the daemon, not this process. Retention is
+			// only performed by the explicit runtime-prune setting.
+			backend.CleanupSharedDocker(context.WithoutCancel(ctx), dockerClient, volumeNames, false, logger)
 		}
-		// When the runtime prune sweep is enabled it owns build-cache
-		// retention (age/budget), so exit must not wipe a cache the next
-		// process run would reuse — self-update restarts previously
-		// destroyed all build cache.
-		wipeBuildCache := true
-		for _, ss := range scaleSets {
-			if !ss.IsTart() && ss.IsDockerPruneEnabled() {
-				wipeBuildCache = false
-				break
-			}
-		}
-		backend.CleanupSharedDocker(context.WithoutCancel(ctx), dockerClient, volumeNames, wipeBuildCache, logger)
 	}
 
 	// Collect errors
@@ -413,7 +467,7 @@ func run(ctx context.Context, cfg config.Config) error {
 }
 
 // runScaleSet manages the lifecycle of a single scale set.
-func runScaleSet(ctx context.Context, ss config.ScaleSetConfig, dockerClient *dockerclient.Client, logger *slog.Logger, h *health.HealthServer) error {
+func runScaleSet(ctx context.Context, ss config.ScaleSetConfig, dockerClient *dockerclient.Client, logger *slog.Logger, h *health.HealthServer, tartCoordinator *backend.TartHostCoordinator) error {
 	// Create scaleset client
 	scalesetClient, err := config.NewScalesetClient(ss.RegistrationURL, ss.Token, logger)
 	if err != nil {
@@ -444,7 +498,10 @@ func runScaleSet(ctx context.Context, ss config.ScaleSetConfig, dockerClient *do
 	}
 
 	scaleSet, err := scalesetClient.GetRunnerScaleSet(ctx, runnerGroupID, ss.ScaleSetName)
-	if err != nil || scaleSet == nil {
+	if err != nil {
+		return fmt.Errorf("failed to get runner scale set: %w", err)
+	}
+	if scaleSet == nil {
 		scaleSet, err = scalesetClient.CreateRunnerScaleSet(ctx, desired)
 		if err != nil {
 			return fmt.Errorf("failed to create runner scale set: %w", err)
@@ -480,7 +537,7 @@ func runScaleSet(ctx context.Context, ss config.ScaleSetConfig, dockerClient *do
 	// Create backend based on config (persists across reconnections)
 	var b backend.RunnerBackend
 	if ss.IsTart() {
-		tb := backend.NewTartBackend(ss, logger)
+		tb := backend.NewTartBackendWithCoordinator(ss, logger, tartCoordinator)
 		tb.StartPool(ctx) // starts warm pool if tart-pool-size > 0
 		b = tb
 	} else {
@@ -525,11 +582,21 @@ func runScaleSet(ctx context.Context, ss config.ScaleSetConfig, dockerClient *do
 		)
 
 		listenStart := time.Now()
-		listenErr := listenOnce(ctx, scalesetClient, scaleSet.ID, sessionID, ss.MaxRunners, s, recorder, logger)
-		if listenErr == nil || ctx.Err() != nil || errors.Is(listenErr, context.Canceled) {
-			// Clean exit: either listener finished normally or the parent
-			// context was canceled (user sent SIGTERM/SIGINT).
+		if h != nil {
+			h.MarkDisconnected(ss.ScaleSetName, "connecting")
+		}
+		listenErr := listenOnce(ctx, scalesetClient, scaleSet.ID, sessionID, ss.MaxRunners, s, recorder, logger, func() {
+			if h != nil {
+				h.MarkConnected(ss.ScaleSetName)
+			}
+		})
+		if ctx.Err() != nil || errors.Is(listenErr, context.Canceled) {
+			// Clean exit: the parent context was canceled (SIGTERM/SIGINT or
+			// another scale set encountered a permanent failure).
 			return nil
+		}
+		if listenErr == nil {
+			return fmt.Errorf("listener stopped unexpectedly")
 		}
 
 		// If the listener ran for a meaningful period, the disconnect is
@@ -542,6 +609,9 @@ func runScaleSet(ctx context.Context, ss config.ScaleSetConfig, dockerClient *do
 			slog.Any("error", listenErr),
 			slog.Duration("backoff", backoff),
 		)
+		if h != nil {
+			h.MarkDisconnected(ss.ScaleSetName, listenErr.Error())
+		}
 
 		select {
 		case <-ctx.Done():
@@ -550,6 +620,39 @@ func runScaleSet(ctx context.Context, ss config.ScaleSetConfig, dockerClient *do
 		}
 		backoff = min(backoff*2, maxBackoff)
 	}
+}
+
+func groupDockerScaleSets(scaleSets []config.ScaleSetConfig) map[string][]config.ScaleSetConfig {
+	grouped := make(map[string][]config.ScaleSetConfig)
+	for _, ss := range scaleSets {
+		if !ss.IsTart() {
+			grouped[ss.Docker.Socket] = append(grouped[ss.Docker.Socket], ss)
+		}
+	}
+	return grouped
+}
+
+func validateScaleSetCollection(scaleSets []config.ScaleSetConfig) error {
+	names := make(map[string]int)
+	totalTartMin := 0
+	totalTartPool := 0
+	for i, ss := range scaleSets {
+		if prior, ok := names[ss.ScaleSetName]; ok {
+			return fmt.Errorf("scaleset[%d] %q duplicates scaleset[%d] name; names must be unique for lifecycle and health tracking", i, ss.ScaleSetName, prior)
+		}
+		names[ss.ScaleSetName] = i
+		if ss.IsTart() {
+			totalTartMin += ss.MinRunners
+			totalTartPool += ss.Tart.PoolSize
+		}
+	}
+	if totalTartMin > 2 {
+		return fmt.Errorf("combined Tart min-runners is %d, exceeding the host-wide macOS VM limit of 2", totalTartMin)
+	}
+	if totalTartPool > 2 {
+		return fmt.Errorf("combined Tart pool-size is %d, exceeding the host-wide macOS VM limit of 2", totalTartPool)
+	}
+	return nil
 }
 
 // startSharedVolumeCleanup launches one background goroutine per unique
@@ -642,8 +745,8 @@ func startSharedVolumeCleanup(ctx context.Context, client *dockerclient.Client, 
 // orphaned buildx BuildKit builder containers (and their state volumes) from
 // the shared Docker daemon. Builders are global to the daemon — like the
 // shared volume — so a single sweeper covers all Docker scalesets; the first
-// Docker scaleset with cleanup enabled provides the settings. Enabled by
-// default; no-op when explicitly disabled or when Docker is unavailable.
+// Docker scaleset with cleanup enabled provides the settings. This is opt-in
+// because the daemon may contain persistent or unrelated builders.
 func startBuildxCleanup(ctx context.Context, client *dockerclient.Client, scaleSets []config.ScaleSetConfig, logger *slog.Logger) {
 	if client == nil {
 		return
@@ -705,8 +808,8 @@ func startBuildxCleanup(ctx context.Context, client *dockerclient.Client, scaleS
 // older than the TTL, plus age/budget-based build cache retention. With DooD,
 // job-created garbage lands directly on the host daemon — which is global,
 // like buildx builders — so a single sweeper covers all Docker scalesets and
-// the first Docker scaleset with prune enabled provides the settings. Enabled
-// by default; no-op when explicitly disabled or when Docker is unavailable.
+// the first Docker scaleset with prune enabled provides the settings. This is
+// opt-in because the target daemon may also contain non-runner workloads.
 func startDockerPrune(ctx context.Context, client *dockerclient.Client, scaleSets []config.ScaleSetConfig, logger *slog.Logger) {
 	if client == nil {
 		return
@@ -857,12 +960,18 @@ func startTartCacheCleanup(ctx context.Context, scaleSets []config.ScaleSetConfi
 
 // listenOnce creates a message session and listener, then runs until
 // disconnection or context cancellation. Callers retry on transient errors.
-func listenOnce(ctx context.Context, client *scaleset.Client, scaleSetID int, sessionID string, maxRunners int, s *scaler.Scaler, recorder *metrics.Recorder, logger *slog.Logger) error {
+func listenOnce(ctx context.Context, client *scaleset.Client, scaleSetID int, sessionID string, maxRunners int, s *scaler.Scaler, recorder *metrics.Recorder, logger *slog.Logger, onReady func()) error {
 	sessionClient, err := client.MessageSessionClient(ctx, scaleSetID, sessionID)
 	if err != nil {
 		return fmt.Errorf("failed to create message session: %w", err)
 	}
-	defer sessionClient.Close(context.Background())
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := sessionClient.Close(closeCtx); err != nil {
+			logger.Warn("Failed to close message session", slog.Any("error", err))
+		}
+	}()
 
 	l, err := listener.New(sessionClient, listener.Config{
 		ScaleSetID: scaleSetID,
@@ -871,6 +980,9 @@ func listenOnce(ctx context.Context, client *scaleset.Client, scaleSetID int, se
 	}, listener.WithMetricsRecorder(recorder))
 	if err != nil {
 		return fmt.Errorf("failed to create listener: %w", err)
+	}
+	if onReady != nil {
+		onReady()
 	}
 
 	return l.Run(ctx, s)

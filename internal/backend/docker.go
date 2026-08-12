@@ -11,13 +11,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/docker/docker/api/types/build"
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/filters"
-	"github.com/docker/docker/api/types/image"
-	"github.com/docker/docker/api/types/mount"
-	"github.com/docker/docker/api/types/network"
-	"github.com/docker/docker/api/types/volume"
+	cerrdefs "github.com/containerd/errdefs"
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/mount"
+	dockerclient "github.com/moby/moby/client"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
 	"github.com/ysya/runscaler/internal/config"
@@ -26,16 +23,16 @@ import (
 // DockerAPI abstracts the Docker client methods used by DockerBackend,
 // enabling dependency injection and testing.
 type DockerAPI interface {
-	ContainerCreate(ctx context.Context, config *container.Config, hostConfig *container.HostConfig, networkingConfig *network.NetworkingConfig, platform *ocispec.Platform, containerName string) (container.CreateResponse, error)
-	ContainerStart(ctx context.Context, containerID string, options container.StartOptions) error
-	ContainerRemove(ctx context.Context, containerID string, options container.RemoveOptions) error
-	ContainerWait(ctx context.Context, containerID string, condition container.WaitCondition) (<-chan container.WaitResponse, <-chan error)
-	ContainersPrune(ctx context.Context, pruneFilters filters.Args) (container.PruneReport, error)
-	ImagesPrune(ctx context.Context, pruneFilters filters.Args) (image.PruneReport, error)
-	BuildCachePrune(ctx context.Context, opts build.CachePruneOptions) (*build.CachePruneReport, error)
-	VolumeRemove(ctx context.Context, volumeID string, force bool) error
-	ContainerList(ctx context.Context, options container.ListOptions) ([]container.Summary, error)
-	VolumeList(ctx context.Context, options volume.ListOptions) (volume.ListResponse, error)
+	ContainerCreate(ctx context.Context, options dockerclient.ContainerCreateOptions) (dockerclient.ContainerCreateResult, error)
+	ContainerStart(ctx context.Context, containerID string, options dockerclient.ContainerStartOptions) (dockerclient.ContainerStartResult, error)
+	ContainerRemove(ctx context.Context, containerID string, options dockerclient.ContainerRemoveOptions) (dockerclient.ContainerRemoveResult, error)
+	ContainerWait(ctx context.Context, containerID string, options dockerclient.ContainerWaitOptions) dockerclient.ContainerWaitResult
+	ContainerPrune(ctx context.Context, options dockerclient.ContainerPruneOptions) (dockerclient.ContainerPruneResult, error)
+	ImagePrune(ctx context.Context, options dockerclient.ImagePruneOptions) (dockerclient.ImagePruneResult, error)
+	BuildCachePrune(ctx context.Context, options dockerclient.BuildCachePruneOptions) (dockerclient.BuildCachePruneResult, error)
+	VolumeRemove(ctx context.Context, volumeID string, options dockerclient.VolumeRemoveOptions) (dockerclient.VolumeRemoveResult, error)
+	ContainerList(ctx context.Context, options dockerclient.ContainerListOptions) (dockerclient.ContainerListResult, error)
+	VolumeList(ctx context.Context, options dockerclient.VolumeListOptions) (dockerclient.VolumeListResult, error)
 }
 
 // DockerBackend runs GitHub Actions runners as Docker containers.
@@ -141,25 +138,24 @@ func (b *DockerBackend) StartRunner(ctx context.Context, name string, jitConfig 
 		hostConfig.NetworkMode = container.NetworkMode(b.network)
 	}
 
-	c, err := b.dockerClient.ContainerCreate(
-		ctx,
-		&container.Config{
+	c, err := b.dockerClient.ContainerCreate(ctx, dockerclient.ContainerCreateOptions{
+		Config: &container.Config{
 			Image:  b.runnerImage,
 			User:   "runner",
 			Cmd:    runnerCmd(volumeTargets),
 			Env:    b.buildContainerEnv(jitConfig),
 			Labels: map[string]string{"managed-by": "runner"},
 		},
-		hostConfig,
-		nil, b.platform,
-		name,
-	)
+		HostConfig: hostConfig,
+		Platform:   b.platform,
+		Name:       name,
+	})
 	if err != nil {
 		return "", fmt.Errorf("failed to create runner container: %w", err)
 	}
 
-	if err := b.dockerClient.ContainerStart(ctx, c.ID, container.StartOptions{}); err != nil {
-		_ = b.dockerClient.ContainerRemove(ctx, c.ID, container.RemoveOptions{Force: true})
+	if _, err := b.dockerClient.ContainerStart(ctx, c.ID, dockerclient.ContainerStartOptions{}); err != nil {
+		_, _ = b.dockerClient.ContainerRemove(ctx, c.ID, dockerclient.ContainerRemoveOptions{Force: true})
 		return "", fmt.Errorf("failed to start runner container: %w", err)
 	}
 
@@ -173,10 +169,33 @@ func (b *DockerBackend) StartRunner(ctx context.Context, name string, jitConfig 
 
 // RemoveRunner force-removes a Docker container by ID.
 func (b *DockerBackend) RemoveRunner(ctx context.Context, resourceID string) error {
-	if err := b.dockerClient.ContainerRemove(ctx, resourceID, container.RemoveOptions{Force: true}); err != nil {
+	if _, err := b.dockerClient.ContainerRemove(ctx, resourceID, dockerclient.ContainerRemoveOptions{Force: true}); err != nil {
 		return fmt.Errorf("failed to remove runner container: %w", err)
 	}
 	return nil
+}
+
+// WaitRunner returns when a runner container is no longer running. Scaler uses
+// this to evict containers that crash before GitHub can send JobCompleted.
+func (b *DockerBackend) WaitRunner(ctx context.Context, resourceID string) error {
+	wait := b.dockerClient.ContainerWait(ctx, resourceID, dockerclient.ContainerWaitOptions{Condition: container.WaitConditionNotRunning})
+	select {
+	case err := <-wait.Error:
+		if err != nil {
+			if cerrdefs.IsNotFound(err) {
+				return nil // externally removed is equivalent to stopped
+			}
+			return fmt.Errorf("wait for runner container: %w", err)
+		}
+		return nil
+	case status := <-wait.Result:
+		if status.Error != nil {
+			return fmt.Errorf("wait for runner container: %s", status.Error.Message)
+		}
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // Shutdown is a no-op for DockerBackend — shared Docker resources
@@ -199,10 +218,14 @@ func runnerCmd(volumeTargets []string) []string {
 	var sb strings.Builder
 	sb.WriteString(`fix_own() { [ "$(stat -c %u "$1")" = "1001" ] || sudo chown -R 1001:123 "$1"; };`)
 	for _, target := range volumeTargets {
-		fmt.Fprintf(&sb, " fix_own %s;", target)
+		fmt.Fprintf(&sb, " fix_own %s;", shellQuote(target))
 	}
 	sb.WriteString(" exec /home/runner/run.sh")
 	return []string{"sh", "-c", sb.String()}
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }
 
 // buildContainerEnv returns the environment variables for a runner container.
@@ -219,18 +242,17 @@ func (b *DockerBackend) buildContainerEnv(jitConfig string) []string {
 // CleanupSharedDocker removes the shared Docker volumes named in volumeNames
 // (empty slice = nothing to remove) and prunes dangling images. Cache volumes
 // are deliberately not touched — they are persistent caches. The full
-// build-cache wipe only runs when wipeBuildCache is true: when the runtime
-// prune sweep is enabled it owns build-cache retention (age/budget via
-// PruneDockerRuntime), so exit no longer wipes a cache the next process run
-// would reuse — self-update restarts previously destroyed all build cache.
+// daemon prune only runs when pruneDaemon is true. Shared volume removal is
+// scoped by explicit names, but images and build cache are daemon-global and
+// must never be touched implicitly on a shared daemon.
 // It is safe to call once after all Docker-backed scale sets have finished
 // shutting down; calling it concurrently or per-backend will race with
 // container removal and other prune operations.
 //
 // The whole sweep is bounded by cleanupSharedDockerTimeout so an unresponsive
 // daemon cannot hang shutdown.
-func CleanupSharedDocker(ctx context.Context, client DockerAPI, volumeNames []string, wipeBuildCache bool, logger *slog.Logger) {
-	cleanupSharedDockerWith(ctx, client, volumeNames, wipeBuildCache, cleanupSharedDockerTimeout, logger)
+func CleanupSharedDocker(ctx context.Context, client DockerAPI, volumeNames []string, pruneDaemon bool, logger *slog.Logger) {
+	cleanupSharedDockerWith(ctx, client, volumeNames, pruneDaemon, cleanupSharedDockerTimeout, logger)
 }
 
 // cleanupSharedDockerTimeout bounds the exit-time cleanup. The Docker API
@@ -244,7 +266,7 @@ const cleanupSharedDockerTimeout = 45 * time.Second
 
 // cleanupSharedDockerWith is the testable core: it performs the sweep under
 // the supplied timeout. The exported wrapper above supplies the default.
-func cleanupSharedDockerWith(ctx context.Context, client DockerAPI, volumeNames []string, wipeBuildCache bool, timeout time.Duration, logger *slog.Logger) {
+func cleanupSharedDockerWith(ctx context.Context, client DockerAPI, volumeNames []string, pruneDaemon bool, timeout time.Duration, logger *slog.Logger) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -259,32 +281,30 @@ func cleanupSharedDockerWith(ctx context.Context, client DockerAPI, volumeNames 
 
 	for _, name := range volumeNames {
 		logger.Debug("Removing shared volume", slog.String("volume", name))
-		if err := client.VolumeRemove(ctx, name, true); err != nil {
+		if _, err := client.VolumeRemove(ctx, name, dockerclient.VolumeRemoveOptions{Force: true}); err != nil {
 			logger.Error("Failed to remove shared volume",
 				slog.String("volume", name), slog.Any("error", err))
 		}
 	}
 
-	logger.Debug("Pruning Docker resources")
-
-	pruneFilters := filters.NewArgs(filters.Arg("dangling", "true"))
-	imagesReport, err := client.ImagesPrune(ctx, pruneFilters)
-	if err != nil {
-		logger.Error("Failed to prune images", slog.Any("error", err))
-	} else if imagesReport.SpaceReclaimed > 0 {
-		logger.Debug("Pruned dangling images",
-			slog.Int("count", len(imagesReport.ImagesDeleted)),
-			slog.String("reclaimed", FormatBytes(imagesReport.SpaceReclaimed)),
-		)
-	}
-
-	if wipeBuildCache {
-		buildReport, err := client.BuildCachePrune(ctx, build.CachePruneOptions{All: true})
+	if pruneDaemon {
+		logger.Debug("Pruning Docker resources")
+		pruneFilters := make(dockerclient.Filters).Add("dangling", "true")
+		imagesResult, err := client.ImagePrune(ctx, dockerclient.ImagePruneOptions{Filters: pruneFilters})
+		if err != nil {
+			logger.Error("Failed to prune images", slog.Any("error", err))
+		} else if imagesResult.Report.SpaceReclaimed > 0 {
+			logger.Debug("Pruned dangling images",
+				slog.Int("count", len(imagesResult.Report.ImagesDeleted)),
+				slog.String("reclaimed", FormatBytes(imagesResult.Report.SpaceReclaimed)),
+			)
+		}
+		buildResult, err := client.BuildCachePrune(ctx, dockerclient.BuildCachePruneOptions{All: true})
 		if err != nil {
 			logger.Error("Failed to prune build cache", slog.Any("error", err))
-		} else if buildReport.SpaceReclaimed > 0 {
+		} else if buildResult.Report.SpaceReclaimed > 0 {
 			logger.Debug("Pruned build cache",
-				slog.String("reclaimed", FormatBytes(buildReport.SpaceReclaimed)),
+				slog.String("reclaimed", FormatBytes(buildResult.Report.SpaceReclaimed)),
 			)
 		}
 	}
@@ -317,23 +337,20 @@ func PruneDockerRuntime(ctx context.Context, client DockerAPI, ttl, cacheMaxAge 
 		// The daemon parses Go duration strings for `until` and prunes
 		// objects created before now-ttl (see getUntilFromPruneFilters
 		// in moby's daemon/prune.go).
-		untilFilter := filters.NewArgs(filters.Arg("until", ttl.String()))
-		if report, err := client.ContainersPrune(timeoutCtx, untilFilter); err != nil {
+		untilFilter := make(dockerclient.Filters).Add("until", ttl.String())
+		if result, err := client.ContainerPrune(timeoutCtx, dockerclient.ContainerPruneOptions{Filters: untilFilter}); err != nil {
 			errs = append(errs, fmt.Errorf("prune stopped containers: %w", err))
 		} else {
-			containersRemoved = len(report.ContainersDeleted)
-			reclaimed += report.SpaceReclaimed
+			containersRemoved = len(result.Report.ContainersDeleted)
+			reclaimed += result.Report.SpaceReclaimed
 		}
 
-		imageFilters := filters.NewArgs(
-			filters.Arg("dangling", "true"),
-			filters.Arg("until", ttl.String()),
-		)
-		if report, err := client.ImagesPrune(timeoutCtx, imageFilters); err != nil {
+		imageFilters := make(dockerclient.Filters).Add("dangling", "true").Add("until", ttl.String())
+		if result, err := client.ImagePrune(timeoutCtx, dockerclient.ImagePruneOptions{Filters: imageFilters}); err != nil {
 			errs = append(errs, fmt.Errorf("prune dangling images: %w", err))
 		} else {
-			imagesRemoved = len(report.ImagesDeleted)
-			reclaimed += report.SpaceReclaimed
+			imagesRemoved = len(result.Report.ImagesDeleted)
+			reclaimed += result.Report.SpaceReclaimed
 		}
 	}
 
@@ -341,28 +358,28 @@ func PruneDockerRuntime(ctx context.Context, client DockerAPI, ttl, cacheMaxAge 
 		// BuildKit maps `until` to KeepDuration: cache entries not used
 		// within the window are removed (`unused-for` is its deprecated
 		// synonym; v28+ daemons validate both, `until` is canonical).
-		opts := build.CachePruneOptions{
+		opts := dockerclient.BuildCachePruneOptions{
 			All:     true,
-			Filters: filters.NewArgs(filters.Arg("until", cacheMaxAge.String())),
+			Filters: make(dockerclient.Filters).Add("until", cacheMaxAge.String()),
 		}
-		if report, err := client.BuildCachePrune(timeoutCtx, opts); err != nil {
+		if result, err := client.BuildCachePrune(timeoutCtx, opts); err != nil {
 			errs = append(errs, fmt.Errorf("prune build cache by age: %w", err))
 		} else {
-			reclaimed += report.SpaceReclaimed
+			reclaimed += result.Report.SpaceReclaimed
 		}
 	}
 
 	if cacheBudgetGB > 0 {
-		// ReservedSpace is BuildKit's retention cap: least-recently-used
-		// cache is evicted until the total fits within the budget.
-		opts := build.CachePruneOptions{
-			All:           true,
-			ReservedSpace: int64(cacheBudgetGB) * 1024 * 1024 * 1024,
+		// MaxUsedSpace is BuildKit's hard cache cap. ReservedSpace means the
+		// opposite (bytes protected from pruning) and must not be used here.
+		opts := dockerclient.BuildCachePruneOptions{
+			All:          true,
+			MaxUsedSpace: int64(cacheBudgetGB) * 1024 * 1024 * 1024,
 		}
-		if report, err := client.BuildCachePrune(timeoutCtx, opts); err != nil {
+		if result, err := client.BuildCachePrune(timeoutCtx, opts); err != nil {
 			errs = append(errs, fmt.Errorf("prune build cache to budget: %w", err))
 		} else {
-			reclaimed += report.SpaceReclaimed
+			reclaimed += result.Report.SpaceReclaimed
 		}
 	}
 
@@ -407,7 +424,7 @@ func CleanupOrphanedBuildxBuilders(ctx context.Context, client DockerAPI, maxAge
 		return nil
 	}
 
-	containers, err := client.ContainerList(ctx, container.ListOptions{All: true})
+	containerResult, err := client.ContainerList(ctx, dockerclient.ContainerListOptions{All: true})
 	if err != nil {
 		return fmt.Errorf("list containers: %w", err)
 	}
@@ -415,7 +432,7 @@ func CleanupOrphanedBuildxBuilders(ctx context.Context, client DockerAPI, maxAge
 	cutoff := time.Now().Add(-maxAge)
 	var removedContainers, removedVolumes int
 
-	for _, c := range containers {
+	for _, c := range containerResult.Items {
 		name := buildxContainerName(c)
 		if name == "" {
 			continue
@@ -426,7 +443,7 @@ func CleanupOrphanedBuildxBuilders(ctx context.Context, client DockerAPI, maxAge
 			continue
 		}
 
-		if err := client.ContainerRemove(ctx, c.ID, container.RemoveOptions{Force: true}); err != nil {
+		if _, err := client.ContainerRemove(ctx, c.ID, dockerclient.ContainerRemoveOptions{Force: true}); err != nil {
 			logger.Warn("Failed to remove orphaned buildx builder",
 				slog.String("container", name), slog.Any("error", err))
 			continue
@@ -436,7 +453,7 @@ func CleanupOrphanedBuildxBuilders(ctx context.Context, client DockerAPI, maxAge
 		// `docker rm` leaves named volumes intact; the builder's state lives in
 		// "<container-name>_state", so remove it explicitly.
 		stateVol := name + "_state"
-		if err := client.VolumeRemove(ctx, stateVol, true); err != nil {
+		if _, err := client.VolumeRemove(ctx, stateVol, dockerclient.VolumeRemoveOptions{Force: true}); err != nil {
 			logger.Debug("Failed to remove buildx state volume",
 				slog.String("volume", stateVol), slog.Any("error", err))
 		} else {
@@ -447,15 +464,15 @@ func CleanupOrphanedBuildxBuilders(ctx context.Context, client DockerAPI, maxAge
 	// Also reap dangling buildx state volumes whose containers were already
 	// gone (e.g. from a partial manual cleanup). Dangling means unreferenced,
 	// so removal is safe regardless of age.
-	danglingFilter := filters.NewArgs(filters.Arg("dangling", "true"))
-	if volList, err := client.VolumeList(ctx, volume.ListOptions{Filters: danglingFilter}); err != nil {
+	danglingFilter := make(dockerclient.Filters).Add("dangling", "true")
+	if volList, err := client.VolumeList(ctx, dockerclient.VolumeListOptions{Filters: danglingFilter}); err != nil {
 		logger.Debug("Failed to list volumes for buildx cleanup", slog.Any("error", err))
 	} else {
-		for _, v := range volList.Volumes {
-			if v == nil || !strings.HasPrefix(v.Name, buildxBuilderPrefix) {
+		for _, v := range volList.Items {
+			if !strings.HasPrefix(v.Name, buildxBuilderPrefix) {
 				continue
 			}
-			if err := client.VolumeRemove(ctx, v.Name, true); err != nil {
+			if _, err := client.VolumeRemove(ctx, v.Name, dockerclient.VolumeRemoveOptions{Force: true}); err != nil {
 				logger.Debug("Failed to remove dangling buildx volume",
 					slog.String("volume", v.Name), slog.Any("error", err))
 			} else {
@@ -537,16 +554,15 @@ func CleanupSharedVolumeStale(ctx context.Context, client DockerAPI, helperImage
 		"set -e; "+
 			"find %[1]s -mindepth 1 -mtime +%[2]d \\( -type f -o -type l \\) -print -delete 2>/dev/null | wc -l; "+
 			"find %[1]s -mindepth 1 -type d -empty -delete 2>/dev/null || true",
-		mountPath, days,
+		shellQuote(mountPath), days,
 	)
 
 	timeoutCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 
 	name := fmt.Sprintf("runner-cleanup-%d", time.Now().UnixNano())
-	c, err := client.ContainerCreate(
-		timeoutCtx,
-		&container.Config{
+	c, err := client.ContainerCreate(timeoutCtx, dockerclient.ContainerCreateOptions{
+		Config: &container.Config{
 			Image: helperImage,
 			User:  "root",
 			Cmd:   []string{"sh", "-c", script},
@@ -555,36 +571,35 @@ func CleanupSharedVolumeStale(ctx context.Context, client DockerAPI, helperImage
 				"purpose":    "shared-volume-cleanup",
 			},
 		},
-		&container.HostConfig{
+		HostConfig: &container.HostConfig{
 			Mounts: []mount.Mount{{
 				Type:   mount.TypeVolume,
 				Source: volumeName,
 				Target: mountPath,
 			}},
 		},
-		nil, nil,
-		name,
-	)
+		Name: name,
+	})
 	if err != nil {
 		return fmt.Errorf("create cleanup container: %w", err)
 	}
 
 	// Always remove the container, even if start/wait fails.
 	defer func() {
-		_ = client.ContainerRemove(context.WithoutCancel(timeoutCtx), c.ID, container.RemoveOptions{Force: true})
+		_, _ = client.ContainerRemove(context.WithoutCancel(timeoutCtx), c.ID, dockerclient.ContainerRemoveOptions{Force: true})
 	}()
 
-	if err := client.ContainerStart(timeoutCtx, c.ID, container.StartOptions{}); err != nil {
+	if _, err := client.ContainerStart(timeoutCtx, c.ID, dockerclient.ContainerStartOptions{}); err != nil {
 		return fmt.Errorf("start cleanup container: %w", err)
 	}
 
-	statusCh, errCh := client.ContainerWait(timeoutCtx, c.ID, container.WaitConditionNotRunning)
+	wait := client.ContainerWait(timeoutCtx, c.ID, dockerclient.ContainerWaitOptions{Condition: container.WaitConditionNotRunning})
 	select {
-	case err := <-errCh:
+	case err := <-wait.Error:
 		if err != nil {
 			return fmt.Errorf("wait cleanup container: %w", err)
 		}
-	case status := <-statusCh:
+	case status := <-wait.Result:
 		if status.Error != nil {
 			return fmt.Errorf("cleanup container error: %s", status.Error.Message)
 		}

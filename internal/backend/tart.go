@@ -67,7 +67,36 @@ type warmVM struct {
 	cancel  context.CancelFunc // cancels the `tart run` goroutine
 	done    <-chan struct{}    // closed when `tart run` exits (VM died)
 	slotIdx int                // index into vmSlots for deterministic MAC assignment
+	release sync.Once          // host slot must be returned exactly once
 }
+
+// TartHostCoordinator enforces the Apple host-wide VM limit and assigns MAC
+// slots uniquely across every Tart-backed scale set in this process.
+type TartHostCoordinator struct {
+	slots chan int
+}
+
+func NewTartHostCoordinator(limit int) *TartHostCoordinator {
+	if limit < 1 {
+		limit = 1
+	}
+	c := &TartHostCoordinator{slots: make(chan int, limit)}
+	for i := range limit {
+		c.slots <- i
+	}
+	return c
+}
+
+func (c *TartHostCoordinator) acquire(ctx context.Context) (int, error) {
+	select {
+	case idx := <-c.slots:
+		return idx, nil
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	}
+}
+
+func (c *TartHostCoordinator) release(idx int) { c.slots <- idx }
 
 // TartBackend runs GitHub Actions runners as ephemeral Tart macOS VMs.
 //
@@ -84,15 +113,16 @@ type warmVM struct {
 // StartRunner picks a warm VM from the pool (near-instant) instead of
 // cold-starting one (~30s). The pool is refilled in the background.
 type TartBackend struct {
-	baseImage  string
-	runnerDir  string
-	home       string // TART_HOME ("" = tart default ~/.tart)
-	cpu        int    // 0 = use image default
-	memory     int    // MB, 0 = use image default
-	poolSize   int
-	maxRunners int
-	logger     *slog.Logger
-	cmd        CommandRunner
+	baseImage   string
+	runnerDir   string
+	home        string // TART_HOME ("" = tart default ~/.tart)
+	cpu         int    // 0 = use image default
+	memory      int    // MB, 0 = use image default
+	poolSize    int
+	maxRunners  int
+	logger      *slog.Logger
+	cmd         CommandRunner
+	coordinator *TartHostCoordinator
 
 	// VM pool
 	pool     chan *warmVM
@@ -103,31 +133,33 @@ type TartBackend struct {
 	// vmSlots is a pool of slot indices limiting total concurrent VMs.
 	// Each slot has a deterministic MAC address to prevent DHCP lease exhaustion.
 	// Apple Silicon enforces a max of 2 concurrent macOS VMs per host.
-	vmSlots     chan int
-	activeSlots sync.Map // resourceID -> slotIdx, for releasing on RemoveRunner
+	activeVMs sync.Map // resourceID -> *warmVM, for exit watching and cleanup
 }
 
 // NewTartBackend creates a TartBackend from scale set config.
 func NewTartBackend(ss config.ScaleSetConfig, logger *slog.Logger) *TartBackend {
+	return NewTartBackendWithCoordinator(ss, logger, NewTartHostCoordinator(2))
+}
+
+func NewTartBackendWithCoordinator(ss config.ScaleSetConfig, logger *slog.Logger, coordinator *TartHostCoordinator) *TartBackend {
+	if coordinator == nil {
+		coordinator = NewTartHostCoordinator(2)
+	}
 	var extraEnv []string
 	if ss.Tart.Home != "" {
 		extraEnv = append(extraEnv, "TART_HOME="+ss.Tart.Home)
 	}
 	b := &TartBackend{
-		baseImage:  ss.RunnerImage,
-		runnerDir:  ss.Tart.RunnerDir,
-		home:       ss.Tart.Home,
-		cpu:        ss.Tart.CPU,
-		memory:     ss.Tart.Memory,
-		poolSize:   ss.Tart.PoolSize,
-		maxRunners: ss.MaxRunners,
-		logger:     logger,
-		cmd:        execCommandRunner{extraEnv: extraEnv},
-		vmSlots:    make(chan int, ss.MaxRunners),
-	}
-	// Pre-fill slot indices: each slot gets a deterministic MAC address
-	for i := range ss.MaxRunners {
-		b.vmSlots <- i
+		baseImage:   ss.RunnerImage,
+		runnerDir:   ss.Tart.RunnerDir,
+		home:        ss.Tart.Home,
+		cpu:         ss.Tart.CPU,
+		memory:      ss.Tart.Memory,
+		poolSize:    ss.Tart.PoolSize,
+		maxRunners:  ss.MaxRunners,
+		logger:      logger,
+		cmd:         execCommandRunner{extraEnv: extraEnv},
+		coordinator: coordinator,
 	}
 	return b
 }
@@ -225,14 +257,12 @@ func (b *TartBackend) EnsureImage(ctx context.Context) error {
 // Returns a warmVM that is ready for runner injection via `tart exec`.
 func (b *TartBackend) bootVM(ctx context.Context, name string) (*warmVM, error) {
 	// 0. Acquire a VM slot (blocks if all slots are in use)
-	var slotIdx int
-	select {
-	case slotIdx = <-b.vmSlots:
-	case <-ctx.Done():
-		return nil, ctx.Err()
+	slotIdx, err := b.coordinator.acquire(ctx)
+	if err != nil {
+		return nil, err
 	}
 
-	releaseSlot := func() { b.vmSlots <- slotIdx }
+	releaseSlot := func() { b.coordinator.release(slotIdx) }
 
 	// 1. Clone base image (APFS copy-on-write, near-instant)
 	if _, err := b.cmd.Run(ctx, "tart", "clone", b.baseImage, name); err != nil {
@@ -250,6 +280,7 @@ func (b *TartBackend) bootVM(ctx context.Context, name string) (*warmVM, error) 
 			args = append(args, "--memory", strconv.Itoa(b.memory))
 		}
 		if _, err := b.cmd.Run(ctx, "tart", args...); err != nil {
+			_, _ = b.cmd.Run(context.WithoutCancel(ctx), "tart", "delete", name)
 			releaseSlot()
 			return nil, fmt.Errorf("failed to configure VM resources: %w", err)
 		}
@@ -339,13 +370,41 @@ func (b *TartBackend) setVMMAC(name string, slotIdx int) error {
 	return nil
 }
 
-// destroyVM stops and deletes a warm VM, releasing its VM slot.
+func vmExited(vm *warmVM) bool {
+	select {
+	case <-vm.done:
+		return true
+	default:
+		return false
+	}
+}
+
+func (b *TartBackend) releaseVM(vm *warmVM) {
+	vm.release.Do(func() { b.coordinator.release(vm.slotIdx) })
+}
+
+// destroyVM stops and deletes a warm VM. The slot is released only after the
+// VM is known to be stopped; reusing it after failed cleanup could exceed the
+// Apple host-wide two-VM limit.
 func (b *TartBackend) destroyVM(vm *warmVM) {
 	vm.cancel()
-	cleanCtx := context.Background()
-	_, _ = b.cmd.Run(cleanCtx, "tart", "stop", vm.name)
-	_, _ = b.cmd.Run(cleanCtx, "tart", "delete", vm.name)
-	b.vmSlots <- vm.slotIdx
+	cleanCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_, stopErr := b.cmd.Run(cleanCtx, "tart", "stop", vm.name)
+	_, deleteErr := b.cmd.Run(cleanCtx, "tart", "delete", vm.name)
+	if stopErr == nil || deleteErr == nil || vmExited(vm) {
+		b.releaseVM(vm)
+		return
+	}
+	b.logger.Error("VM cleanup failed; retaining host slot for safety",
+		slog.String("name", vm.name),
+		slog.Any("stop_error", stopErr),
+		slog.Any("delete_error", deleteErr),
+	)
+	go func() {
+		<-vm.done
+		b.releaseVM(vm)
+	}()
 }
 
 // StartRunner starts a GitHub Actions runner in a Tart VM.
@@ -384,7 +443,7 @@ func (b *TartBackend) StartRunner(ctx context.Context, name string, jitConfig st
 				b.destroyVM(vm)
 				return "", fmt.Errorf("failed to start runner: %w", err)
 			}
-			b.activeSlots.Store(vm.name, vm.slotIdx)
+			b.activeVMs.Store(vm.name, vm)
 			b.logger.Debug("Runner started (warm)", slog.String("name", vm.name))
 			return vm.name, nil
 		}
@@ -401,7 +460,7 @@ func (b *TartBackend) StartRunner(ctx context.Context, name string, jitConfig st
 		return "", fmt.Errorf("failed to start runner: %w", err)
 	}
 
-	b.activeSlots.Store(name, vm.slotIdx)
+	b.activeVMs.Store(name, vm)
 	b.logger.Debug("Runner started (cold)",
 		slog.String("name", name),
 		slog.String("baseImage", b.baseImage),
@@ -414,17 +473,41 @@ func (b *TartBackend) RemoveRunner(ctx context.Context, resourceID string) error
 	// Use background context for cleanup so it completes even if parent is cancelled
 	cleanCtx := context.WithoutCancel(ctx)
 
-	if _, err := b.cmd.Run(cleanCtx, "tart", "stop", resourceID); err != nil {
-		b.logger.Warn("Failed to stop VM (may already be stopped)", slog.String("name", resourceID), slog.Any("error", err))
+	_, stopErr := b.cmd.Run(cleanCtx, "tart", "stop", resourceID)
+	if stopErr != nil {
+		b.logger.Warn("Failed to stop VM (may already be stopped)", slog.String("name", resourceID), slog.Any("error", stopErr))
 	}
-	if _, err := b.cmd.Run(cleanCtx, "tart", "delete", resourceID); err != nil {
-		return fmt.Errorf("failed to delete VM %s: %w", resourceID, err)
+	_, deleteErr := b.cmd.Run(cleanCtx, "tart", "delete", resourceID)
+	value, tracked := b.activeVMs.Load(resourceID)
+	knownStopped := stopErr == nil || deleteErr == nil
+	if tracked {
+		knownStopped = knownStopped || vmExited(value.(*warmVM))
 	}
-	// Release VM slot back to the pool
-	if idx, ok := b.activeSlots.LoadAndDelete(resourceID); ok {
-		b.vmSlots <- idx.(int)
+	if tracked && knownStopped {
+		if value, ok := b.activeVMs.LoadAndDelete(resourceID); ok {
+			vm := value.(*warmVM)
+			vm.cancel()
+			b.releaseVM(vm)
+		}
+	}
+	if deleteErr != nil {
+		return fmt.Errorf("failed to delete VM %s: %w", resourceID, deleteErr)
 	}
 	return nil
+}
+
+func (b *TartBackend) WaitRunner(ctx context.Context, resourceID string) error {
+	value, ok := b.activeVMs.Load(resourceID)
+	if !ok {
+		return fmt.Errorf("unknown Tart VM %s", resourceID)
+	}
+	vm := value.(*warmVM)
+	select {
+	case <-vm.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // Shutdown stops the warm pool and cleans up any idle VMs.
@@ -551,13 +634,17 @@ func runnerStartCmd(runScript, jitPath string) string {
 	return fmt.Sprintf(
 		"JIT=$(cat %[2]s); rm -f %[2]s; "+
 			"ACTIONS_RUNNER_INPUT_JITCONFIG=\"$JIT\" nohup %[1]s > /tmp/runner.log 2>&1 &",
-		runScript, jitPath,
+		shellQuote(runScript), shellQuote(jitPath),
 	)
 }
 
 // jitConfigPath is where the JIT config is staged inside the VM before the
 // runner is started. It is deleted as soon as its value has been read.
 const jitConfigPath = "/tmp/jitconfig"
+
+func writeJITCmd(path, jitConfig string) string {
+	return fmt.Sprintf("umask 077; printf %%s %s > %s", shellQuote(jitConfig), shellQuote(path))
+}
 
 // Uses Virtio gRPC (Guest Agent) instead of SSH — no network dependency.
 func (b *TartBackend) runRunner(ctx context.Context, vmName, jitConfig string) error {
@@ -567,8 +654,9 @@ func (b *TartBackend) runRunner(ctx context.Context, vmName, jitConfig string) e
 		return fmt.Errorf("runner not found at %s on %s: %w", runScript, vmName, err)
 	}
 
-	// Write JIT config to a temp file to avoid shell argument length limits
-	writeJIT := fmt.Sprintf("cat > %s <<'JITEOF'\n%s\nJITEOF", jitConfigPath, jitConfig)
+	// Quote the complete payload instead of embedding it in a heredoc, whose
+	// delimiter could otherwise be injected by a malicious response.
+	writeJIT := writeJITCmd(jitConfigPath, jitConfig)
 	if _, err := b.cmd.Run(ctx, "tart", "exec", vmName, "sh", "-c", writeJIT); err != nil {
 		return fmt.Errorf("failed to write JIT config on %s: %w", vmName, err)
 	}

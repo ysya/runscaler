@@ -29,6 +29,8 @@ type Scaler struct {
 	minRunners     int
 	maxRunners     int
 	logger         *slog.Logger
+	reconcileMu    sync.Mutex
+	desiredRunners int
 }
 
 // Compile-time check that Scaler implements listener.Scaler.
@@ -53,6 +55,9 @@ func NewScaler(scaleSetID, minRunners, maxRunners int, b backend.RunnerBackend, 
 // HandleDesiredRunnerCount scales runners up to match demand.
 // Scale down is handled naturally via HandleJobCompleted.
 func (s *Scaler) HandleDesiredRunnerCount(ctx context.Context, count int) (int, error) {
+	s.reconcileMu.Lock()
+	defer s.reconcileMu.Unlock()
+	s.desiredRunners = count
 	currentCount := s.runners.count()
 	targetRunnerCount := min(s.maxRunners, s.minRunners+count)
 
@@ -138,7 +143,52 @@ func (s *Scaler) startRunner(ctx context.Context) (string, error) {
 	}
 
 	s.runners.addIdle(name, resourceID)
+	if watcher, ok := s.backend.(backend.RunnerWatcher); ok {
+		go s.watchRunner(ctx, watcher, name, resourceID)
+	}
 	return name, nil
+}
+
+func (s *Scaler) watchRunner(ctx context.Context, watcher backend.RunnerWatcher, name, resourceID string) {
+	for {
+		err := watcher.WaitRunner(ctx, resourceID)
+		if ctx.Err() != nil || !s.runners.contains(name, resourceID) {
+			return
+		}
+		if err == nil {
+			break
+		}
+		s.logger.Warn("Runner monitor failed; retrying", slog.String("name", name), slog.Any("error", err))
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(5 * time.Second):
+		}
+	}
+	if !s.runners.markDead(name, resourceID) {
+		return // normal JobCompleted path already removed it from state
+	}
+	s.logger.Warn("Runner exited before job completion; removing stale capacity", slog.String("name", name))
+	cleanCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	if err := s.backend.RemoveRunner(cleanCtx, resourceID); err != nil {
+		s.logger.Warn("Failed to clean up exited runner", slog.String("name", name), slog.Any("error", err))
+	}
+	cancel()
+
+	// Replace the lost capacity immediately instead of waiting for another
+	// desired-count message, which may never arrive while a job remains queued.
+	s.reconcileMu.Lock()
+	defer s.reconcileMu.Unlock()
+	if ctx.Err() != nil {
+		return
+	}
+	target := min(s.maxRunners, s.minRunners+s.desiredRunners)
+	if s.runners.count() >= target {
+		return
+	}
+	if _, err := s.startRunner(ctx); err != nil {
+		s.logger.Error("Failed to replace exited runner", slog.Any("error", err))
+	}
 }
 
 // Shutdown force-removes all managed runners in parallel.
@@ -216,6 +266,16 @@ func (r *runnerState) addIdle(name, resourceID string) {
 	r.mu.Unlock()
 }
 
+func (r *runnerState) contains(name, resourceID string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if got, ok := r.idle[name]; ok && got == resourceID {
+		return true
+	}
+	got, ok := r.busy[name]
+	return ok && got == resourceID
+}
+
 func (r *runnerState) markBusy(name string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -241,4 +301,18 @@ func (r *runnerState) markDone(name string) (string, bool) {
 		return resourceID, true
 	}
 	return "", false
+}
+
+func (r *runnerState) markDead(name, resourceID string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if got, ok := r.idle[name]; ok && got == resourceID {
+		delete(r.idle, name)
+		return true
+	}
+	if got, ok := r.busy[name]; ok && got == resourceID {
+		delete(r.busy, name)
+		return true
+	}
+	return false
 }

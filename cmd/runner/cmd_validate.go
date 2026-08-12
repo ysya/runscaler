@@ -6,7 +6,7 @@ import (
 	"os/exec"
 	"time"
 
-	dockerclient "github.com/docker/docker/client"
+	dockerclient "github.com/moby/moby/client"
 	"github.com/spf13/cobra"
 
 	"github.com/ysya/runscaler/internal/config"
@@ -34,6 +34,10 @@ func runValidate(cmd *cobra.Command, args []string) error {
 		}
 		return fmt.Errorf("validation failed")
 	}
+	if err := cfg.ValidateGlobal(); err != nil {
+		fmt.Printf("  ✗ global config: %s\n", err)
+		return fmt.Errorf("validation failed")
+	}
 
 	// Validate scale sets
 	scaleSets := cfg.ResolveScaleSets()
@@ -51,6 +55,10 @@ func runValidate(cmd *cobra.Command, args []string) error {
 			scaleSets[i].MaxRunners, scaleSets[i].MinRunners,
 		)
 	}
+	if err := validateScaleSetCollection(scaleSets); err != nil {
+		fmt.Printf("  ✗ scale set collection: %s\n", err)
+		return fmt.Errorf("validation failed")
+	}
 
 	// Check which backends are needed
 	needsDocker := false
@@ -66,27 +74,30 @@ func runValidate(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Test Docker connectivity (only if needed)
+	// Test every distinct Docker socket used by resolved scale sets.
 	if needsDocker {
-		dockerClient, err := dockerclient.NewClientWithOpts(
-			dockerclient.FromEnv,
-			dockerclient.WithHost("unix://"+cfg.Defaults.Docker.Socket),
-			dockerclient.WithAPIVersionNegotiation(),
-		)
-		if err != nil {
-			fmt.Printf("  ✗ Docker client: %s\n", err)
-			return fmt.Errorf("validation failed")
+		for socket := range groupDockerScaleSets(scaleSets) {
+			dockerClient, err := dockerclient.New(
+				dockerclient.FromEnv,
+				dockerclient.WithHost("unix://"+socket),
+				dockerclient.WithAPIVersionNegotiation(),
+			)
+			if err != nil {
+				fmt.Printf("  ✗ Docker client for %s: %s\n", socket, err)
+				return fmt.Errorf("validation failed")
+			}
+			if _, err := dockerClient.Ping(ctx, dockerclient.PingOptions{NegotiateAPIVersion: true}); err != nil {
+				dockerClient.Close()
+				fmt.Printf("  ✗ Docker connectivity at %s: %s\n", socket, err)
+				fmt.Println("\n  Possible fixes:")
+				fmt.Println("  1. Ensure Docker is running")
+				fmt.Println("  2. Add your user to the docker group: sudo usermod -aG docker $USER")
+				fmt.Println("  3. Re-login or run: newgrp docker")
+				return fmt.Errorf("validation failed")
+			}
+			dockerClient.Close()
+			fmt.Printf("  ✓ Docker is reachable at %s\n", socket)
 		}
-
-		if _, err := dockerClient.Ping(ctx); err != nil {
-			fmt.Printf("  ✗ Docker connectivity: %s\n", err)
-			fmt.Println("\n  Possible fixes:")
-			fmt.Println("  1. Ensure Docker is running")
-			fmt.Println("  2. Add your user to the docker group: sudo usermod -aG docker $USER")
-			fmt.Println("  3. Re-login or run: newgrp docker")
-			return fmt.Errorf("validation failed")
-		}
-		fmt.Printf("  ✓ Docker is reachable at %s\n", cfg.Defaults.Docker.Socket)
 	}
 
 	// Test Tart binary (only if needed)
@@ -98,19 +109,15 @@ func runValidate(cmd *cobra.Command, args []string) error {
 		}
 		fmt.Println("  ✓ Tart binary found")
 
-		for _, ss := range scaleSets {
-			if ss.IsTart() && ss.MaxRunners > 2 {
-				fmt.Printf("  ⚠ scaleset %q: max-runners=%d exceeds macOS 2-VM-per-host limit\n",
-					ss.ScaleSetName, ss.MaxRunners)
-			}
-		}
 	}
 
 	// Show shared volume status
-	if cfg.Defaults.Docker.SharedVolume != "" {
-		fmt.Printf("  ✓ Shared volume enabled at %s\n", cfg.Defaults.Docker.SharedVolume)
-	} else if needsDocker {
-		fmt.Println("  - Shared volume: not configured (cross-job sharing will not work)")
+	if needsDocker {
+		for _, ss := range scaleSets {
+			if !ss.IsTart() && ss.Docker.SharedVolume != "" {
+				fmt.Printf("  ✓ scaleset %q shared volume enabled at %s\n", ss.ScaleSetName, ss.Docker.SharedVolume)
+			}
+		}
 	}
 
 	// Test GitHub API connectivity for each scale set

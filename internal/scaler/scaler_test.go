@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/actions/scaleset"
 )
@@ -17,6 +18,55 @@ type mockBackend struct {
 	started  []string // runner names
 	removed  []string // resource IDs
 	shutdown bool
+}
+
+type watcherBackend struct {
+	mu      sync.Mutex
+	started []string
+	removed []string
+	waits   map[string]chan struct{}
+}
+
+func (m *watcherBackend) StartRunner(_ context.Context, name, _ string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	resource := "resource-" + name
+	m.started = append(m.started, resource)
+	m.waits[resource] = make(chan struct{})
+	return resource, nil
+}
+
+func (m *watcherBackend) RemoveRunner(_ context.Context, resource string) error {
+	m.mu.Lock()
+	m.removed = append(m.removed, resource)
+	m.mu.Unlock()
+	return nil
+}
+
+func (m *watcherBackend) Shutdown(context.Context) {}
+
+func (m *watcherBackend) WaitRunner(ctx context.Context, resource string) error {
+	m.mu.Lock()
+	w := m.waits[resource]
+	m.mu.Unlock()
+	select {
+	case <-w:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (m *watcherBackend) crashFirst() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	close(m.waits[m.started[0]])
+}
+
+func (m *watcherBackend) startedCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.started)
 }
 
 func (m *mockBackend) StartRunner(_ context.Context, name string, _ string) (string, error) {
@@ -172,6 +222,29 @@ func TestHandleDesiredRunnerCount_ScaleUp(t *testing.T) {
 	}
 	if ms.generated != 3 {
 		t.Errorf("JIT configs generated = %d, want 3", ms.generated)
+	}
+}
+
+func TestExitedRunnerIsRemovedAndReplaced(t *testing.T) {
+	b := &watcherBackend{waits: make(map[string]chan struct{})}
+	s := NewScaler(1, 0, 2, b, &mockScaleset{}, slog.New(slog.DiscardHandler))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if _, err := s.HandleDesiredRunnerCount(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	b.crashFirst()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for b.startedCount() < 2 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := b.startedCount(); got != 2 {
+		t.Fatalf("started runners = %d, want crashed runner plus replacement", got)
+	}
+	if idle, busy := s.RunnerCounts(); idle != 1 || busy != 0 {
+		t.Fatalf("counts = idle %d busy %d, want 1/0", idle, busy)
 	}
 }
 

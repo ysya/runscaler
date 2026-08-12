@@ -9,14 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/docker/docker/api/types/build"
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/filters"
-	"github.com/docker/docker/api/types/image"
-	"github.com/docker/docker/api/types/mount"
-	"github.com/docker/docker/api/types/network"
-	"github.com/docker/docker/api/types/volume"
-	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/mount"
+	"github.com/moby/moby/api/types/volume"
+	dockerclient "github.com/moby/moby/client"
 
 	"github.com/ysya/runscaler/internal/config"
 )
@@ -43,13 +39,13 @@ type mockDocker struct {
 
 	// Optional fixtures for ContainerList / VolumeList.
 	containers []container.Summary
-	volumes    []*volume.Volume
+	volumes    []volume.Volume
 
 	// Recorded prune calls, in order, for PruneDockerRuntime /
 	// CleanupSharedDocker assertions.
-	containersPruneFilters []filters.Args
-	imagesPruneFilters     []filters.Args
-	buildCachePruneOpts    []build.CachePruneOptions
+	containersPruneFilters []dockerclient.Filters
+	imagesPruneFilters     []dockerclient.Filters
+	buildCachePruneOpts    []dockerclient.BuildCachePruneOptions
 
 	// Optional error injection for the prune calls.
 	containersPruneErr error
@@ -61,65 +57,65 @@ type mockDocker struct {
 	volumeRemoveBlocks bool
 }
 
-func (m *mockDocker) ContainerCreate(_ context.Context, cfg *container.Config, hcfg *container.HostConfig, _ *network.NetworkingConfig, _ *ocispec.Platform, name string) (container.CreateResponse, error) {
-	id := "sha256-" + name
-	m.created = append(m.created, name)
-	m.createCalls = append(m.createCalls, createCall{name: name, config: cfg, hostConfig: hcfg})
-	return container.CreateResponse{ID: id}, nil
+func (m *mockDocker) ContainerCreate(_ context.Context, options dockerclient.ContainerCreateOptions) (dockerclient.ContainerCreateResult, error) {
+	id := "sha256-" + options.Name
+	m.created = append(m.created, options.Name)
+	m.createCalls = append(m.createCalls, createCall{name: options.Name, config: options.Config, hostConfig: options.HostConfig})
+	return dockerclient.ContainerCreateResult{ID: id}, nil
 }
 
-func (m *mockDocker) ContainerStart(_ context.Context, id string, _ container.StartOptions) error {
+func (m *mockDocker) ContainerStart(_ context.Context, id string, _ dockerclient.ContainerStartOptions) (dockerclient.ContainerStartResult, error) {
 	m.started = append(m.started, id)
-	return nil
+	return dockerclient.ContainerStartResult{}, nil
 }
 
-func (m *mockDocker) ContainerRemove(_ context.Context, id string, _ container.RemoveOptions) error {
+func (m *mockDocker) ContainerRemove(_ context.Context, id string, _ dockerclient.ContainerRemoveOptions) (dockerclient.ContainerRemoveResult, error) {
 	m.removed = append(m.removed, id)
-	return nil
+	return dockerclient.ContainerRemoveResult{}, nil
 }
 
-func (m *mockDocker) ContainersPrune(_ context.Context, pruneFilters filters.Args) (container.PruneReport, error) {
-	m.containersPruneFilters = append(m.containersPruneFilters, pruneFilters)
+func (m *mockDocker) ContainerPrune(_ context.Context, options dockerclient.ContainerPruneOptions) (dockerclient.ContainerPruneResult, error) {
+	m.containersPruneFilters = append(m.containersPruneFilters, options.Filters)
 	if m.containersPruneErr != nil {
-		return container.PruneReport{}, m.containersPruneErr
+		return dockerclient.ContainerPruneResult{}, m.containersPruneErr
 	}
-	return container.PruneReport{}, nil
+	return dockerclient.ContainerPruneResult{}, nil
 }
 
-func (m *mockDocker) ImagesPrune(_ context.Context, pruneFilters filters.Args) (image.PruneReport, error) {
-	m.imagesPruneFilters = append(m.imagesPruneFilters, pruneFilters)
+func (m *mockDocker) ImagePrune(_ context.Context, options dockerclient.ImagePruneOptions) (dockerclient.ImagePruneResult, error) {
+	m.imagesPruneFilters = append(m.imagesPruneFilters, options.Filters)
 	if m.imagesPruneErr != nil {
-		return image.PruneReport{}, m.imagesPruneErr
+		return dockerclient.ImagePruneResult{}, m.imagesPruneErr
 	}
-	return image.PruneReport{}, nil
+	return dockerclient.ImagePruneResult{}, nil
 }
 
-func (m *mockDocker) BuildCachePrune(_ context.Context, opts build.CachePruneOptions) (*build.CachePruneReport, error) {
+func (m *mockDocker) BuildCachePrune(_ context.Context, opts dockerclient.BuildCachePruneOptions) (dockerclient.BuildCachePruneResult, error) {
 	m.buildCachePruneOpts = append(m.buildCachePruneOpts, opts)
 	if m.buildCachePruneErr != nil {
-		return nil, m.buildCachePruneErr
+		return dockerclient.BuildCachePruneResult{}, m.buildCachePruneErr
 	}
-	return &build.CachePruneReport{}, nil
+	return dockerclient.BuildCachePruneResult{}, nil
 }
 
-func (m *mockDocker) VolumeRemove(ctx context.Context, volumeID string, _ bool) error {
+func (m *mockDocker) VolumeRemove(ctx context.Context, volumeID string, _ dockerclient.VolumeRemoveOptions) (dockerclient.VolumeRemoveResult, error) {
 	m.volumesRemoved = append(m.volumesRemoved, volumeID)
 	if m.volumeRemoveBlocks {
 		<-ctx.Done()
-		return ctx.Err()
+		return dockerclient.VolumeRemoveResult{}, ctx.Err()
 	}
-	return nil
+	return dockerclient.VolumeRemoveResult{}, nil
 }
 
-func (m *mockDocker) ContainerList(_ context.Context, _ container.ListOptions) ([]container.Summary, error) {
-	return m.containers, nil
+func (m *mockDocker) ContainerList(_ context.Context, _ dockerclient.ContainerListOptions) (dockerclient.ContainerListResult, error) {
+	return dockerclient.ContainerListResult{Items: m.containers}, nil
 }
 
-func (m *mockDocker) VolumeList(_ context.Context, _ volume.ListOptions) (volume.ListResponse, error) {
-	return volume.ListResponse{Volumes: m.volumes}, nil
+func (m *mockDocker) VolumeList(_ context.Context, _ dockerclient.VolumeListOptions) (dockerclient.VolumeListResult, error) {
+	return dockerclient.VolumeListResult{Items: m.volumes}, nil
 }
 
-func (m *mockDocker) ContainerWait(_ context.Context, _ string, _ container.WaitCondition) (<-chan container.WaitResponse, <-chan error) {
+func (m *mockDocker) ContainerWait(_ context.Context, _ string, _ dockerclient.ContainerWaitOptions) dockerclient.ContainerWaitResult {
 	statusCh := make(chan container.WaitResponse, 1)
 	errCh := make(chan error, 1)
 	if m.waitErr != nil {
@@ -127,7 +123,7 @@ func (m *mockDocker) ContainerWait(_ context.Context, _ string, _ container.Wait
 	} else {
 		statusCh <- container.WaitResponse{StatusCode: m.waitStatus}
 	}
-	return statusCh, errCh
+	return dockerclient.ContainerWaitResult{Result: statusCh, Error: errCh}
 }
 
 func newTestDockerBackend(sharedVolume string, dind bool) (*DockerBackend, *mockDocker) {
@@ -198,7 +194,7 @@ func assertFixOwnCmd(t *testing.T, cmd []string, targets ...string) {
 		t.Errorf("script should chown only when the owner is wrong, got: %q", script)
 	}
 	for _, target := range targets {
-		if !strings.Contains(script, "fix_own "+target+";") {
+		if !strings.Contains(script, "fix_own "+shellQuote(target)+";") {
 			t.Errorf("script should fix ownership of %s, got: %q", target, script)
 		}
 	}
@@ -572,21 +568,19 @@ func TestCleanupSharedDocker_WipesBuildCacheWhenRequested(t *testing.T) {
 		t.Fatalf("expected 1 build cache prune, got %d", len(md.buildCachePruneOpts))
 	}
 	got := md.buildCachePruneOpts[0]
-	if !got.All || got.ReservedSpace != 0 || got.Filters.Len() != 0 {
+	if !got.All || got.MaxUsedSpace != 0 || len(got.Filters) != 0 {
 		t.Errorf("build cache prune opts = %+v, want unfiltered All:true wipe", got)
 	}
 }
 
-func TestCleanupSharedDocker_SkipsBuildCacheWipeWhenRuntimePruneOwnsIt(t *testing.T) {
+func TestCleanupSharedDocker_SkipsDaemonPruneWhenNotRequested(t *testing.T) {
 	md := &mockDocker{}
 
 	CleanupSharedDocker(context.Background(), md, nil, false, slog.New(slog.DiscardHandler))
 
-	// Dangling images are still pruned unconditionally...
-	if len(md.imagesPruneFilters) != 1 {
-		t.Fatalf("expected 1 images prune, got %d", len(md.imagesPruneFilters))
+	if len(md.imagesPruneFilters) != 0 {
+		t.Fatalf("expected no images prune, got %d", len(md.imagesPruneFilters))
 	}
-	// ...but the build cache survives the restart for the next process run.
 	if len(md.buildCachePruneOpts) != 0 {
 		t.Errorf("expected no build cache prune, got %d", len(md.buildCachePruneOpts))
 	}
@@ -787,6 +781,18 @@ func TestCleanupSharedVolumeStale_RunsHelperContainer(t *testing.T) {
 	}
 }
 
+func TestCleanupSharedVolumeStale_QuotesMountPath(t *testing.T) {
+	md := &mockDocker{}
+	path := "/shared dir/it's"
+	if err := CleanupSharedVolumeStale(context.Background(), md, "img", "runner-shared", path, 24*time.Hour, slog.New(slog.DiscardHandler)); err != nil {
+		t.Fatal(err)
+	}
+	cmd := strings.Join(md.createCalls[0].config.Cmd, " ")
+	if !strings.Contains(cmd, shellQuote(path)) {
+		t.Fatalf("cleanup command does not shell-quote mount path: %q", cmd)
+	}
+}
+
 func TestCleanupSharedVolumeStale_CustomVolumeName(t *testing.T) {
 	md := &mockDocker{}
 	if err := CleanupSharedVolumeStale(context.Background(), md, "img", "team-a-shared", "/shared", 24*time.Hour, slog.New(slog.DiscardHandler)); err != nil {
@@ -871,7 +877,7 @@ func TestCleanupOrphanedBuildxBuilders_RemovesOldKeepsYoungAndOthers(t *testing.
 }
 
 func TestCleanupOrphanedBuildxBuilders_ReapsDanglingVolumes(t *testing.T) {
-	md := &mockDocker{volumes: []*volume.Volume{
+	md := &mockDocker{volumes: []volume.Volume{
 		{Name: "buildx_buildkit_builder-gone0_state"},
 		{Name: "runner-shared"}, // must be left untouched
 	}}
@@ -894,54 +900,54 @@ func TestPruneDockerRuntime(t *testing.T) {
 		budgetGB    int
 
 		// Expected recorded calls, in order; nil means the prune must not run.
-		wantContainersFilters []filters.Args
-		wantImagesFilters     []filters.Args
-		wantCacheOpts         []build.CachePruneOptions
+		wantContainersFilters []dockerclient.Filters
+		wantImagesFilters     []dockerclient.Filters
+		wantCacheOpts         []dockerclient.BuildCachePruneOptions
 	}{
 		{
 			name:        "all portions enabled",
 			ttl:         24 * time.Hour,
 			cacheMaxAge: 7 * 24 * time.Hour,
 			budgetGB:    20,
-			wantContainersFilters: []filters.Args{
-				filters.NewArgs(filters.Arg("until", "24h0m0s")),
+			wantContainersFilters: []dockerclient.Filters{
+				make(dockerclient.Filters).Add("until", "24h0m0s"),
 			},
-			wantImagesFilters: []filters.Args{
-				filters.NewArgs(filters.Arg("dangling", "true"), filters.Arg("until", "24h0m0s")),
+			wantImagesFilters: []dockerclient.Filters{
+				make(dockerclient.Filters).Add("dangling", "true").Add("until", "24h0m0s"),
 			},
-			wantCacheOpts: []build.CachePruneOptions{
-				{All: true, Filters: filters.NewArgs(filters.Arg("until", "168h0m0s"))},
-				{All: true, ReservedSpace: 20 * gb},
+			wantCacheOpts: []dockerclient.BuildCachePruneOptions{
+				{All: true, Filters: make(dockerclient.Filters).Add("until", "168h0m0s")},
+				{All: true, MaxUsedSpace: 20 * gb},
 			},
 		},
 		{
 			name:        "ttl zero skips containers and images",
 			ttl:         0,
 			cacheMaxAge: 48 * time.Hour,
-			wantCacheOpts: []build.CachePruneOptions{
-				{All: true, Filters: filters.NewArgs(filters.Arg("until", "48h0m0s"))},
+			wantCacheOpts: []dockerclient.BuildCachePruneOptions{
+				{All: true, Filters: make(dockerclient.Filters).Add("until", "48h0m0s")},
 			},
 		},
 		{
 			name:        "negative ttl skips containers and images",
 			ttl:         -time.Hour,
 			cacheMaxAge: 48 * time.Hour,
-			wantCacheOpts: []build.CachePruneOptions{
-				{All: true, Filters: filters.NewArgs(filters.Arg("until", "48h0m0s"))},
+			wantCacheOpts: []dockerclient.BuildCachePruneOptions{
+				{All: true, Filters: make(dockerclient.Filters).Add("until", "48h0m0s")},
 			},
 		},
 		{
 			name:     "cacheMaxAge zero skips age-based cache prune",
 			ttl:      time.Hour,
 			budgetGB: 5,
-			wantContainersFilters: []filters.Args{
-				filters.NewArgs(filters.Arg("until", "1h0m0s")),
+			wantContainersFilters: []dockerclient.Filters{
+				make(dockerclient.Filters).Add("until", "1h0m0s"),
 			},
-			wantImagesFilters: []filters.Args{
-				filters.NewArgs(filters.Arg("dangling", "true"), filters.Arg("until", "1h0m0s")),
+			wantImagesFilters: []dockerclient.Filters{
+				make(dockerclient.Filters).Add("dangling", "true").Add("until", "1h0m0s"),
 			},
-			wantCacheOpts: []build.CachePruneOptions{
-				{All: true, ReservedSpace: 5 * gb},
+			wantCacheOpts: []dockerclient.BuildCachePruneOptions{
+				{All: true, MaxUsedSpace: 5 * gb},
 			},
 		},
 		{
@@ -949,14 +955,14 @@ func TestPruneDockerRuntime(t *testing.T) {
 			ttl:         time.Hour,
 			cacheMaxAge: time.Hour,
 			budgetGB:    0,
-			wantContainersFilters: []filters.Args{
-				filters.NewArgs(filters.Arg("until", "1h0m0s")),
+			wantContainersFilters: []dockerclient.Filters{
+				make(dockerclient.Filters).Add("until", "1h0m0s"),
 			},
-			wantImagesFilters: []filters.Args{
-				filters.NewArgs(filters.Arg("dangling", "true"), filters.Arg("until", "1h0m0s")),
+			wantImagesFilters: []dockerclient.Filters{
+				make(dockerclient.Filters).Add("dangling", "true").Add("until", "1h0m0s"),
 			},
-			wantCacheOpts: []build.CachePruneOptions{
-				{All: true, Filters: filters.NewArgs(filters.Arg("until", "1h0m0s"))},
+			wantCacheOpts: []dockerclient.BuildCachePruneOptions{
+				{All: true, Filters: make(dockerclient.Filters).Add("until", "1h0m0s")},
 			},
 		},
 		{

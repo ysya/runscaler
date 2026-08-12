@@ -15,3 +15,11 @@ type RunnerBackend interface {
 	// Shutdown performs backend-specific cleanup (prune images, remove volumes, etc.).
 	Shutdown(ctx context.Context)
 }
+
+// RunnerWatcher is optionally implemented by backends that can observe a
+// runner resource exiting independently of GitHub job messages. A nil return
+// means the resource stopped; a non-nil error means observation failed or the
+// context ended.
+type RunnerWatcher interface {
+	WaitRunner(ctx context.Context, resourceID string) error
+}

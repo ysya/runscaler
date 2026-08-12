@@ -56,6 +56,8 @@ flowchart LR
 - **VM warm pool** — pre-boot macOS VMs for instant job pickup (~2s vs ~30s cold boot)
 - **Shared volumes** — cross-runner caching via named Docker volumes
 - **Multi-org support** — manage multiple scale sets from a single process, mix Docker and Tart backends
+- **Self-healing capacity** — replace containers/VMs that exit before GitHub reports job completion
+- **Operational safety** — one process per host, localhost-only health checks, and built-in rotating logs
 - **Single binary** — no runtime dependencies beyond Docker (or Tart for macOS)
 - **Config file or flags** — TOML config with CLI flag overrides
 
@@ -164,6 +166,7 @@ jobs:
 | `runner validate`        | Validate configuration and connectivity                |
 | `runner status`          | Show current runner status via health endpoint         |
 | `runner doctor`          | Diagnose and clean up orphaned containers/VMs          |
+| `runner logs`            | Show/follow runner's rotating log file                  |
 | `runner version`         | Show version, commit, build date, and runtime info     |
 | `runner update`          | Update runner to the latest release                    |
 | `runner update --check`  | Check for updates without installing                   |
@@ -192,7 +195,24 @@ runner doctor
 runner doctor --fix
 ```
 
-The `--fix` flag will refuse to run if runner is currently active (detected via health endpoint), preventing accidental removal of in-use resources.
+The `--fix` flag takes the same machine-wide lock as `runner run`, so it refuses
+to remove resources while any current runner instance is active. The health
+probe remains as a compatibility check for older runner versions.
+
+### Logs
+
+`runner run` writes to stdout and a rotating file (10 MB plus one backup).
+With a config file, the default is `runner.log` next to that config; without
+one, it is `runner.log` in the working directory. Set `log-file` to an explicit
+path, or set `log-file = ""` to disable file logging.
+
+```bash
+runner logs --config config.toml          # last 100 lines
+runner logs -n 500 -f --config config.toml
+```
+
+Only one `runner run` process may be active on a host. Put every organization
+or repository in that process using multiple `[[scaleset]]` entries.
 
 ## Configuration
 
@@ -220,16 +240,19 @@ runner-image = "ghcr.io/actions/actions-runner:latest"
 runner-group = "default"
 log-level = "info"
 log-format = "text"
+# log-file = "/var/log/runner/runner.log" # default: runner.log beside config
+health-address = "127.0.0.1"              # localhost-only by default
+health-port = 8080
 
 [docker]
 socket = "/var/run/docker.sock"
 dind = true
 shared-volume = "/shared"
 # shared-volume-ttl = "168h"            # delete shared-volume files older than this (0 = disabled)
-# buildx-cleanup = true                 # remove orphaned buildx builders (default: on)
+# buildx-cleanup = true                 # opt in only on a runner-dedicated daemon
 # buildx-cleanup-ttl = "24h"            # remove buildx builders older than this
 # buildx-cleanup-interval = "6h"        # how often the buildx sweep runs
-# prune = true                          # periodic prune of the shared daemon (default: on)
+# prune = true                          # opt in only on a runner-dedicated daemon
 # prune-interval = "6h"                 # how often the runtime prune sweep runs
 # prune-ttl = "24h"                     # remove stopped containers and dangling images older than this
 # build-cache-max-age = "168h"          # prune build cache entries not used within this window
@@ -239,21 +262,20 @@ shared-volume = "/shared"
 When runners build images with `docker buildx` (e.g. via
 `docker/setup-buildx-action`), each run can leave behind a BuildKit builder
 container plus a multi-GB `buildx_buildkit_*_state` volume. On a persistent host
-sharing one Docker daemon these accumulate until the disk fills. runner
-removes builders older than `buildx-cleanup-ttl` on a timer — the TTL is kept
-well above any realistic build so in-progress builds are never disrupted.
-Disable with `buildx-cleanup = false` only if you run a persistent builder via
-buildx `keep-state` + a fixed builder name.
+sharing one Docker daemon these accumulate until the disk fills. On a daemon
+dedicated to runners, opt in with `buildx-cleanup = true`; runner then removes
+builders older than `buildx-cleanup-ttl`. Do not enable it when persistent
+builders or unrelated workloads share the daemon.
 
 Beyond buildx builders, jobs mounting the host Docker socket leave dangling
 images, stopped containers, and daemon build cache behind on every build. The
-runtime prune sweep (enabled by default) reclaims these on a timer while
+runtime prune sweep (opt in with `prune = true`) reclaims these on a timer while
 runner is up: stopped containers and dangling images older than `prune-ttl`,
 build cache not used within `build-cache-max-age`, and — with
 `build-cache-budget` set — build cache above the GB cap. It assumes the daemon
 is dedicated to runners: matching objects are treated as job garbage
-regardless of what created them; disable with `prune = false` on a shared
-daemon. While the sweep is enabled it also owns build-cache retention, so the
+regardless of what created them. Keep it disabled on a shared daemon. While
+the sweep is enabled it also owns build-cache retention, so the
 previous exit-time full build-cache wipe no longer runs — restarts (including
 self-updates) keep a warm cache.
 
@@ -372,6 +394,7 @@ pool-size = 2
 | `--log-level`       | `log-level`          | `info`                                  | Log level (debug/info/warn/error)                 |
 | `--log-format`      | `log-format`         | `text`                                  | Log format (text/json)                            |
 | `--dry-run`         | `dry-run`            | `false`                                 | Validate everything without starting listeners    |
+| `--health-address`  | `health-address`      | `127.0.0.1`                             | Health check listen address                       |
 | `--health-port`     | `health-port`        | `8080`                                  | Health check HTTP port (0 to disable)             |
 
 Advanced tuning keys (cleanup, cache volumes, isolation) are config-file only by design — see `config.example.toml` for the full list.
@@ -380,7 +403,7 @@ Advanced tuning keys (cleanup, cache volumes, isolation) are config-file only by
 
 Ephemeral runners start cold — nothing survives between jobs unless you opt in. Three mechanisms compose:
 
-**Docker layer cache (automatic).** With `dind = true` jobs talk to the host daemon directly, so `docker pull` and `docker build` layer caches are shared across all jobs and survive restarts. The runtime prune sweep keeps growth bounded (`prune-ttl`, `build-cache-max-age`, `build-cache-budget`).
+**Docker layer cache (automatic).** With `dind = true` jobs talk to the host daemon directly, so `docker pull` and `docker build` layer caches are shared across all jobs and survive restarts. On a dedicated daemon, the opt-in runtime prune sweep can bound growth (`prune`, `prune-ttl`, `build-cache-max-age`, `build-cache-budget`).
 
 **Cache volumes (`cache-volumes`).** Named volumes mounted into every runner container at tool-default cache paths — workflows hit warm caches with zero workflow changes:
 
@@ -397,11 +420,11 @@ Volumes are created on first use and never swept — they are persistent caches;
 
 **Shared volume (`shared-volume`).** A general-purpose volume mounted at the same path in every runner (exposed as `$SHARED_DIR`) for workflows that pass files around explicitly, with optional TTL cleanup (`shared-volume-ttl`).
 
-> **BuildKit tip:** `docker/setup-buildx-action` creates a throwaway builder per job whose cache dies with the job (runner only garbage-collects the leftovers — see `buildx-cleanup`). To actually reuse build cache across jobs, build with the daemon's built-in BuildKit (plain `docker build`, or buildx with `driver: docker`) so the cache lands where `build-cache-*` retention manages it — or run one persistent named builder and set `buildx-cleanup = false`.
+> **BuildKit tip:** `docker/setup-buildx-action` creates a throwaway builder per job whose cache dies with the job (runner can garbage-collect the leftovers when `buildx-cleanup` is enabled). To actually reuse build cache across jobs, build with the daemon's built-in BuildKit (plain `docker build`, or buildx with `driver: docker`) so the cache lands where `build-cache-*` retention manages it.
 
 ## Security & Isolation
 
-**`dind = true` is Docker-socket sharing, not sandboxed Docker-in-Docker.** Runner containers mount the host's Docker socket, so any job can control the host daemon — start privileged containers, mount the host filesystem, inspect other jobs' containers. That is root-equivalent access to the host. Only run code you trust: **never expose these runners to pull requests from public forks**, and keep the daemon dedicated to runners (the cleanup sweepers assume this too). Set `dind = false` for scale sets that don't need to build images.
+**`dind = true` is Docker-socket sharing, not sandboxed Docker-in-Docker.** Runner containers mount the host's Docker socket, so any job can control the host daemon — start privileged containers, mount the host filesystem, inspect other jobs' containers. That is root-equivalent access to the host. Only run code you trust: **never expose these runners to pull requests from public forks**. Set `dind = false` for scale sets that don't need to build images. Daemon-wide buildx/prune sweepers are off by default and should only be enabled on a Docker daemon dedicated to runners.
 
 Isolation knobs, all per scale set under `[docker]`:
 
@@ -452,12 +475,13 @@ Built on top of [actions/scaleset](https://github.com/actions/scaleset), the off
 Key components:
 
 ```
-cmd/runner/          CLI entry point, commands (run, init, validate, status, doctor, version)
+cmd/runner/          CLI entry point, commands (run, init, validate, status, doctor, logs, version)
 internal/
   config/            Configuration management with Viper (flags + TOML)
   backend/           RunnerBackend interface + Docker/Tart implementations
   scaler/            Implements listener.Scaler for runner lifecycle
   health/            Health check HTTP server
+  lock/              Machine-wide process and destructive-maintenance lock
   versioncheck/      GitHub releases API client for update notifications and in-place binary updates
 ```
 

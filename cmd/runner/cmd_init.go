@@ -32,6 +32,7 @@ func init() {
 	flags.String("token", "", "Personal access token")
 	flags.Int("max-runners", config.DefaultMaxRunners, "Maximum concurrent runners")
 	flags.String("backend", "", "Runner backend (docker or tart)")
+	flags.String("runner-image", "", "Runner container or Tart VM image")
 	flags.Bool("dind", config.DefaultDinD, "Enable Docker-in-Docker")
 	flags.String("shared-volume", "", "Shared volume path (e.g. /shared)")
 	flags.String("output", "config.toml", "Output file path")
@@ -57,6 +58,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 	token, _ := cmd.Flags().GetString("token")
 	maxRunners, _ := cmd.Flags().GetInt("max-runners")
 	backend, _ := cmd.Flags().GetString("backend")
+	runnerImage, _ := cmd.Flags().GetString("runner-image")
 	dind, _ := cmd.Flags().GetBool("dind")
 	// Interactive mode: prompt for missing values
 	var err error
@@ -97,11 +99,16 @@ func runInit(cmd *cobra.Command, args []string) error {
 			backend = config.DefaultBackend
 		}
 	}
+	if backend != "docker" && backend != "tart" {
+		return fmt.Errorf("backend must be \"docker\" or \"tart\", got %q", backend)
+	}
+	if maxRunners < 1 {
+		return fmt.Errorf("max-runners must be at least 1")
+	}
 
 	var configContent string
 	if backend == "tart" {
 		// Tart backend config
-		runnerImage, _ := cmd.Flags().GetString("runner-image")
 		if runnerImage == "" || runnerImage == config.DefaultRunnerImage {
 			runnerImage, err = promptString("Tart base VM image (e.g. ghcr.io/cirruslabs/macos-sequoia-xcode:latest)")
 			if err != nil {
@@ -109,7 +116,19 @@ func runInit(cmd *cobra.Command, args []string) error {
 			}
 		}
 		if maxRunners > 2 {
-			fmt.Println("  ⚠ Note: macOS VMs are limited to 2 concurrent per Apple Silicon host")
+			return fmt.Errorf("max-runners must be <= 2 for the Tart backend")
+		}
+		candidate := config.ScaleSetConfig{
+			RegistrationURL: url,
+			ScaleSetName:    name,
+			Token:           token,
+			MaxRunners:      maxRunners,
+			Backend:         "tart",
+			RunnerImage:     runnerImage,
+			Tart:            config.TartConfig{RunnerDir: config.DefaultTartRunnerDir},
+		}
+		if err := candidate.Validate(); err != nil {
+			return fmt.Errorf("invalid configuration: %w", err)
 		}
 		configContent = fmt.Sprintf(`# runner configuration
 # See: https://github.com/ysya/runscaler
@@ -128,6 +147,15 @@ token = %q
 max-runners = %d
 min-runners = 0
 
+# --- Global ---
+log-level = %q
+log-format = %q
+# log-file defaults to runner.log beside this config; set log-file = "" to disable
+
+# Health check server (localhost-only by default; use 0.0.0.0 explicitly to expose)
+# health-address = %q
+# health-port = %d
+
 # Backend: "docker" (Linux containers) or "tart" (macOS VMs)
 backend = "tart"
 
@@ -137,19 +165,16 @@ runner-image = %q
 [tart]
 # Path to the runner binary inside the VM
 runner-dir = %q
-
-# --- Global ---
-log-level = %q
-log-format = %q
-
-# Health check server port (0 to disable)
-# health-port = %d
 `, url, name, token, maxRunners,
-			runnerImage, config.DefaultTartRunnerDir,
 			config.DefaultLogLevel, config.DefaultLogFormat,
-			config.DefaultHealthPort)
+			config.DefaultHealthAddress, config.DefaultHealthPort,
+			runnerImage, config.DefaultTartRunnerDir,
+		)
 	} else {
 		// Docker backend config
+		if runnerImage == "" {
+			runnerImage = config.DefaultRunnerImage
+		}
 		if !cmd.Flags().Changed("dind") {
 			dind, err = promptYN("Enable Docker-in-Docker?", config.DefaultDinD)
 			if err != nil {
@@ -166,6 +191,22 @@ log-format = %q
 				sharedVolume = "/shared"
 			}
 		}
+		candidate := config.ScaleSetConfig{
+			RegistrationURL: url,
+			ScaleSetName:    name,
+			Token:           token,
+			MaxRunners:      maxRunners,
+			Backend:         config.DefaultBackend,
+			RunnerImage:     runnerImage,
+			Docker: config.DockerConfig{
+				Socket:       config.DefaultDockerSocket,
+				DinD:         &dind,
+				SharedVolume: sharedVolume,
+			},
+		}
+		if err := candidate.Validate(); err != nil {
+			return fmt.Errorf("invalid configuration: %w", err)
+		}
 
 		configContent = fmt.Sprintf(`# runner configuration
 # See: https://github.com/ysya/runscaler
@@ -183,6 +224,15 @@ token = %q
 # Runner limits
 max-runners = %d
 min-runners = 0
+
+# --- Global ---
+log-level = %q
+log-format = %q
+# log-file defaults to runner.log beside this config; set log-file = "" to disable
+
+# Health check server (localhost-only by default; use 0.0.0.0 explicitly to expose)
+# health-address = %q
+# health-port = %d
 
 # Docker image for runners
 runner-image = %q
@@ -204,18 +254,12 @@ shared-volume = %q
 # memory = 8192   # MB (recommended: 6144+ for Android/Gradle builds)
 # cpu = 4         # cores
 
-# Orphaned buildx builder cleanup (on by default). docker buildx builders
-# leak state volumes on persistent hosts; runner removes ones older than
-# the TTL. Disable only if you run a persistent builder via keep-state.
+# Orphaned buildx builder cleanup (off by default because it is daemon-wide).
+# Enable only when the Docker daemon is dedicated to runners.
 # buildx-cleanup = false
 # buildx-cleanup-ttl = "24h"
-
-# --- Global ---
-log-level = %q
-log-format = %q
-
-# Health check server port (0 to disable)
-# health-port = %d
+# prune = false
+# prune-ttl = "24h"
 
 # --- Multi-org / mixed backend example ---
 # Uncomment and duplicate [[scaleset]] blocks:
@@ -235,10 +279,11 @@ log-format = %q
 # max-runners = 2
 # runner-image = "ghcr.io/cirruslabs/macos-sequoia-xcode:latest"
 `, url, name, token, maxRunners,
-			config.DefaultRunnerImage, config.DefaultBackend,
-			dind, config.DefaultDockerSocket, sharedVolume,
 			config.DefaultLogLevel, config.DefaultLogFormat,
-			config.DefaultHealthPort)
+			config.DefaultHealthAddress, config.DefaultHealthPort,
+			runnerImage, config.DefaultBackend,
+			dind, config.DefaultDockerSocket, sharedVolume,
+		)
 	}
 
 	if err := os.WriteFile(output, []byte(configContent), 0600); err != nil {

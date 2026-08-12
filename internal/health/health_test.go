@@ -130,6 +130,7 @@ func TestReadyzNoScalers(t *testing.T) {
 func TestReadyzWithScaler(t *testing.T) {
 	h := newTestServer()
 	h.RegisterScaler("test-set", &stubScaler{idle: 1, busy: 0})
+	h.MarkConnected("test-set")
 
 	req := httptest.NewRequest("GET", "/readyz", nil)
 	w := httptest.NewRecorder()
@@ -145,6 +146,19 @@ func TestReadyzWithScaler(t *testing.T) {
 	}
 	if resp["status"] != "ok" {
 		t.Errorf("status = %q, want %q", resp["status"], "ok")
+	}
+}
+
+func TestReadyzDisconnectedScaler(t *testing.T) {
+	h := newTestServer()
+	h.RegisterScaler("test-set", &stubScaler{})
+	h.MarkDisconnected("test-set", "connection lost")
+
+	req := httptest.NewRequest("GET", "/readyz", nil)
+	w := httptest.NewRecorder()
+	h.handleReadyz(w, req)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusServiceUnavailable)
 	}
 }
 

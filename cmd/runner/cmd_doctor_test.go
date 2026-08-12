@@ -2,29 +2,32 @@ package main
 
 import (
 	"context"
-	"errors"
+	"fmt"
 	"testing"
 
-	"github.com/docker/docker/api/types/volume"
+	cerrdefs "github.com/containerd/errdefs"
+	dockerclient "github.com/moby/moby/client"
 )
 
 type fakeVolumeAPI struct {
-	existing map[string]bool
-	removed  []string
+	existing   map[string]bool
+	removed    []string
+	inspectErr error
 }
 
-func (f *fakeVolumeAPI) VolumeInspect(_ context.Context, id string) (volume.Volume, error) {
+func (f *fakeVolumeAPI) VolumeInspect(_ context.Context, id string, _ dockerclient.VolumeInspectOptions) (dockerclient.VolumeInspectResult, error) {
 	if f.existing[id] {
-		return volume.Volume{Name: id}, nil
+		return dockerclient.VolumeInspectResult{}, nil
 	}
-	// checkDockerVolume treats any non-nil error as "volume absent", so the
-	// exact error type does not matter here.
-	return volume.Volume{}, errors.New("not found")
+	if f.inspectErr != nil {
+		return dockerclient.VolumeInspectResult{}, f.inspectErr
+	}
+	return dockerclient.VolumeInspectResult{}, cerrdefs.ErrNotFound
 }
 
-func (f *fakeVolumeAPI) VolumeRemove(_ context.Context, id string, _ bool) error {
+func (f *fakeVolumeAPI) VolumeRemove(_ context.Context, id string, _ dockerclient.VolumeRemoveOptions) (dockerclient.VolumeRemoveResult, error) {
 	f.removed = append(f.removed, id)
-	return nil
+	return dockerclient.VolumeRemoveResult{}, nil
 }
 
 func TestCheckDockerVolumeRemovesCurrentAndLegacy(t *testing.T) {
@@ -78,5 +81,12 @@ func TestCheckDockerVolumeNoneFound(t *testing.T) {
 	}
 	if issues != 0 {
 		t.Errorf("issues = %d, want 0 when no volumes exist", issues)
+	}
+}
+
+func TestCheckDockerVolumeSurfacesInspectFailure(t *testing.T) {
+	f := &fakeVolumeAPI{existing: map[string]bool{}, inspectErr: fmt.Errorf("permission denied")}
+	if _, err := checkDockerVolume(context.Background(), f, false); err == nil {
+		t.Fatal("expected volume inspection failure to be returned")
 	}
 }

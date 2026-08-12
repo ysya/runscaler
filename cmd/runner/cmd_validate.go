@@ -80,14 +80,13 @@ func runValidate(cmd *cobra.Command, args []string) error {
 			dockerClient, err := dockerclient.New(
 				dockerclient.FromEnv,
 				dockerclient.WithHost("unix://"+socket),
-				dockerclient.WithAPIVersionNegotiation(),
 			)
 			if err != nil {
 				fmt.Printf("  ✗ Docker client for %s: %s\n", socket, err)
 				return fmt.Errorf("validation failed")
 			}
 			if _, err := dockerClient.Ping(ctx, dockerclient.PingOptions{NegotiateAPIVersion: true}); err != nil {
-				dockerClient.Close()
+				_ = dockerClient.Close()
 				fmt.Printf("  ✗ Docker connectivity at %s: %s\n", socket, err)
 				fmt.Println("\n  Possible fixes:")
 				fmt.Println("  1. Ensure Docker is running")
@@ -95,7 +94,7 @@ func runValidate(cmd *cobra.Command, args []string) error {
 				fmt.Println("  3. Re-login or run: newgrp docker")
 				return fmt.Errorf("validation failed")
 			}
-			dockerClient.Close()
+			_ = dockerClient.Close()
 			fmt.Printf("  ✓ Docker is reachable at %s\n", socket)
 		}
 	}

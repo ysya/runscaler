@@ -202,11 +202,11 @@ func migrateService(user bool) (bool, error) {
 // migrateVolume removes the legacy shared docker volume. Best-effort; returns
 // whether it removed anything.
 func migrateVolume(ctx context.Context) bool {
-	client, err := dockerclient.New(dockerclient.FromEnv, dockerclient.WithAPIVersionNegotiation())
+	client, err := dockerclient.New(dockerclient.FromEnv)
 	if err != nil {
 		return false
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 	if _, err := client.VolumeInspect(ctx, legacySharedVolume, dockerclient.VolumeInspectOptions{}); err != nil {
 		return false
 	}

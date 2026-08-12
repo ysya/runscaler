@@ -66,7 +66,7 @@ func tailFile(cmd *cobra.Command, path string, lines int, follow bool) error {
 		return nil
 	}
 
-	var offset int64 = int64(len(data))
+	offset := int64(len(data))
 	var identity os.FileInfo
 	if identity, err = os.Stat(path); err != nil {
 		return err

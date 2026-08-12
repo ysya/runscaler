@@ -213,7 +213,7 @@ func run(ctx context.Context, cfg config.Config) error {
 		if err != nil {
 			fmt.Fprintf(os.Stdout, "Warning: cannot open log file %s; continuing with stdout only: %v\n", path, err)
 		} else {
-			defer logFile.Close()
+			defer func() { _ = logFile.Close() }()
 		}
 	}
 	logger := config.NewLoggerWithWriter(cfg.LogLevel, cfg.LogFormat, logFile)
@@ -263,13 +263,12 @@ func run(ctx context.Context, cfg config.Config) error {
 			client, err := dockerclient.New(
 				dockerclient.FromEnv,
 				dockerclient.WithHost("unix://"+ss.Docker.Socket),
-				dockerclient.WithAPIVersionNegotiation(),
 			)
 			if err != nil {
 				return fmt.Errorf("failed to create Docker client for %s: %w", ss.Docker.Socket, err)
 			}
 			if _, err := client.Ping(ctx, dockerclient.PingOptions{NegotiateAPIVersion: true}); err != nil {
-				client.Close()
+				_ = client.Close()
 				return fmt.Errorf("cannot connect to Docker at %s: %w\n\n"+
 					"  Possible fixes:\n"+
 					"  1. Ensure Docker is running\n"+

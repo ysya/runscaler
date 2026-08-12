@@ -191,13 +191,12 @@ func checkDocker(ctx context.Context, socket string, fix bool) (int, error) {
 	dockerClient, err := dockerclient.New(
 		dockerclient.FromEnv,
 		dockerclient.WithHost("unix://"+socket),
-		dockerclient.WithAPIVersionNegotiation(),
 	)
 	if err != nil {
 		fmt.Println("  - Docker: not available (skipping)")
 		return 0, nil
 	}
-	defer dockerClient.Close()
+	defer func() { _ = dockerClient.Close() }()
 
 	if _, err := dockerClient.Ping(ctx, dockerclient.PingOptions{NegotiateAPIVersion: true}); err != nil {
 		fmt.Println("  - Docker: not reachable (skipping)")

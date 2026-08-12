@@ -44,6 +44,13 @@ const (
 	// when cache cleanup is enabled and no explicit interval is set.
 	DefaultTartCacheCleanupInterval = 24 * time.Hour
 
+	// DefaultDisableUpdate keeps GitHub from updating the runner binary inside
+	// the container or VM. True matches the image-based model: the runner is
+	// refreshed by rebuilding the image, and ephemeral runners avoid
+	// downloading an update on every job. Scale sets whose image lags behind
+	// GitHub's supported runner versions should override this to false.
+	DefaultDisableUpdate = true
+
 	// DefaultBuildxCleanup enables orphaned buildx builder cleanup by default.
 	// It acts as a safety net: `docker buildx create` builders (e.g. from
 	// docker/setup-buildx-action) leak on persistent hosts sharing one daemon,

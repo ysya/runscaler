@@ -533,6 +533,32 @@ func pruneTartCacheWith(ctx context.Context, runner CommandRunner, tartHome stri
 }
 
 // runRunner starts the GitHub Actions runner inside the VM via `tart exec`.
+// runnerStartCmd builds the shell command that launches the runner from the
+// JIT config staged at /tmp/jitconfig.
+//
+// The read and the delete both happen in the foreground, before the runner is
+// backgrounded. Putting `rm` after the `&` instead is a race: everything left
+// of `&` runs in an async subshell, so the command substitution reading the
+// file can lose to the foreground `rm`. The runner then starts with an empty
+// ACTIONS_RUNNER_INPUT_JITCONFIG and dies with "Not configured", leaving the
+// job queued forever.
+//
+// Deleting the file still matters — the JIT config is a registration
+// credential that should not outlive startup — so it is removed here, once
+// its value is safely held in a shell variable that the background subshell
+// inherits.
+func runnerStartCmd(runScript, jitPath string) string {
+	return fmt.Sprintf(
+		"JIT=$(cat %[2]s); rm -f %[2]s; "+
+			"ACTIONS_RUNNER_INPUT_JITCONFIG=\"$JIT\" nohup %[1]s > /tmp/runner.log 2>&1 &",
+		runScript, jitPath,
+	)
+}
+
+// jitConfigPath is where the JIT config is staged inside the VM before the
+// runner is started. It is deleted as soon as its value has been read.
+const jitConfigPath = "/tmp/jitconfig"
+
 // Uses Virtio gRPC (Guest Agent) instead of SSH — no network dependency.
 func (b *TartBackend) runRunner(ctx context.Context, vmName, jitConfig string) error {
 	// Verify runner binary exists before attempting to start
@@ -542,20 +568,12 @@ func (b *TartBackend) runRunner(ctx context.Context, vmName, jitConfig string) e
 	}
 
 	// Write JIT config to a temp file to avoid shell argument length limits
-	writeJIT := fmt.Sprintf("cat > /tmp/jitconfig <<'JITEOF'\n%s\nJITEOF", jitConfig)
+	writeJIT := fmt.Sprintf("cat > %s <<'JITEOF'\n%s\nJITEOF", jitConfigPath, jitConfig)
 	if _, err := b.cmd.Run(ctx, "tart", "exec", vmName, "sh", "-c", writeJIT); err != nil {
 		return fmt.Errorf("failed to write JIT config on %s: %w", vmName, err)
 	}
 
-	// Start runner in background, reading JIT config from file. The file is
-	// removed right after: $(cat ...) is captured before nohup launches, and
-	// the config is a registration credential that should not linger in the
-	// VM for the rest of the job.
-	startCmd := fmt.Sprintf(
-		"ACTIONS_RUNNER_INPUT_JITCONFIG=$(cat /tmp/jitconfig) nohup %s > /tmp/runner.log 2>&1 & rm -f /tmp/jitconfig",
-		runScript,
-	)
-	if _, err := b.cmd.Run(ctx, "tart", "exec", vmName, "sh", "-c", startCmd); err != nil {
+	if _, err := b.cmd.Run(ctx, "tart", "exec", vmName, "sh", "-c", runnerStartCmd(runScript, jitConfigPath)); err != nil {
 		return fmt.Errorf("failed to start runner on %s: %w", vmName, err)
 	}
 

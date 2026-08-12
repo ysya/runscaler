@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -333,5 +336,51 @@ func TestTartBackend_Shutdown_IsNoop(t *testing.T) {
 
 	if len(cmd.getCalls()) != 0 {
 		t.Errorf("Shutdown should not call any commands, got %d calls", len(cmd.getCalls()))
+	}
+}
+
+// TestRunnerStartCmd_PassesJITConfigBeforeDeletingIt executes the generated
+// command with a real shell and asserts the runner actually receives the JIT
+// config. A previous version put `rm` after the `&`, so the command
+// substitution reading the file raced the delete: the runner intermittently
+// started with an empty ACTIONS_RUNNER_INPUT_JITCONFIG and died with "Not
+// configured", leaving jobs queued forever. The loop makes that race show up
+// reliably rather than once in a while.
+func TestRunnerStartCmd_PassesJITConfigBeforeDeletingIt(t *testing.T) {
+	const want = "eyJfam10Y29uZmlnIjoidGVzdC1qaXQtY29uZmlnIn0="
+
+	for i := range 20 {
+		dir := t.TempDir()
+		jitPath := filepath.Join(dir, "jitconfig")
+		gotPath := filepath.Join(dir, "got")
+
+		if err := os.WriteFile(jitPath, []byte(want), 0o600); err != nil {
+			t.Fatalf("write jit config: %v", err)
+		}
+
+		// Stand-in for run.sh: records the env var the runner would see.
+		runScript := filepath.Join(dir, "run.sh")
+		script := fmt.Sprintf("#!/bin/sh\nprintf '%%s' \"$ACTIONS_RUNNER_INPUT_JITCONFIG\" > %s\n", gotPath)
+		if err := os.WriteFile(runScript, []byte(script), 0o700); err != nil {
+			t.Fatalf("write run script: %v", err)
+		}
+
+		// `wait` so the test observes the backgrounded runner's result.
+		cmd := exec.Command("sh", "-c", runnerStartCmd(runScript, jitPath)+"\nwait")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("iteration %d: shell failed: %v (%s)", i, err, out)
+		}
+
+		got, err := os.ReadFile(gotPath)
+		if err != nil {
+			t.Fatalf("iteration %d: runner never recorded a config: %v", i, err)
+		}
+		if string(got) != want {
+			t.Fatalf("iteration %d: runner saw JIT config %q, want %q — the delete raced the read",
+				i, got, want)
+		}
+		if _, err := os.Stat(jitPath); !os.IsNotExist(err) {
+			t.Errorf("iteration %d: JIT config still on disk after startup (stat err = %v)", i, err)
+		}
 	}
 }

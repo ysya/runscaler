@@ -431,3 +431,24 @@ func searchString(s, substr string) bool {
 	}
 	return false
 }
+
+func TestIsUpdateDisabled(t *testing.T) {
+	tr, fa := true, false
+	tests := []struct {
+		name string
+		set  *bool
+		want bool
+	}{
+		{"unset inherits default", nil, DefaultDisableUpdate},
+		{"explicit true", &tr, true},
+		{"explicit false allows self-update", &fa, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ss := ScaleSetConfig{DisableUpdate: tt.set}
+			if got := ss.IsUpdateDisabled(); got != tt.want {
+				t.Errorf("IsUpdateDisabled() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

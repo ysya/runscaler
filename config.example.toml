@@ -19,6 +19,12 @@ runner-image = "ghcr.io/actions/actions-runner:latest"
 runner-group = "default"
 max-runners = 10
 
+# disable-update = true   # bar GitHub from updating the runner binary in the
+#                         # image/VM (default). Set false when the image's
+#                         # bundled runner can't be refreshed easily — GitHub
+#                         # retires old runner versions, and one that may not
+#                         # update is refused and exits, leaving jobs queued.
+
 [docker]
 socket = "/var/run/docker.sock"
 dind = true

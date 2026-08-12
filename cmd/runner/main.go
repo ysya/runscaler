@@ -439,7 +439,7 @@ func runScaleSet(ctx context.Context, ss config.ScaleSetConfig, dockerClient *do
 		RunnerGroupID: runnerGroupID,
 		Labels:        config.BuildLabels(ss.ScaleSetName, ss.Labels),
 		RunnerSetting: scaleset.RunnerSetting{
-			DisableUpdate: true,
+			DisableUpdate: ss.IsUpdateDisabled(),
 		},
 	}
 

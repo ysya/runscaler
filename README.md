@@ -284,6 +284,18 @@ Xcode VM images are huge (50–80 GB each) and `:latest` tags accumulate old
 layers under `$TART_HOME/cache/` — set `cache-space-budget` to keep it
 bounded. The sweeper only touches OCI/IPSW caches, never your local VMs.
 
+**Runner version retirement.** By default runner sets `disable-update = true`,
+so GitHub never updates the runner binary inside the container or VM — the
+image-based model, where you refresh the runner by rebuilding the image.
+GitHub retires old runner versions server-side, and a runner that is both
+outdated and barred from updating connects, is refused with
+`Runner version vX.Y.Z is deprecated and cannot receive messages`, and exits.
+The scale set still shows Online while every runner it starts dies, so jobs
+queue with no visible cause. Container images are easy to rebuild, but a
+140 GB macOS VM image is not — set `disable-update = false` on those scale
+sets to let each runner update itself, trading a per-job download for
+self-healing across retirements.
+
 ### Token Security
 
 Avoid passing tokens as CLI flags (visible in `ps` output). Two alternatives:

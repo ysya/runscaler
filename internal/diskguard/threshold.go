@@ -38,7 +38,13 @@ var byteUnits = []struct {
 func ParseThreshold(s string) (Threshold, error) {
 	if rest, ok := strings.CutSuffix(s, "%"); ok {
 		pct, err := strconv.ParseFloat(rest, 64)
-		if err != nil || pct < 0 || pct > 100 {
+		// Written as the negation of the in-range condition, not as
+		// `pct < 0 || pct > 100`: every ordered comparison with NaN is
+		// false, so that direct form would let ParseFloat's accepted
+		// "NaN"/"Inf" spellings silently produce a threshold requiring 0
+		// bytes free — the guard would then never fire for a malformed
+		// config value instead of failing loudly at startup.
+		if err != nil || !(pct >= 0 && pct <= 100) {
 			return Threshold{}, invalidThresholdError(s)
 		}
 		return Threshold{Percent: pct}, nil

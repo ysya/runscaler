@@ -14,10 +14,10 @@ import (
 // dockerInfoTimeout bounds the one-time Info() call the Docker daemon
 // stores make to resolve the daemon's data root. Every other blocking
 // Docker API call in this codebase is timeout-bounded (see
-// cleanupSharedDockerTimeout, and the Ping calls in
-// cmd_validate.go/cmd_doctor.go) so a wedged daemon can never hang the
-// caller; a plain Info() call is lighter than those, so a shorter bound is
-// enough.
+// dockerReclaimTimeout below, volumeHelperTimeout in volume.go, and the
+// Ping calls in cmd_validate.go/cmd_doctor.go) so a wedged daemon can never
+// hang the caller; a plain Info() call is lighter than those, so a shorter
+// bound is enough.
 const dockerInfoTimeout = 10 * time.Second
 
 // dockerReclaimTimeout bounds every prune call dockerGarbageStore and
@@ -27,7 +27,7 @@ const dockerInfoTimeout = 10 * time.Second
 // see volumeHelperTimeout in volume.go for the equivalent bound on the
 // volume-backed stores. Without this, a wedged daemon blocks the sweeper
 // goroutine (or the disk guard's sweep) forever; this is the same class of
-// bug commit 6cc66b0 fixed for the exit-time cleanup path.
+// bug commit 6cc66b0 fixed for the since-removed exit-time cleanup path.
 const dockerReclaimTimeout = 10 * time.Minute
 
 // resolveDockerRootDir resolves the Docker daemon's data-root directory

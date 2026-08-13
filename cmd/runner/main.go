@@ -469,20 +469,13 @@ func run(ctx context.Context, cfg config.Config) error {
 	wg.Wait()
 	close(errs)
 
-	// Prune dangling Docker images once, after all Docker-backed scale sets
-	// have finished shutting down. Doing this per-backend races with
-	// container removal and concurrent prune operations. The shared volume
-	// is deliberately left alone here — see CleanupSharedDocker's doc
-	// comment: it holds handoff data for in-flight runs, so only the
-	// max-age sweep and disk guard reclaim it, never exit.
-	if needsDocker {
-		for socket := range dockerSets {
-			dockerClient := dockerClients[socket]
-			// Build cache belongs to the daemon, not this process. Retention is
-			// only performed by the explicit runtime-prune setting.
-			backend.CleanupSharedDocker(context.WithoutCancel(ctx), dockerClient, false, logger)
-		}
-	}
+	// Nothing is reclaimed here at exit, by design. Every store has a
+	// lifecycle that outlives this process: the shared volume holds handoff
+	// data for runs still in flight across a restart, and images, build
+	// cache and cache volumes belong to the daemon or to the next job.
+	// Reclamation belongs to the periodic sweepers and the disk guard
+	// above, which is also what keeps a self-update from deleting anything
+	// a workflow is mid-way through using.
 
 	// Collect errors
 	var errsSlice []error

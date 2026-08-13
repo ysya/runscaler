@@ -40,19 +40,6 @@ type mockDocker struct {
 	// Optional fixtures for ContainerList / VolumeList.
 	containers []container.Summary
 	volumes    []volume.Volume
-
-	// Recorded prune calls, in order, for CleanupSharedDocker assertions.
-	imagesPruneFilters  []dockerclient.Filters
-	buildCachePruneOpts []dockerclient.BuildCachePruneOptions
-
-	// Optional error injection for the prune calls.
-	containersPruneErr error
-	imagesPruneErr     error
-	buildCachePruneErr error
-
-	// When true, ImagePrune blocks until its context is done, simulating a
-	// wedged daemon that never answers.
-	imagePruneBlocks bool
 }
 
 func (m *mockDocker) ContainerCreate(_ context.Context, options dockerclient.ContainerCreateOptions) (dockerclient.ContainerCreateResult, error) {
@@ -72,30 +59,19 @@ func (m *mockDocker) ContainerRemove(_ context.Context, id string, _ dockerclien
 	return dockerclient.ContainerRemoveResult{}, nil
 }
 
+// The three prune methods exist only to satisfy DockerAPI. Nothing in this
+// package prunes any more: reclamation moved to internal/cachestore, whose
+// own fakeDockerAPI records and injects errors into these calls.
+
 func (m *mockDocker) ContainerPrune(_ context.Context, _ dockerclient.ContainerPruneOptions) (dockerclient.ContainerPruneResult, error) {
-	if m.containersPruneErr != nil {
-		return dockerclient.ContainerPruneResult{}, m.containersPruneErr
-	}
 	return dockerclient.ContainerPruneResult{}, nil
 }
 
-func (m *mockDocker) ImagePrune(ctx context.Context, options dockerclient.ImagePruneOptions) (dockerclient.ImagePruneResult, error) {
-	m.imagesPruneFilters = append(m.imagesPruneFilters, options.Filters)
-	if m.imagePruneBlocks {
-		<-ctx.Done()
-		return dockerclient.ImagePruneResult{}, ctx.Err()
-	}
-	if m.imagesPruneErr != nil {
-		return dockerclient.ImagePruneResult{}, m.imagesPruneErr
-	}
+func (m *mockDocker) ImagePrune(_ context.Context, _ dockerclient.ImagePruneOptions) (dockerclient.ImagePruneResult, error) {
 	return dockerclient.ImagePruneResult{}, nil
 }
 
-func (m *mockDocker) BuildCachePrune(_ context.Context, opts dockerclient.BuildCachePruneOptions) (dockerclient.BuildCachePruneResult, error) {
-	m.buildCachePruneOpts = append(m.buildCachePruneOpts, opts)
-	if m.buildCachePruneErr != nil {
-		return dockerclient.BuildCachePruneResult{}, m.buildCachePruneErr
-	}
+func (m *mockDocker) BuildCachePrune(_ context.Context, _ dockerclient.BuildCachePruneOptions) (dockerclient.BuildCachePruneResult, error) {
 	return dockerclient.BuildCachePruneResult{}, nil
 }
 
@@ -517,9 +493,10 @@ func TestDockerBackend_RemoveRunner(t *testing.T) {
 }
 
 func TestDockerBackend_Shutdown_IsNoOp(t *testing.T) {
-	// Shared resources (volume, prune) are cleaned up once at process exit
-	// via CleanupSharedDocker, not per backend. The per-backend Shutdown
-	// must not touch shared state to avoid races between scale sets.
+	// Nothing shared (the volume, the daemon's images and build cache) is
+	// reclaimed at exit at all — see Shutdown's doc comment. Reclaiming any
+	// of it per backend would also race the other scale sets sharing this
+	// Docker client.
 	b, md := newTestDockerBackend("/shared", true)
 	ctx := context.Background()
 
@@ -527,83 +504,6 @@ func TestDockerBackend_Shutdown_IsNoOp(t *testing.T) {
 
 	if len(md.volumesRemoved) != 0 {
 		t.Errorf("Shutdown should not remove volumes, removed %d", len(md.volumesRemoved))
-	}
-}
-
-func TestCleanupSharedDocker_NeverRemovesVolumes(t *testing.T) {
-	// The shared volume carries handoff data between jobs of one workflow
-	// run (a build job writes, a later job reads). Exit-time cleanup used to
-	// delete it, which broke runs still in flight across a restart.
-	md := &mockDocker{}
-
-	CleanupSharedDocker(context.Background(), md, false, slog.New(slog.DiscardHandler))
-
-	if len(md.volumesRemoved) != 0 {
-		t.Errorf("exit cleanup removed volumes %v — the shared volume holds "+
-			"handoff data for in-flight runs and must survive a restart",
-			md.volumesRemoved)
-	}
-}
-
-func TestCleanupSharedDocker_WipesBuildCacheWhenRequested(t *testing.T) {
-	md := &mockDocker{}
-
-	CleanupSharedDocker(context.Background(), md, true, slog.New(slog.DiscardHandler))
-
-	// Dangling images are always pruned; the full build-cache wipe runs too.
-	if len(md.imagesPruneFilters) != 1 {
-		t.Fatalf("expected 1 images prune, got %d", len(md.imagesPruneFilters))
-	}
-	if len(md.buildCachePruneOpts) != 1 {
-		t.Fatalf("expected 1 build cache prune, got %d", len(md.buildCachePruneOpts))
-	}
-	got := md.buildCachePruneOpts[0]
-	if !got.All || got.MaxUsedSpace != 0 || len(got.Filters) != 0 {
-		t.Errorf("build cache prune opts = %+v, want unfiltered All:true wipe", got)
-	}
-}
-
-func TestCleanupSharedDocker_SkipsDaemonPruneWhenNotRequested(t *testing.T) {
-	md := &mockDocker{}
-
-	CleanupSharedDocker(context.Background(), md, false, slog.New(slog.DiscardHandler))
-
-	if len(md.imagesPruneFilters) != 0 {
-		t.Fatalf("expected no images prune, got %d", len(md.imagesPruneFilters))
-	}
-	if len(md.buildCachePruneOpts) != 0 {
-		t.Errorf("expected no build cache prune, got %d", len(md.buildCachePruneOpts))
-	}
-}
-
-func TestCleanupSharedDocker_BoundedWhenDaemonWedges(t *testing.T) {
-	// A daemon that never answers ImagePrune used to hang shutdown forever:
-	// the exit-time cleanup ran on a context with no deadline. (The shared
-	// volume is no longer removed here, so the prune calls are now the only
-	// way this sweep can wedge.)
-	md := &mockDocker{imagePruneBlocks: true}
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		cleanupSharedDockerWith(context.Background(), md, true, 50*time.Millisecond, slog.New(slog.DiscardHandler))
-	}()
-
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("cleanup never returned — a wedged daemon still hangs shutdown")
-	}
-}
-
-func TestCleanupSharedDockerTimeout_FitsSystemdStopWindow(t *testing.T) {
-	// systemd's default TimeoutStopSec is 90s and the scale set + scaler
-	// shutdowns may already have spent ~40s before cleanup starts. Raising
-	// this constant past the remainder means systemd SIGKILLs runner mid
-	// cleanup instead of letting it exit on its own terms.
-	if cleanupSharedDockerTimeout > 45*time.Second {
-		t.Errorf("cleanupSharedDockerTimeout = %s, want <= 45s so shutdown fits systemd's 90s stop window",
-			cleanupSharedDockerTimeout)
 	}
 }
 

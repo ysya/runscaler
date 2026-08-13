@@ -17,6 +17,10 @@ func TestParseThreshold(t *testing.T) {
 		{in: "-5%", wantErr: true},
 		{in: "abc", wantErr: true},
 		{in: "", wantErr: true},
+		{in: "NaN%", wantErr: true},
+		{in: "nan%", wantErr: true},
+		{in: "Inf%", wantErr: true},
+		{in: "+Inf%", wantErr: true},
 	}
 	for _, tt := range tests {
 		got, err := ParseThreshold(tt.in)
@@ -45,5 +49,9 @@ func TestThresholdBytesOf(t *testing.T) {
 	abs, _ := ParseThreshold("20GB")
 	if got := abs.BytesOf(1000); got != 20*1024*1024*1024 {
 		t.Errorf("absolute threshold must ignore total, got %d", got)
+	}
+	full, _ := ParseThreshold("100%")
+	if got := full.BytesOf(500); got != 500 {
+		t.Errorf("100%% of 500 = %d, want 500 (upper boundary must still be accepted)", got)
 	}
 }

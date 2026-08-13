@@ -427,7 +427,10 @@ func run(ctx context.Context, cfg config.Config) error {
 	startTartCacheCleanup(ctx, tartTargets, logger)
 
 	// Start the periodic disk-pressure guard over every store built above.
-	startDiskGuard(ctx, cacheStores, cfg, logger)
+	// The same *diskguard.Guard is threaded into each scale set below as
+	// its pre-job-start check (see runScaleSet, scaler.WithDiskChecker)
+	// instead of constructing a second one.
+	guard := startDiskGuard(ctx, cacheStores, cfg, logger)
 
 	logger.Info("Starting scale sets", slog.Int("count", len(scaleSets)))
 
@@ -456,7 +459,7 @@ func run(ctx context.Context, cfg config.Config) error {
 		go func() {
 			defer wg.Done()
 			ssLogger := config.NewScaleSetLoggerWithWriter(cfg.LogLevel, cfg.LogFormat, ss.ScaleSetName, i, logFile)
-			if err := runScaleSet(runCtx, ss, dockerClients[ss.Docker.Socket], ssLogger, healthServer, tartCoordinator); err != nil {
+			if err := runScaleSet(runCtx, ss, dockerClients[ss.Docker.Socket], ssLogger, healthServer, tartCoordinator, guard); err != nil {
 				errs <- fmt.Errorf("scaleset %q: %w", ss.ScaleSetName, err)
 				cancelRun()
 			}
@@ -503,8 +506,11 @@ func run(ctx context.Context, cfg config.Config) error {
 	return nil
 }
 
-// runScaleSet manages the lifecycle of a single scale set.
-func runScaleSet(ctx context.Context, ss config.ScaleSetConfig, dockerClient *dockerclient.Client, logger *slog.Logger, h *health.HealthServer, tartCoordinator *backend.TartHostCoordinator) error {
+// runScaleSet manages the lifecycle of a single scale set. guard is the
+// shared disk-pressure guard built once in run() (nil when the disk guard
+// is disabled); it is wired into this scale set's Scaler as its
+// pre-job-start check, see scaler.WithDiskChecker below.
+func runScaleSet(ctx context.Context, ss config.ScaleSetConfig, dockerClient *dockerclient.Client, logger *slog.Logger, h *health.HealthServer, tartCoordinator *backend.TartHostCoordinator, guard *diskguard.Guard) error {
 	// Create scaleset client
 	scalesetClient, err := config.NewScalesetClient(ss.RegistrationURL, ss.Token, logger)
 	if err != nil {
@@ -581,7 +587,15 @@ func runScaleSet(ctx context.Context, ss config.ScaleSetConfig, dockerClient *do
 		b = backend.NewDockerBackend(ss, dockerClient, logger)
 	}
 
-	s := scaler.NewScaler(scaleSet.ID, ss.MinRunners, ss.MaxRunners, b, scalesetClient, logger)
+	// guard is a *diskguard.Guard; only wrap it into the scaler.DiskChecker
+	// option when non-nil so a disabled guard doesn't become a non-nil
+	// interface holding a nil pointer (which would panic the first time
+	// startRunner called NeedsReclaim on it).
+	var scalerOpts []scaler.Option
+	if guard != nil {
+		scalerOpts = append(scalerOpts, scaler.WithDiskChecker(guard))
+	}
+	s := scaler.NewScaler(scaleSet.ID, ss.MinRunners, ss.MaxRunners, b, scalesetClient, logger, scalerOpts...)
 	defer s.Shutdown(context.WithoutCancel(ctx))
 
 	if ss.Docker.SharedVolume != "" {
@@ -1431,9 +1445,14 @@ func startTartCacheCleanup(ctx context.Context, targets map[string]tartCacheSwee
 // never fails outright (every per-store error is logged and skipped, see
 // its own doc comment), so an error here can only come from the guard
 // construction path below.
-func startDiskGuard(ctx context.Context, stores []cachestore.CacheStore, cfg config.Config, logger *slog.Logger) {
+//
+// Returns the constructed Guard, or nil when the guard is disabled or
+// misconfigured. The caller (run()) threads this same instance into every
+// scale set's pre-job-start check (see runScaleSet, scaler.WithDiskChecker)
+// instead of building a second Guard over the same stores.
+func startDiskGuard(ctx context.Context, stores []cachestore.CacheStore, cfg config.Config, logger *slog.Logger) *diskguard.Guard {
 	if !cfg.IsDiskGuardEnabled() {
-		return
+		return nil
 	}
 
 	minFree := cfg.Disk.MinFree
@@ -1451,12 +1470,12 @@ func startDiskGuard(ctx context.Context, stores []cachestore.CacheStore, cfg con
 	minThreshold, err := bytesize.ParseThreshold(minFree)
 	if err != nil {
 		logger.Warn("Disk guard: invalid min-free, guard disabled", slog.Any("error", err))
-		return
+		return nil
 	}
 	targetThreshold, err := bytesize.ParseThreshold(targetFree)
 	if err != nil {
 		logger.Warn("Disk guard: invalid target-free, guard disabled", slog.Any("error", err))
-		return
+		return nil
 	}
 
 	interval := cfg.Disk.Interval
@@ -1501,6 +1520,8 @@ func startDiskGuard(ctx context.Context, stores []cachestore.CacheStore, cfg con
 			}
 		}
 	}()
+
+	return guard
 }
 
 // listenOnce creates a message session and listener, then runs until

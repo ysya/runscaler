@@ -19,6 +19,15 @@ type ScalesetAPI interface {
 	GenerateJitRunnerConfig(ctx context.Context, setting *scaleset.RunnerScaleSetJitRunnerSetting, scaleSetID int) (*scaleset.RunnerScaleSetJitRunnerConfig, error)
 }
 
+// DiskChecker is the pre-job-start disk-pressure check startRunner consults
+// before generating a JIT config for a new runner. internal/diskguard.Guard
+// satisfies it: NeedsReclaim is a cheap per-filesystem statfs (no volume
+// walking, no Measure), Sweep does the actual reclaim work when needed.
+type DiskChecker interface {
+	NeedsReclaim() (bool, error)
+	Sweep(ctx context.Context) error
+}
+
 // Scaler implements listener.Scaler to handle scaling decisions
 // and manage runner lifecycle via a pluggable RunnerBackend.
 type Scaler struct {
@@ -31,14 +40,30 @@ type Scaler struct {
 	logger         *slog.Logger
 	reconcileMu    sync.Mutex
 	desiredRunners int
+	diskChecker    DiskChecker
 }
 
 // Compile-time check that Scaler implements listener.Scaler.
 var _ listener.Scaler = (*Scaler)(nil)
 
-// NewScaler creates a new Scaler instance.
-func NewScaler(scaleSetID, minRunners, maxRunners int, b backend.RunnerBackend, client ScalesetAPI, logger *slog.Logger) *Scaler {
-	return &Scaler{
+// Option configures optional Scaler behavior at construction time.
+type Option func(*Scaler)
+
+// WithDiskChecker wires a pre-job-start disk-pressure check into the
+// Scaler: startRunner consults it before starting a new runner and
+// reclaims first if free space is low. Omitting this option (the default)
+// leaves diskChecker nil, so startRunner skips the check entirely.
+func WithDiskChecker(c DiskChecker) Option {
+	return func(s *Scaler) {
+		s.diskChecker = c
+	}
+}
+
+// NewScaler creates a new Scaler instance. opts is variadic so existing
+// call sites compile unchanged; see WithDiskChecker for the only option
+// defined so far.
+func NewScaler(scaleSetID, minRunners, maxRunners int, b backend.RunnerBackend, client ScalesetAPI, logger *slog.Logger, opts ...Option) *Scaler {
+	s := &Scaler{
 		scaleSetID:     scaleSetID,
 		backend:        b,
 		scalesetClient: client,
@@ -50,6 +75,10 @@ func NewScaler(scaleSetID, minRunners, maxRunners int, b backend.RunnerBackend, 
 			busy: make(map[string]string),
 		},
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // HandleDesiredRunnerCount scales runners up to match demand.
@@ -125,6 +154,20 @@ func (s *Scaler) HandleJobCompleted(ctx context.Context, jobInfo *scaleset.JobCo
 // startRunner creates and starts a new ephemeral runner.
 func (s *Scaler) startRunner(ctx context.Context) (string, error) {
 	name := fmt.Sprintf("runner-%s", uuid.NewString()[:8])
+
+	// Cheap statfs before committing to a job: a runner that fills the disk
+	// mid-build can take the whole host down. Reclaim failures are logged,
+	// never fatal — refusing to serve jobs is worse than a full disk warning.
+	if s.diskChecker != nil {
+		if need, err := s.diskChecker.NeedsReclaim(); err != nil {
+			s.logger.Warn("Disk check failed, starting runner anyway", slog.Any("error", err))
+		} else if need {
+			s.logger.Info("Free space below threshold, reclaiming before starting runner")
+			if err := s.diskChecker.Sweep(ctx); err != nil {
+				s.logger.Warn("Reclaim before runner start failed", slog.Any("error", err))
+			}
+		}
+	}
 
 	jit, err := s.scalesetClient.GenerateJitRunnerConfig(
 		ctx,

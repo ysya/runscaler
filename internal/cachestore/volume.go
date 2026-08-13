@@ -34,8 +34,9 @@ const volumeHelperTimeout = 10 * time.Minute
 // script is a parameter instead of a fixed find command, and the
 // container's stdout comes back to the caller instead of being discarded —
 // Measure needs to read `du -sb` output, and Reclaim needs it to report
-// bytes freed. CleanupSharedVolumeStale itself is untouched and keeps
-// serving the periodic sweep wired up in cmd/runner/main.go.
+// bytes freed. CleanupSharedVolumeStale itself has since been retired
+// (Task 7 rewired cmd/runner/main.go's periodic sweep to this store's own
+// Reclaim(Tier3) and deleted it, since nothing else called it).
 func runVolumeHelper(ctx context.Context, client backend.DockerAPI, image, volumeName, mountPath, script string) (string, error) {
 	timeoutCtx, cancel := context.WithTimeout(ctx, volumeHelperTimeout)
 	defer cancel()
@@ -234,10 +235,10 @@ func (s *sharedVolumeStore) Measure(ctx context.Context) (uint64, error) {
 
 // Reclaim acts only at Tier3, deleting shared-volume files (and any
 // directories left empty by that delete) whose mtime is older than MaxAge —
-// the same two-phase delete backend.CleanupSharedVolumeStale runs, so the
-// two sweeps (this one and the periodic one in main.go, until a later task
-// wires this store in and retires that call site) agree on what "stale"
-// means.
+// the same two-phase delete backend.CleanupSharedVolumeStale used to run
+// before Task 7 retired it and rewired cmd/runner/main.go's periodic sweep
+// to call this method directly, so both what used to be two sweeps agree on
+// what "stale" means.
 //
 // Every other tier — Tier4 included — is a strict no-op. TiersFor(KindScratch)
 // already keeps the guard from calling Reclaim(Tier4) on this store at all;

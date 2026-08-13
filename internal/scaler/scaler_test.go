@@ -2,6 +2,7 @@ package scaler
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -98,6 +99,26 @@ func (m *mockScaleset) GenerateJitRunnerConfig(_ context.Context, _ *scaleset.Ru
 	return &scaleset.RunnerScaleSetJitRunnerConfig{
 		EncodedJITConfig: "mock-jit-config",
 	}, nil
+}
+
+// fakeChecker is a DiskChecker double for the pre-job-start disk-pressure
+// check: it reports whatever NeedsReclaim/Sweep verdict a test configures
+// and counts Sweep calls so a test can assert a healthy disk never pays for
+// one.
+type fakeChecker struct {
+	needs    bool
+	needsErr error
+	sweepErr error
+	sweeps   int
+}
+
+func (f *fakeChecker) NeedsReclaim() (bool, error) {
+	return f.needs, f.needsErr
+}
+
+func (f *fakeChecker) Sweep(_ context.Context) error {
+	f.sweeps++
+	return f.sweepErr
 }
 
 func newTestScaler(minRunners, maxRunners int) (*Scaler, *mockBackend, *mockScaleset) {
@@ -399,5 +420,57 @@ func TestShutdown(t *testing.T) {
 	}
 	if !mb.shutdown {
 		t.Error("backend.Shutdown() was not called")
+	}
+}
+
+// --- startRunner disk-check tests ---
+
+func TestStartRunner_ReclaimsWhenDiskLow(t *testing.T) {
+	chk := &fakeChecker{needs: true}
+	s := NewScaler(1, 0, 1, &mockBackend{}, &mockScaleset{}, slog.New(slog.DiscardHandler), WithDiskChecker(chk))
+
+	if _, err := s.startRunner(context.Background()); err != nil {
+		t.Fatalf("startRunner error: %v", err)
+	}
+	if chk.sweeps != 1 {
+		t.Errorf("expected one reclaim before starting the runner, got %d", chk.sweeps)
+	}
+}
+
+func TestStartRunner_SkipsReclaimWhenDiskFine(t *testing.T) {
+	chk := &fakeChecker{needs: false}
+	s := NewScaler(1, 0, 1, &mockBackend{}, &mockScaleset{}, slog.New(slog.DiscardHandler), WithDiskChecker(chk))
+
+	if _, err := s.startRunner(context.Background()); err != nil {
+		t.Fatalf("startRunner error: %v", err)
+	}
+	if chk.sweeps != 0 {
+		t.Errorf("healthy disk must not pay for a sweep, got %d", chk.sweeps)
+	}
+}
+
+func TestStartRunner_ProceedsWhenReclaimFails(t *testing.T) {
+	chk := &fakeChecker{needs: true, sweepErr: errors.New("daemon down")}
+	s := NewScaler(1, 0, 1, &mockBackend{}, &mockScaleset{}, slog.New(slog.DiscardHandler), WithDiskChecker(chk))
+
+	if _, err := s.startRunner(context.Background()); err != nil {
+		t.Fatalf("a failed reclaim must not block the job: %v", err)
+	}
+}
+
+// TestStartRunner_ProceedsWhenNeedsReclaimErrors pins the subtlety in
+// diskguard.Guard.NeedsReclaim's own doc comment: on total statfs failure
+// it returns (true, err) — "cannot tell, assume we should reclaim". The
+// call site must not chase that bool once err is non-nil; it logs and
+// starts the runner without even attempting a sweep.
+func TestStartRunner_ProceedsWhenNeedsReclaimErrors(t *testing.T) {
+	chk := &fakeChecker{needs: true, needsErr: errors.New("statfs failed for all stores")}
+	s := NewScaler(1, 0, 1, &mockBackend{}, &mockScaleset{}, slog.New(slog.DiscardHandler), WithDiskChecker(chk))
+
+	if _, err := s.startRunner(context.Background()); err != nil {
+		t.Fatalf("a failed disk check must not block the job: %v", err)
+	}
+	if chk.sweeps != 0 {
+		t.Errorf("NeedsReclaim error must skip the sweep entirely, got %d", chk.sweeps)
 	}
 }

@@ -172,7 +172,13 @@ git commit -m "feat(cachestore): add store abstraction with kind-derived reclaim
 
 **Interfaces:**
 - Consumes: Task 1 的 `CacheStore`/`StoreKind`/`Tier`;既有 `backend.DockerAPI`
-- Produces: `func NewDockerDaemonStore(client backend.DockerAPI, cfg DockerDaemonConfig) CacheStore`、`type DockerDaemonConfig struct { Enabled bool; PruneTTL, BuildCacheMaxAge time.Duration; BuildCacheBudgetGB int }`
+- Produces:
+  - `func NewDockerGarbageStore(client backend.DockerAPI, cfg DockerGarbageConfig) CacheStore` —— `KindGarbage`,只做 Tier1(stopped containers + dangling images)
+  - `func NewDockerBuildCacheStore(client backend.DockerAPI, cfg DockerBuildCacheConfig) CacheStore` —— `KindCache`,Tier2 依 max-age/budget 修剪,Tier4 全清(`All: true` 無 filter,緊急回收)
+  - `type DockerGarbageConfig struct { Enabled bool; PruneTTL time.Duration }`
+  - `type DockerBuildCacheConfig struct { Enabled bool; MaxAge time.Duration; BudgetGB int }`
+
+**為何拆兩個**:一個 store 只能有一個 `Kind`,而守門員以 `TiersFor(store.Kind())` 挑選 store。若把兩者合成一個 `KindGarbage` 的 store,它的 Tier2 永遠不會被守門員呼叫,build cache 就無法用於紓解磁碟壓力。
 
 備註:此 store 的 `Path()` 回傳 Docker 的資料根目錄。以 `client.Info(ctx).DockerRootDir` 取得;`DockerAPI` 介面需新增 `Info`。
 

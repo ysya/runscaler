@@ -97,7 +97,9 @@ type CacheStore interface {
 }
 ```
 
-實作對應現有機制:`dockerDaemonStore`(dangling image、stopped container、build cache)、`buildxStore`、`sharedVolumeStore`、`tartCacheStore`、`cacheVolumeStore`。新增快取種類等於新增一個實作,守門員不需修改。
+實作對應現有機制:`dockerGarbageStore`(dangling image、stopped container)、`dockerBuildCacheStore`(BuildKit 層快取)、`buildxStore`、`sharedVolumeStore`、`tartCacheStore`、`cacheVolumeStore`。新增快取種類等於新增一個實作,守門員不需修改。
+
+**一個 store 只能有一個 `Kind`,因此不可橫跨代價等級不同的階層。** Docker daemon 的可回收資料必須拆成兩個 store:垃圾(容器與 dangling image)是 `KindGarbage`→Tier1,build cache 是 `KindCache`→Tier2/Tier4。若合成一個 `KindGarbage` 的 store,`TiersFor` 會使守門員永遠不呼叫它的 Tier2,build cache 這個大宗回收來源就拿不到(leg host 上曾達 59.8GB)。這是「階層由 kind 推導」的直接推論,新增 store 時須一併檢查。
 
 ### B. 回收階層
 

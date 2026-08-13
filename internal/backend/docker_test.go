@@ -11,6 +11,7 @@ import (
 
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/mount"
+	"github.com/moby/moby/api/types/system"
 	"github.com/moby/moby/api/types/volume"
 	dockerclient "github.com/moby/moby/client"
 
@@ -113,6 +114,14 @@ func (m *mockDocker) ContainerList(_ context.Context, _ dockerclient.ContainerLi
 
 func (m *mockDocker) VolumeList(_ context.Context, _ dockerclient.VolumeListOptions) (dockerclient.VolumeListResult, error) {
 	return dockerclient.VolumeListResult{Items: m.volumes}, nil
+}
+
+func (m *mockDocker) Info(_ context.Context, _ dockerclient.InfoOptions) (dockerclient.SystemInfoResult, error) {
+	return dockerclient.SystemInfoResult{Info: system.Info{DockerRootDir: "/var/lib/docker"}}, nil
+}
+
+func (m *mockDocker) DiskUsage(_ context.Context, _ dockerclient.DiskUsageOptions) (dockerclient.DiskUsageResult, error) {
+	return dockerclient.DiskUsageResult{}, nil
 }
 
 func (m *mockDocker) ContainerWait(_ context.Context, _ string, _ dockerclient.ContainerWaitOptions) dockerclient.ContainerWaitResult {

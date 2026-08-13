@@ -33,6 +33,11 @@ type DockerAPI interface {
 	VolumeRemove(ctx context.Context, volumeID string, options dockerclient.VolumeRemoveOptions) (dockerclient.VolumeRemoveResult, error)
 	ContainerList(ctx context.Context, options dockerclient.ContainerListOptions) (dockerclient.ContainerListResult, error)
 	VolumeList(ctx context.Context, options dockerclient.VolumeListOptions) (dockerclient.VolumeListResult, error)
+	// Info and DiskUsage back internal/cachestore's Docker daemon store:
+	// Info resolves the daemon's data-root directory (for Path()), and
+	// DiskUsage reports image and build-cache size totals (for Measure()).
+	Info(ctx context.Context, options dockerclient.InfoOptions) (dockerclient.SystemInfoResult, error)
+	DiskUsage(ctx context.Context, options dockerclient.DiskUsageOptions) (dockerclient.DiskUsageResult, error)
 }
 
 // DockerBackend runs GitHub Actions runners as Docker containers.

@@ -41,9 +41,14 @@ func (s *buildxStore) Kind() StoreKind { return KindGarbage }
 // DockerGarbageConfig/DockerBuildCacheConfig set in docker.go.
 func (s *buildxStore) Path() string { return s.cfg.RootDir }
 
-// Enabled reports whether the operator left buildx-builder cleanup on.
-// Builders may be actively reused across builds, so a disabled store must
-// not remove any of them.
+// Enabled reports whether the operator left buildx-builder cleanup on —
+// meaning cmd/runner's periodic buildx sweeper, and nothing else. It is off
+// by default because builders may be actively reused across builds on a
+// daemon runner does not own. The disk guard ignores it and calls
+// Reclaim(Tier1) regardless once the disk is under pressure (revised
+// 2026-08-14 — see store.go's Enabled doc comment and the identical notes
+// on docker.go's and tart.go's stores); a host whose disk the guard must
+// never touch opts out with `[disk] guard = false`.
 func (s *buildxStore) Enabled() bool { return s.cfg.Enabled }
 
 // Measure always returns 0. Unlike the daemon's image/build-cache totals

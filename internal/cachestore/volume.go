@@ -164,9 +164,20 @@ func parseDuSizes(stdout string, want int) ([]uint64, error) {
 // already succeeded by the time parsing is attempted, and bytes-freed is a
 // reporting nicety layered on top of that, not the action's success
 // criterion.
+//
+// The script deliberately runs without `set -e`, and each `du` carries its
+// own `|| true`. `du -sb` exits non-zero when a file vanishes mid-walk,
+// which is routine on a volume jobs are actively writing to — precisely
+// what the shared volume exists for. Under `set -e` that transient
+// measurement failure aborted the script *before deleteScript ran*, so the
+// sweep reclaimed nothing and reported an error; the trailing `du` is
+// neutralized for the mirror-image reason, since runVolumeHelper treats a
+// non-zero container exit status as a failed reclaim. Measurement must
+// never decide whether the delete happens, only what it can report about
+// it — the same tolerance both `find` invocations already carry.
 func reclaimAndMeasureFreed(ctx context.Context, client backend.DockerAPI, image, volumeName, mountPath, deleteScript string) (uint64, error) {
 	du := duCommand(mountPath)
-	script := fmt.Sprintf("set -e; %s; %s; %s", du, deleteScript, du)
+	script := fmt.Sprintf("%s || true; %s; %s || true", du, deleteScript, du)
 	stdout, err := runVolumeHelper(ctx, client, image, volumeName, mountPath, script)
 	if err != nil {
 		return 0, err

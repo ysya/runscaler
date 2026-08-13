@@ -206,10 +206,13 @@ func (b *DockerBackend) WaitRunner(ctx context.Context, resourceID string) error
 	}
 }
 
-// Shutdown is a no-op for DockerBackend — shared Docker resources
-// (volume, image/build caches) are cleaned up once at process exit via
-// CleanupSharedDocker to avoid races when multiple scale sets share the
-// same Docker client and volume.
+// Shutdown is a no-op for DockerBackend. Nothing shared is reclaimed at
+// exit: the shared volume carries handoff data for runs still in flight
+// across a restart, and images and build cache belong to the daemon, not to
+// this process. Every one of them is reclaimed on its own schedule instead,
+// through internal/cachestore — the periodic sweepers in cmd/runner and the
+// disk guard. A per-backend Shutdown that touched any of it would also race
+// the other scale sets sharing this Docker client.
 func (b *DockerBackend) Shutdown(_ context.Context) {}
 
 // runnerCmd returns the container command: plain run.sh when no named
@@ -245,73 +248,6 @@ func (b *DockerBackend) buildContainerEnv(jitConfig string) []string {
 		env = append(env, fmt.Sprintf("SHARED_DIR=%s", b.sharedVolume))
 	}
 	return env
-}
-
-// CleanupSharedDocker prunes dangling images at exit. It deliberately does
-// NOT remove the shared volume: that volume carries handoff data between
-// jobs of one workflow run (a build job writes, a later job reads), so
-// deleting it on restart breaks runs that are still in flight — and the
-// failure surfaces in the workflow, not here. Reclamation is left to the
-// max-age sweep and the disk guard, matching every other store's lifecycle.
-//
-// The full daemon prune (dangling images plus build cache) only runs when
-// pruneDaemon is true — images and build cache are daemon-global and must
-// never be touched implicitly on a shared daemon.
-// It is safe to call once after all Docker-backed scale sets have finished
-// shutting down; calling it concurrently or per-backend will race with
-// container removal and other prune operations.
-//
-// The whole sweep is bounded by cleanupSharedDockerTimeout so an unresponsive
-// daemon cannot hang shutdown.
-func CleanupSharedDocker(ctx context.Context, client DockerAPI, pruneDaemon bool, logger *slog.Logger) {
-	cleanupSharedDockerWith(ctx, client, pruneDaemon, cleanupSharedDockerTimeout, logger)
-}
-
-// cleanupSharedDockerTimeout bounds the exit-time cleanup. The Docker API
-// calls below carry no deadline of their own, so a slow or wedged daemon
-// would otherwise block shutdown indefinitely — a large dangling-image
-// backlog has taken about a minute in practice, and the process looks hung
-// while it works. Kept under systemd's default 90s TimeoutStopSec (minus the
-// ~40s the scale set and scaler shutdowns may already have used) so runner
-// still exits on its own terms instead of being SIGKILLed.
-const cleanupSharedDockerTimeout = 45 * time.Second
-
-// cleanupSharedDockerWith is the testable core: it performs the sweep under
-// the supplied timeout. The exported wrapper above supplies the default.
-func cleanupSharedDockerWith(ctx context.Context, client DockerAPI, pruneDaemon bool, timeout time.Duration, logger *slog.Logger) {
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
-	// Anything the deadline cuts short is reclaimed by the next run's prune
-	// sweep, so report it as a warning rather than an error.
-	defer func() {
-		if ctx.Err() != nil {
-			logger.Warn("Exit cleanup timed out — remaining garbage will be reclaimed on the next run",
-				slog.Duration("timeout", timeout))
-		}
-	}()
-
-	if pruneDaemon {
-		logger.Debug("Pruning Docker resources")
-		pruneFilters := make(dockerclient.Filters).Add("dangling", "true")
-		imagesResult, err := client.ImagePrune(ctx, dockerclient.ImagePruneOptions{Filters: pruneFilters})
-		if err != nil {
-			logger.Error("Failed to prune images", slog.Any("error", err))
-		} else if imagesResult.Report.SpaceReclaimed > 0 {
-			logger.Debug("Pruned dangling images",
-				slog.Int("count", len(imagesResult.Report.ImagesDeleted)),
-				slog.String("reclaimed", FormatBytes(imagesResult.Report.SpaceReclaimed)),
-			)
-		}
-		buildResult, err := client.BuildCachePrune(ctx, dockerclient.BuildCachePruneOptions{All: true})
-		if err != nil {
-			logger.Error("Failed to prune build cache", slog.Any("error", err))
-		} else if buildResult.Report.SpaceReclaimed > 0 {
-			logger.Debug("Pruned build cache",
-				slog.String("reclaimed", FormatBytes(buildResult.Report.SpaceReclaimed)),
-			)
-		}
-	}
 }
 
 // buildxBuilderPrefix is the name prefix Docker gives to BuildKit builder

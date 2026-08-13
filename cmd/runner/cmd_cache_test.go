@@ -174,6 +174,23 @@ func TestBuildCacheRowsBuildxHardcodedZeroIsUnknownNotZero(t *testing.T) {
 	}
 }
 
+// TestIsUnmeasurableZeroRecognizesRealBuildxStore ties hardcodedZeroMeasureStores
+// to cachestore.NewBuildxStore's actual Name(), not just a literal repeated
+// in this package's own fakes. Every other test above builds a
+// fakeCacheStore{name: "buildx", ...} by hand, so none of them would notice
+// if internal/cachestore/buildx.go's Name() were ever renamed — this one
+// would fail instead, since it asks the real store what its name is rather
+// than assuming. A nil Docker client is fine: Name() never touches it (see
+// buildxStore's fields — only Measure/Reclaim/Path use client/cfg).
+func TestIsUnmeasurableZeroRecognizesRealBuildxStore(t *testing.T) {
+	store := cachestore.NewBuildxStore(nil, cachestore.BuildxConfig{})
+	if !isUnmeasurableZero(store.Name(), 0) {
+		t.Errorf("isUnmeasurableZero(%q, 0) = false, want true — hardcodedZeroMeasureStores in cmd_cache.go "+
+			"must stay in sync with cachestore.NewBuildxStore's real Name() (see cachestore/buildx.go's Name doc comment)",
+			store.Name())
+	}
+}
+
 func TestBuildCacheRowsPolicyFromBudget(t *testing.T) {
 	tests := []struct {
 		name        string

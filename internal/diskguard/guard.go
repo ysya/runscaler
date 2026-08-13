@@ -2,6 +2,7 @@ package diskguard
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"slices"
 
@@ -176,9 +177,12 @@ func (g *Guard) warnShortfall(path string, st FSStat, targetBytes uint64, disabl
 // enforceBudgets checks every enabled store's own configured budget and
 // acts on it, independent of disk pressure and unbounded by MaxTier: it is
 // the store's own retention policy taking effect, not the guard's
-// disk-pressure escalation (that is sweepFilesystem, above). It calls
-// Measure, so — unlike the rest of Sweep — it is never run from
-// NeedsReclaim, which must stay on the cheap statfs-only path.
+// disk-pressure escalation (that is sweepFilesystem, above). "Unbounded by
+// MaxTier" only means the tier ceiling does not apply here — the wipe path
+// below is still gated by TiersFor, the same kind-based safety rule every
+// tier-ladder Reclaim call goes through. It calls Measure, so — unlike the
+// rest of Sweep — it is never run from NeedsReclaim, which must stay on
+// the cheap statfs-only path.
 func (g *Guard) enforceBudgets(ctx context.Context) {
 	for _, s := range g.stores {
 		if !s.Enabled() {
@@ -200,6 +204,20 @@ func (g *Guard) enforceBudgets(ctx context.Context) {
 		}
 
 		if onExceed == "wipe" {
+			// StoreKind exists precisely to make it structurally impossible
+			// to reclaim a store's data at a tier that would destroy
+			// something live (see store.go's StoreKind doc comment); every
+			// tier-ladder Reclaim call above is gated by it via TiersFor,
+			// and this call site must not be the one exception. Without
+			// this check, a future KindScratch store that grows a budget
+			// would have its un-expired, in-flight handoff data wiped
+			// wholesale the first time it went over budget.
+			if !slices.Contains(cachestore.TiersFor(s.Kind()), cachestore.Tier4) {
+				g.logger.Warn("Disk guard: store exceeds its configured budget but its kind forbids a wholesale wipe, skipping",
+					slog.String("store", s.Name()), slog.Any("kind", s.Kind()),
+					slog.Uint64("used_bytes", used), slog.Uint64("budget_bytes", budget))
+				continue
+			}
 			if _, err := s.Reclaim(ctx, cachestore.Tier4); err != nil {
 				g.logger.Warn("Disk guard: budget wipe failed",
 					slog.String("store", s.Name()), slog.Uint64("used_bytes", used),
@@ -224,11 +242,26 @@ func (g *Guard) enforceBudgets(ctx context.Context) {
 // filesystem, no Measure calls (Measure can walk an entire volume) and no
 // reclaiming — callers that get true back are expected to run Sweep
 // themselves before proceeding.
+//
+// If statfs failed for every configured store, NeedsReclaim returns an
+// error instead of a verdict, rather than silently reporting "false". This
+// is the pre-job gate whose entire reason to exist is stopping a host from
+// filling up mid-build, so reporting "healthy" when it actually has no
+// idea would be the worst available failure mode — indistinguishable from
+// the disk genuinely being fine. The bool returned alongside the error is
+// true, not the zero value, as a second line of defense for a caller that
+// inspects it without checking the error first. A partial failure — at
+// least one filesystem still statfs-able — is unaffected: it still
+// returns a real verdict from what it could read, exactly as before.
 func (g *Guard) NeedsReclaim() (bool, error) {
 	if !g.cfg.Enabled {
 		return false, nil
 	}
-	for _, grp := range g.statByFilesystem() {
+	groups := g.statByFilesystem()
+	if len(g.stores) > 0 && len(groups) == 0 {
+		return true, fmt.Errorf("statfs failed for all %d configured store(s): cannot tell whether free space is low", len(g.stores))
+	}
+	for _, grp := range groups {
 		if grp.stat.FreeBytes < g.cfg.MinFree.BytesOf(grp.stat.TotalBytes) {
 			return true, nil
 		}

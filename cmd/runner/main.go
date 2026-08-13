@@ -911,8 +911,13 @@ type sharedVolumeSweepTarget struct {
 	store      cachestore.CacheStore
 	volumeName string
 	mountPath  string
-	ttl        time.Duration
-	interval   time.Duration
+	// ttl is 0 when the operator configured a shared volume but no
+	// max-age. The store still exists in that case (see
+	// sharedVolumeSweepTargetsFor); enabled is what tells the periodic
+	// sweeper not to tick on it.
+	ttl      time.Duration
+	interval time.Duration
+	enabled  bool
 }
 
 // sharedVolumeSweepTargetsFor selects one target per unique shared-volume
@@ -922,19 +927,24 @@ type sharedVolumeSweepTarget struct {
 // dockerCacheStoresForSocket (and so, transitively, the disk guard) select
 // from it identically.
 //
-// Deliberately NOT given the "construct regardless, default the settings"
-// treatment dockerPruneSettingsFor/buildxConfigFor/tartCacheStoreFor now
-// get (2026-08-14 Enabled() revision): those stores have a boolean routine-
-// cleanup switch plus separate TTL/MaxAge fields with sensible always-on
-// defaults, so a disabled switch still leaves a real, safe value to reclaim
-// by. A shared volume has no such separate default — SharedVolumeMaxAge
-// *is* the retention policy, and 0 means "no policy configured" with no
-// project-wide fallback (see DockerConfig.SharedVolumeMaxAge's doc comment).
-// Constructing a store here with MaxAge=0 would make Reclaim(Tier3)'s own
-// `days < 1 { days = 1 }` floor silently invent a 1-day TTL nobody
-// configured, deleting handoff files an operator never opted into a
-// retention policy for at all. So: no TTL configured still means no store,
-// exactly as before this revision.
+// A store is built for every configured shared volume, including one with
+// no max-age, matching the "construct regardless, default the settings"
+// treatment dockerPruneSettingsFor/buildxConfigFor/tartCacheStoreFor got in
+// the 2026-08-14 Enabled() revision. A shared volume has no separate
+// retention default to fall back on — SharedVolumeMaxAge *is* the policy,
+// and 0 means "none configured" (see DockerConfig.SharedVolumeMaxAge's doc
+// comment) — but that is an argument for the store reclaiming nothing, not
+// for it not existing. sharedVolumeStore.Enabled() already requires
+// MaxAge > 0 and Reclaim returns early when it is false, so Reclaim(Tier3)'s
+// `days < 1 { days = 1 }` floor is unreachable with MaxAge=0 and no TTL can
+// be invented.
+//
+// Skipping construction, on the other hand, cost real safety: with exit-time
+// volume deletion removed, a shared volume with no max-age had no store, so
+// no sweeper touched it, the disk guard could not reach it at any tier, and
+// it appeared in neither `runner cache` nor any warning — it simply grew
+// forever. startSharedVolumeCleanup warns about the missing setting; the
+// store's own presence is what restores visibility and guard coverage.
 func sharedVolumeSweepTargetsFor(sets []config.ScaleSetConfig, client *dockerclient.Client, rootDir string, logger *slog.Logger) []sharedVolumeSweepTarget {
 	type settings struct {
 		volumeName, mountPath, helperImage string
@@ -944,7 +954,7 @@ func sharedVolumeSweepTargetsFor(sets []config.ScaleSetConfig, client *dockercli
 	picked := make(map[string]settings)
 	var order []string // insertion order — map iteration is not stable
 	for _, ss := range sets {
-		if ss.IsTart() || ss.Docker.SharedVolume == "" || ss.Docker.SharedVolumeMaxAge <= 0 {
+		if ss.IsTart() || ss.Docker.SharedVolume == "" {
 			continue
 		}
 		interval := ss.Docker.SharedVolumeCleanupInterval
@@ -959,7 +969,16 @@ func sharedVolumeSweepTargetsFor(sets []config.ScaleSetConfig, client *dockercli
 			interval:    interval,
 		}
 		if existing, ok := picked[s.volumeName]; ok {
-			if existing != s {
+			switch {
+			case existing.ttl <= 0 && s.ttl > 0:
+				// The first scaleset to name this volume configured no
+				// max-age and a later one did. Prefer the real retention
+				// policy — the same rule dockerSettingsSource follows (the
+				// first scaleset that actually enables the sweep provides its
+				// settings), so "first wins" can never mean "the scaleset
+				// that left retention unconfigured wins".
+				picked[s.volumeName] = s
+			case existing != s:
 				logger.Warn("Conflicting shared volume cleanup settings for volume, keeping first",
 					slog.String("volume", s.volumeName),
 					slog.Duration("kept_ttl", existing.ttl),
@@ -987,7 +1006,8 @@ func sharedVolumeSweepTargetsFor(sets []config.ScaleSetConfig, client *dockercli
 			MaxAge:      s.ttl,
 		})
 		targets = append(targets, sharedVolumeSweepTarget{
-			store: store, volumeName: s.volumeName, mountPath: s.mountPath, ttl: s.ttl, interval: s.interval,
+			store: store, volumeName: s.volumeName, mountPath: s.mountPath,
+			ttl: s.ttl, interval: s.interval, enabled: s.ttl > 0,
 		})
 	}
 	return targets
@@ -1244,11 +1264,26 @@ func logReclaimResult(logger *slog.Logger, action, store string, freed uint64, e
 // store's own Reclaim(Tier3) — the same reclaim path the disk guard uses,
 // so there is exactly one implementation of "delete stale shared-volume
 // files" in this process (see cachestore.sharedVolumeStore.Reclaim).
-// No-op when targets is empty (no scaleset enables TTL, or the Docker
-// client was unavailable — see dockerCacheStoresForSocket).
+// No-op when targets is empty (no scaleset configures a shared volume, or
+// the Docker client was unavailable — see dockerCacheStoresForSocket).
+//
+// A target with no max-age gets a startup warning instead of a sweeper.
+// Since exit-time volume deletion was removed, nothing else would ever
+// reclaim it: the disk guard cannot reach a KindScratch store below its TTL
+// at any tier, so an unconfigured max-age really does mean unbounded growth,
+// and the operator has to be told in the one place they will see it.
 func startSharedVolumeCleanup(ctx context.Context, targets []sharedVolumeSweepTarget, logger *slog.Logger) {
 	for _, t := range targets {
 		t := t
+		if !t.enabled {
+			logger.Warn("Shared volume has no max-age — it will grow without bound and is never reclaimed automatically",
+				slog.String("volume", t.volumeName),
+				slog.String("path", t.mountPath),
+				slog.String("action", "set [docker] shared-volume-max-age (e.g. \"72h\") to a value longer than your longest workflow run"),
+			)
+			continue
+		}
+
 		logger.Info("Shared volume TTL cleanup enabled",
 			slog.String("volume", t.volumeName),
 			slog.Duration("ttl", t.ttl),

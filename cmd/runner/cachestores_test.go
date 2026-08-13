@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -137,11 +139,58 @@ func TestBuildxConfigFor(t *testing.T) {
 }
 
 func TestSharedVolumeSweepTargetsFor(t *testing.T) {
-	t.Run("no qualifying scaleset yields no targets", func(t *testing.T) {
-		sets := []config.ScaleSetConfig{{}, {Docker: config.DockerConfig{SharedVolume: "/shared"}}} // TTL unset
+	t.Run("no configured shared volume yields no targets", func(t *testing.T) {
+		sets := []config.ScaleSetConfig{{}, {Backend: "tart", Docker: config.DockerConfig{SharedVolume: "/shared"}}}
 		targets := sharedVolumeSweepTargetsFor(sets, nil, "/root", slog.New(slog.DiscardHandler))
 		if len(targets) != 0 {
-			t.Errorf("targets = %+v, want none (no TTL configured)", targets)
+			t.Errorf("targets = %+v, want none (no Docker scaleset mounts a shared volume)", targets)
+		}
+	})
+
+	// The C1 regression. A shared volume with no max-age is no longer
+	// deleted at exit, so if no store is built for it nothing in the process
+	// can see or reclaim it: no sweeper, no disk-guard tier, and no row in
+	// `runner cache`. It grows forever, silently.
+	t.Run("a shared volume with no max-age still gets a store", func(t *testing.T) {
+		sets := []config.ScaleSetConfig{{Docker: config.DockerConfig{SharedVolume: "/shared"}}} // max-age unset
+		targets := sharedVolumeSweepTargetsFor(sets, nil, "/root", slog.New(slog.DiscardHandler))
+		if len(targets) != 1 {
+			t.Fatalf("targets = %+v, want 1 — without a store this volume is invisible and unreclaimable", targets)
+		}
+		got := targets[0]
+		if got.store == nil {
+			t.Fatal("target carries no store — the disk guard and `runner cache` both address the store, not the target")
+		}
+		if got.enabled {
+			t.Error("enabled = true, want false — there is no retention policy for a periodic sweeper to apply")
+		}
+		if got.ttl != 0 {
+			t.Errorf("ttl = %v, want 0 — no max-age may ever be invented on the operator's behalf", got.ttl)
+		}
+		if got.store.Enabled() {
+			t.Error("store.Enabled() = true with no max-age — Reclaim(Tier3) would then apply its 1-day floor")
+		}
+		// Reclaim must stay a strict no-op, not fall through to the
+		// `days < 1 { days = 1 }` floor and invent a 1-day TTL.
+		freed, err := got.store.Reclaim(context.Background(), cachestore.Tier3)
+		if err != nil || freed != 0 {
+			t.Errorf("Reclaim(Tier3) = (%d, %v), want (0, nil) — a store with no policy must reclaim nothing", freed, err)
+		}
+	})
+
+	// "First wins" must not mean "the scaleset that left retention
+	// unconfigured wins" now that such a scaleset is no longer skipped.
+	t.Run("a later scaleset's max-age beats an earlier one with none", func(t *testing.T) {
+		sets := []config.ScaleSetConfig{
+			{Docker: config.DockerConfig{SharedVolume: "/shared"}},
+			{Docker: config.DockerConfig{SharedVolume: "/shared", SharedVolumeMaxAge: 72 * time.Hour}},
+		}
+		targets := sharedVolumeSweepTargetsFor(sets, nil, "/root", slog.New(slog.DiscardHandler))
+		if len(targets) != 1 {
+			t.Fatalf("targets = %+v, want 1 (same volume name)", targets)
+		}
+		if got := targets[0]; got.ttl != 72*time.Hour || !got.enabled {
+			t.Errorf("target = {ttl:%v enabled:%v}, want {72h true} — a real retention policy must win over none", got.ttl, got.enabled)
 		}
 	})
 
@@ -335,5 +384,80 @@ func TestDiskStatusesForSkipsUnstattablePath(t *testing.T) {
 	statuses := diskStatusesFor([]cachestore.CacheStore{s})
 	if len(statuses) != 0 {
 		t.Errorf("statuses = %+v, want none for an unstattable path", statuses)
+	}
+}
+
+// TestStartSharedVolumeCleanup_WarnsWhenNoMaxAgeConfigured covers the other
+// half of the C1 fix. A store now exists for a shared volume with no
+// max-age, which restores `runner cache` visibility and disk-guard
+// coverage — but the guard can never reclaim a KindScratch store below its
+// TTL at any tier, so nothing will actually free that volume's contents.
+// Since exit-time deletion was removed, the operator has to be told, in the
+// one place they will see it, that the volume is now unbounded and which
+// setting fixes it.
+func TestStartSharedVolumeCleanup_WarnsWhenNoMaxAgeConfigured(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	store := &fakeCacheStore{name: "shared-volume:runner-shared", kind: cachestore.KindScratch, reclaimed: make(chan cachestore.Tier, 4)}
+	targets := []sharedVolumeSweepTarget{{
+		store: store, volumeName: "runner-shared", mountPath: "/shared",
+		ttl: 0, interval: time.Hour, enabled: false,
+	}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	startSharedVolumeCleanup(ctx, targets, logger)
+
+	out := logs.String()
+	if !strings.Contains(out, "shared-volume-max-age") {
+		t.Errorf("startup log does not name the setting that fixes this:\n%s", out)
+	}
+	if !strings.Contains(out, "level=WARN") {
+		t.Errorf("an unbounded shared volume must be logged at WARN, got:\n%s", out)
+	}
+	if !strings.Contains(out, "runner-shared") {
+		t.Errorf("startup log does not name the affected volume:\n%s", out)
+	}
+	if strings.Contains(out, "cleanup enabled") {
+		t.Errorf("no max-age must not be reported as cleanup being enabled:\n%s", out)
+	}
+
+	// No sweeper may run for it either: with no TTL there is nothing to
+	// sweep by, and a ticker calling Reclaim would only be waiting for
+	// someone to add the missing floor.
+	select {
+	case tier := <-store.reclaimed:
+		t.Errorf("a shared volume with no max-age must get no sweeper, but Reclaim(%v) ran", tier)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// TestStartSharedVolumeCleanup_SweepsWhenMaxAgeConfigured is the positive
+// control: the warning path above must not have disabled the normal one.
+func TestStartSharedVolumeCleanup_SweepsWhenMaxAgeConfigured(t *testing.T) {
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	store := &fakeCacheStore{name: "shared-volume:runner-shared", kind: cachestore.KindScratch, reclaimed: make(chan cachestore.Tier, 4)}
+	targets := []sharedVolumeSweepTarget{{
+		store: store, volumeName: "runner-shared", mountPath: "/shared",
+		ttl: 72 * time.Hour, interval: time.Hour, enabled: true,
+	}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	startSharedVolumeCleanup(ctx, targets, logger)
+
+	select {
+	case tier := <-store.reclaimed:
+		if tier != cachestore.Tier3 {
+			t.Errorf("sweeper called Reclaim(%v), want Tier3", tier)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("configured max-age did not produce an initial sweep")
+	}
+	if out := logs.String(); !strings.Contains(out, "cleanup enabled") {
+		t.Errorf("an enabled sweeper must say so at startup:\n%s", out)
 	}
 }

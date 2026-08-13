@@ -253,7 +253,7 @@ health-port = 8080
 socket = "/var/run/docker.sock"
 dind = true
 shared-volume = "/shared"
-# shared-volume-max-age = "168h"        # delete shared-volume files older than this (0 = disabled)
+# shared-volume-max-age = "168h"        # delete shared-volume files older than this; unset = never reclaimed
 # buildx-cleanup = true                 # opt in only on a runner-dedicated daemon
 # buildx-cleanup-ttl = "24h"            # remove buildx builders older than this
 # buildx-cleanup-interval = "6h"        # how often the buildx sweep runs
@@ -483,11 +483,13 @@ The short form is enough for most caches: created on first use, persistent, neve
 ```toml
 [docker]
 shared-volume                  = "/shared"
-shared-volume-max-age          = "168h"  # delete files older than this; 0 = disabled
+shared-volume-max-age          = "168h"  # delete files older than this
 shared-volume-cleanup-interval = "6h"
 ```
 
-Files are deleted only once older than `shared-volume-max-age` — never at process exit, and never while still within that window no matter how much disk pressure there is (the scratch classification above, enforced by the guard's tier 3 too).
+Files are deleted only once older than `shared-volume-max-age` — never at process exit, and never while still within that window no matter how much disk pressure there is (the scratch classification above, enforced by the guard's tier 3 too). Set it longer than your longest workflow run.
+
+`shared-volume-max-age` is the volume's *only* retention policy, so leaving it unset means nothing ever reclaims that volume: it isn't deleted at exit, and the guard won't touch un-expired scratch data at any tier. runner still measures it (it appears in `runner cache`) and warns at startup, but a shared volume with no max-age grows without bound.
 
 **Tart OCI/IPSW cache (`cache-cleanup`, `cache-max-age`, `cache-budget`).** Xcode VM images are 50–80 GB each and `:latest` tags accumulate old layers under `$TART_HOME/cache/` — see [Config File (TOML)](#config-file-toml) above for the full `[tart]` example. The sweeper only touches OCI/IPSW caches, never your local VMs.
 

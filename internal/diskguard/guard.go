@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"sync"
 
 	"github.com/ysya/runscaler/internal/bytesize"
 	"github.com/ysya/runscaler/internal/cachestore"
@@ -51,6 +52,11 @@ type Guard struct {
 	stores []cachestore.CacheStore
 	statFn func(string) (FSStat, error)
 	logger *slog.Logger
+
+	// sweepMu serializes Sweep against itself. See Sweep's doc comment for
+	// why concurrent calls are possible now, and why TryLock rather than
+	// Lock.
+	sweepMu sync.Mutex
 }
 
 // New constructs a Guard. statFn is injected rather than the package's own
@@ -103,10 +109,32 @@ func (g *Guard) statByFilesystem() map[string]filesystemGroup {
 // mode below (a store's statfs, Measure, or Reclaim call failing) is
 // logged and skipped rather than propagated, so one misbehaving store or
 // filesystem never stops the sweep from doing what it can for the rest.
+//
+// Safe for concurrent callers, which is no longer hypothetical since Task
+// 9: the periodic ticker in cmd/runner and every scale set's pre-job-start
+// check (scaler.WithDiskChecker) now share one Guard instance and can each
+// call Sweep from their own goroutine (see startDiskGuard/runScaleSet in
+// cmd/runner/main.go). The store-level work Sweep drives — daemon prunes,
+// helper containers walking and deleting volume contents — is not safe to
+// run twice at once; see backend.CleanupSharedDocker's doc comment for the
+// same class of hazard on a related path.
+//
+// sweepMu.TryLock, not Lock: a sweep already in flight is already
+// addressing whatever pressure triggered this call, so a second caller has
+// nothing to gain by waiting for it — only latency stacked onto the
+// job-start path this guard exists to keep unblocked (see
+// scaler.startRunner's own "never blocks a job" comment). A concurrent
+// caller that finds a sweep already in progress logs that and returns nil
+// immediately instead of queuing behind it.
 func (g *Guard) Sweep(ctx context.Context) error {
 	if !g.cfg.Enabled {
 		return nil
 	}
+	if !g.sweepMu.TryLock() {
+		g.logger.Debug("Disk guard: sweep already in progress, skipping")
+		return nil
+	}
+	defer g.sweepMu.Unlock()
 
 	// Budget enforcement is a separate concern from the tier ladder below:
 	// it runs on every sweep regardless of disk pressure and is not bounded
@@ -259,6 +287,12 @@ func (g *Guard) enforceBudgets(ctx context.Context) {
 // inspects it without checking the error first. A partial failure — at
 // least one filesystem still statfs-able — is unaffected: it still
 // returns a real verdict from what it could read, exactly as before.
+//
+// NeedsReclaim does not take sweepMu and is safe to call concurrently with
+// itself and with Sweep: g.cfg and g.stores are fixed after New, and
+// statByFilesystem only calls statFn — a stateless syscall, not a store's
+// Reclaim or Measure — so there is no shared mutable state here for a lock
+// to protect.
 func (g *Guard) NeedsReclaim() (bool, error) {
 	if !g.cfg.Enabled {
 		return false, nil

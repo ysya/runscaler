@@ -944,6 +944,16 @@ Expected: FAIL,`disk.Validate undefined`
 
 `cmd/runner/main.go` 在既有四個 sweeper 旁新增 `startDiskGuard(ctx, stores, cfg, logger)`,結構完全比照 `startDockerPrune`:nil guard、Info 記錄生效設定、先掃一次再進 ticker、錯誤 Warn。store 集合由一個新的 `buildCacheStores(cfg, dockerClients, logger) []cachestore.CacheStore` 組出。
 
+**同時消除回收邏輯的重複(必做)。** 現有四個 sweeper 各自直接呼叫 `internal/backend` 的回收函式,而 `internal/cachestore` 的 store 現在也實作了同一套邏輯——兩份都會刪使用者資料,長期並行會漂移。spec 要求兩者「透過同一組 `CacheStore` 實作共用回收邏輯」,因此本 task 必須:
+
+- `startSharedVolumeCleanup` 改為呼叫對應 store 的 `Reclaim(ctx, cachestore.Tier3)`,不再呼叫 `backend.CleanupSharedVolumeStale`
+- `startDockerPrune` 改為呼叫 garbage store 的 `Reclaim(Tier1)` 與 build cache store 的 `Reclaim(Tier2)`,不再呼叫 `backend.PruneDockerRuntime`
+- `startBuildxCleanup` 改為呼叫 buildx store 的 `Reclaim(Tier1)`
+- `startTartCacheCleanup` 改為呼叫 tart store 的 `Reclaim(Tier2)`
+- 上述 `internal/backend` 中已無呼叫者的回收函式一併刪除,連同其測試(測試改由 `internal/cachestore` 覆蓋)。若某函式仍有其他呼叫者則保留並在報告中說明。
+
+sweeper 保留(它們是各 store 的例行保留策略,與守門員的觸發條件不同),改變的只是它們的實作路徑。
+
 - [ ] **Step 4: 執行測試確認通過**
 
 Run: `go build ./... && go test ./internal/config/ ./cmd/runner/ -count=1`

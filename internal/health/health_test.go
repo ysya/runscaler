@@ -162,6 +162,46 @@ func TestReadyzDisconnectedScaler(t *testing.T) {
 	}
 }
 
+func TestHealthzDiskOmittedWithoutProvider(t *testing.T) {
+	h := newTestServer()
+
+	req := httptest.NewRequest("GET", "/healthz", nil)
+	w := httptest.NewRecorder()
+	h.handleHealthz(w, req)
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if _, ok := raw["disk"]; ok {
+		t.Error(`"disk" key must be omitted from the JSON response when no provider is registered`)
+	}
+}
+
+func TestHealthzDiskFromProvider(t *testing.T) {
+	h := newTestServer()
+	h.SetDiskProvider(func() []DiskStatus {
+		return []DiskStatus{{Filesystem: "/", FreePercent: 38, FreeBytes: 100, TotalBytes: 200}}
+	})
+
+	req := httptest.NewRequest("GET", "/healthz", nil)
+	w := httptest.NewRecorder()
+	h.handleHealthz(w, req)
+
+	var resp HealthResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(resp.Disk) != 1 {
+		t.Fatalf("disk length = %d, want 1", len(resp.Disk))
+	}
+	got := resp.Disk[0]
+	want := DiskStatus{Filesystem: "/", FreePercent: 38, FreeBytes: 100, TotalBytes: 200}
+	if got != want {
+		t.Errorf("disk[0] = %+v, want %+v", got, want)
+	}
+}
+
 func TestUnregisterScaler(t *testing.T) {
 	h := newTestServer()
 	h.RegisterScaler("test-set", &stubScaler{idle: 1, busy: 0})

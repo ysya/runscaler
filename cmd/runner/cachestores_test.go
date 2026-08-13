@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"log/slog"
 	"testing"
 	"time"
 
+	"github.com/ysya/runscaler/internal/cachestore"
 	"github.com/ysya/runscaler/internal/config"
 )
 
@@ -273,5 +275,34 @@ func TestBuildCacheStoresEmptyInputYieldsNoStores(t *testing.T) {
 	stores := buildCacheStores(nil, nil, slog.New(slog.DiscardHandler))
 	if len(stores) != 0 {
 		t.Errorf("buildCacheStores(nil, nil, ...) = %d stores, want 0", len(stores))
+	}
+}
+
+// TestDiskStatusesForNeverCallsMeasure pins the health endpoint's cheap-path
+// requirement directly: /healthz can be polled, so its disk section must
+// come from statfs alone, never from a store's (possibly expensive) Measure.
+func TestDiskStatusesForNeverCallsMeasure(t *testing.T) {
+	measureCalls := 0
+	measure := func(context.Context) (uint64, error) {
+		measureCalls++
+		return 999, nil
+	}
+	s1 := &fakeCacheStore{name: "a", path: "/", measureFn: measure}
+	s2 := &fakeCacheStore{name: "b", path: "/", measureFn: measure}
+
+	statuses := diskStatusesFor([]cachestore.CacheStore{s1, s2})
+	if measureCalls != 0 {
+		t.Errorf("Measure was called %d times, want 0 — the health disk section must be statfs-only", measureCalls)
+	}
+	if len(statuses) != 1 {
+		t.Errorf("statuses = %+v, want exactly 1 (both stores share filesystem /, deduped)", statuses)
+	}
+}
+
+func TestDiskStatusesForSkipsUnstattablePath(t *testing.T) {
+	s := &fakeCacheStore{name: "bad", path: "/definitely/does/not/exist/xyz123"}
+	statuses := diskStatusesFor([]cachestore.CacheStore{s})
+	if len(statuses) != 0 {
+		t.Errorf("statuses = %+v, want none for an unstattable path", statuses)
 	}
 }

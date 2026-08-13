@@ -123,3 +123,12 @@ func (s *tartStore) Reclaim(ctx context.Context, tier Tier) (uint64, error) {
 		return 0, nil
 	}
 }
+
+// Budget reports no cap for the disk guard's independent budget-enforcement
+// pass. cfg.BudgetGB is a real cap, but it already drives Tier2's
+// disk-pressure-gated trim above via `tart prune --space-budget` — tart's
+// own LRU eviction, not the guard's. Surfacing it here too would let the
+// guard's unconditional Tier4 wipe fire on the same number, which would
+// also break the explicit "never wholesale-wipe Tart's cache" decision in
+// the Tier4 case above.
+func (s *tartStore) Budget() (uint64, string) { return 0, "" }

@@ -65,4 +65,11 @@ type CacheStore interface {
 	// reports the bytes freed. Tiers the store does not participate in are
 	// a no-op returning 0.
 	Reclaim(ctx context.Context, tier Tier) (uint64, error)
+	// Budget reports this store's own operator-configured retention cap,
+	// independent of the disk guard's tier ladder: bytes is the cap, and
+	// onExceed is "wipe" or "warn" ("" behaves as "warn") for what the
+	// guard does once usage exceeds it. A store with no such policy
+	// returns (0, ""); the guard treats a zero budget as "not configured"
+	// and never measures it for this purpose.
+	Budget() (bytes uint64, onExceed string)
 }

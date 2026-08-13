@@ -33,6 +33,10 @@ type DockerAPI interface {
 	VolumeRemove(ctx context.Context, volumeID string, options dockerclient.VolumeRemoveOptions) (dockerclient.VolumeRemoveResult, error)
 	ContainerList(ctx context.Context, options dockerclient.ContainerListOptions) (dockerclient.ContainerListResult, error)
 	VolumeList(ctx context.Context, options dockerclient.VolumeListOptions) (dockerclient.VolumeListResult, error)
+	// ContainerLogs backs internal/cachestore's volume-backed stores: it
+	// reads a finished helper container's stdout so Measure can parse
+	// `du -sb` output and Reclaim can report bytes freed.
+	ContainerLogs(ctx context.Context, containerID string, options dockerclient.ContainerLogsOptions) (dockerclient.ContainerLogsResult, error)
 	// Info and DiskUsage back internal/cachestore's Docker daemon store:
 	// Info resolves the daemon's data-root directory (for Path()), and
 	// DiskUsage reports image and build-cache size totals (for Measure()).

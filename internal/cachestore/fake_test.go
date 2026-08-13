@@ -1,8 +1,12 @@
 package cachestore
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
+	"io"
 
+	"github.com/moby/moby/api/pkg/stdcopy"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/system"
 	dockerclient "github.com/moby/moby/client"
@@ -10,7 +14,8 @@ import (
 
 // fakeDockerAPI implements backend.DockerAPI for cachestore's own tests.
 // Field names are relied on by later cachestore tasks' tests (shared-volume
-// and cache-volume stores reuse this exact double) — see task-2-report.md.
+// and cache-volume stores reuse this exact double) — see task-2-report.md
+// and task-3-report.md.
 type fakeDockerAPI struct {
 	rootDir string // Info() 回傳的 DockerRootDir
 
@@ -23,10 +28,32 @@ type fakeDockerAPI struct {
 	createdContainers int      // ContainerCreate 次數(helper container 用)
 	helperScripts     []string // 每個 helper container 的 sh -c 腳本
 	diskUsage         dockerclient.DiskUsageResult
+
+	// createCalls holds the full ContainerCreate args, in order, so tests
+	// can assert on the mounted volume, image, and labels — not just the
+	// script (helperScripts) or the call count (createdContainers).
+	createCalls []dockerclient.ContainerCreateOptions
+	// containersRemoved holds the IDs passed to ContainerRemove, so tests
+	// can confirm a helper container is always cleaned up.
+	containersRemoved []string
+
+	// Optional overrides for ContainerWait, mirroring mockDocker's fields in
+	// internal/backend/docker_test.go. Unset (both zero), the wait succeeds
+	// immediately with status 0.
+	waitStatus int64
+	waitErr    error
+
+	// containerLogsStdout is the canned stdout ContainerLogs() returns,
+	// framed as a single stdcopy stdout frame (see stdcopyStdoutFrame) so
+	// callers exercise the same demultiplexing path (stdcopy.StdCopy)
+	// production code uses against a real daemon. The shared-volume and
+	// cache-volume stores (Task 3) parse this to read `du -sb` output.
+	containerLogsStdout string
 }
 
 func (f *fakeDockerAPI) ContainerCreate(_ context.Context, options dockerclient.ContainerCreateOptions) (dockerclient.ContainerCreateResult, error) {
 	f.createdContainers++
+	f.createCalls = append(f.createCalls, options)
 	// Helper containers (shared-volume/cache-volume stores, Task 3) run
 	// `sh -c <script>`, matching CleanupSharedVolumeStale's shape in
 	// internal/backend/docker.go. Capture the script when present so those
@@ -42,16 +69,42 @@ func (f *fakeDockerAPI) ContainerStart(_ context.Context, _ string, _ dockerclie
 	return dockerclient.ContainerStartResult{}, nil
 }
 
-func (f *fakeDockerAPI) ContainerRemove(_ context.Context, _ string, _ dockerclient.ContainerRemoveOptions) (dockerclient.ContainerRemoveResult, error) {
+func (f *fakeDockerAPI) ContainerRemove(_ context.Context, containerID string, _ dockerclient.ContainerRemoveOptions) (dockerclient.ContainerRemoveResult, error) {
+	f.containersRemoved = append(f.containersRemoved, containerID)
 	return dockerclient.ContainerRemoveResult{}, nil
 }
 
-// ContainerWait always completes immediately with status 0 — no fake test in
-// this package (so far) needs a non-trivial exit path.
+// ContainerWait completes immediately with waitStatus (default 0), or sends
+// waitErr on the error channel instead when set.
 func (f *fakeDockerAPI) ContainerWait(_ context.Context, _ string, _ dockerclient.ContainerWaitOptions) dockerclient.ContainerWaitResult {
 	statusCh := make(chan container.WaitResponse, 1)
-	statusCh <- container.WaitResponse{StatusCode: 0}
-	return dockerclient.ContainerWaitResult{Result: statusCh, Error: make(chan error, 1)}
+	errCh := make(chan error, 1)
+	if f.waitErr != nil {
+		errCh <- f.waitErr
+	} else {
+		statusCh <- container.WaitResponse{StatusCode: f.waitStatus}
+	}
+	return dockerclient.ContainerWaitResult{Result: statusCh, Error: errCh}
+}
+
+// ContainerLogs returns containerLogsStdout wrapped in a single stdout-typed
+// stdcopy frame — the wire format non-TTY containers' logs use (see
+// ContainerLogs' doc comment in github.com/moby/moby/client) — so
+// production's stdcopy.StdCopy demux path is exercised the same way it
+// would be against a real daemon, rather than going untested.
+func (f *fakeDockerAPI) ContainerLogs(_ context.Context, _ string, _ dockerclient.ContainerLogsOptions) (dockerclient.ContainerLogsResult, error) {
+	return io.NopCloser(bytes.NewReader(stdcopyStdoutFrame(f.containerLogsStdout))), nil
+}
+
+// stdcopyStdoutFrame wraps payload in a single stdout-typed stdcopy frame:
+// one byte of stream type, three unused bytes, a big-endian uint32 length,
+// then the payload itself.
+func stdcopyStdoutFrame(payload string) []byte {
+	buf := make([]byte, 8+len(payload))
+	buf[0] = byte(stdcopy.Stdout)
+	binary.BigEndian.PutUint32(buf[4:8], uint32(len(payload)))
+	copy(buf[8:], payload)
+	return buf
 }
 
 func (f *fakeDockerAPI) ContainerPrune(_ context.Context, _ dockerclient.ContainerPruneOptions) (dockerclient.ContainerPruneResult, error) {

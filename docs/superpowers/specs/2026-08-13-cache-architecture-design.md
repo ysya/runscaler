@@ -118,7 +118,13 @@ type CacheStore interface {
 
 **守門員與現有 sweeper 的關係:兩者並存,職責不同。** 現有的四個 sweeper(`startSharedVolumeCleanup`、`startBuildxCleanup`、`startDockerPrune`、`startTartCacheCleanup`)維持不變,它們是「第 2 層:各 store 依自己的保留策略定期整理」。守門員是額外的一層,只在**磁碟壓力**下才動作。實作時不刪除既有 sweeper,兩者透過同一組 `CacheStore` 實作共用回收邏輯即可。
 
-**守門員尊重各 store 的啟用開關。** 若操作者設了 `prune = false`(v0.4 起的預設,理由是 prune 作用於整個 daemon、可能誤傷非 runner 的物件),守門員**不會**代為 prune 那個 daemon,而是在該 store 上跳過並於警告中列出「因為 X 被停用,此處無法回收」。理由:停用是明確的操作者意圖,守門員不該在背後推翻它——那正是 v0.4 把預設改成關閉時要避免的事。這代表在全部相關 store 都被停用的主機上,守門員只能警告而無法回收,這是可接受且誠實的結果。
+**各 store 的啟用開關只約束例行清理,不約束守門員。**(2026-08-14 修訂;原設計為「守門員尊重停用開關」。)
+
+`prune = false`、`buildx-cleanup = false`、`cache-cleanup = false` 的語意是「不要定期主動清理」,而不是「磁碟燒起來也別碰」。原設計讓守門員一併尊重這些開關,結果是:v0.4 起 `prune` 與 `buildx-cleanup` 預設為 false,`max-tier` 預設 3 又碰不到只在 Tier4 出現的 cache volume——**預設設定下守門員是開著的,卻一件東西都回收不了**,功能等於惰性出貨。這不是「操作者選擇退出」,而是「操作者從未選擇加入」,兩者被混為一談。
+
+修訂後:sweeper 讀 `Enabled()` 決定要不要定期跑;守門員在磁碟壓力下對所有 store 一律可回收。
+
+代價與退路:共用 daemon(非 runner 專用)的主機,可能在壓力下被清到非 runner 的物件。這種主機的正確做法是 `[disk] guard = false` 整個關掉守門員——那是一個明確表達「這台的磁碟不歸 runner 管」的開關,語意比借用 `prune` 精確。
 
 ### C. 磁碟守門員(`internal/diskguard`,新套件)
 

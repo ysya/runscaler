@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -114,7 +115,7 @@ func init() {
 	viper.BindPFlag("tart.pool-size", flags.Lookup("tart-pool-size"))
 
 	// Register subcommands
-	cmd.AddCommand(initCmd, validateCmd, statusCmd, doctorCmd, versionCmd, serviceCmd, runCommand)
+	cmd.AddCommand(initCmd, validateCmd, statusCmd, doctorCmd, versionCmd, serviceCmd, cacheCmd, runCommand)
 }
 
 func main() {
@@ -411,6 +412,14 @@ func run(ctx context.Context, cfg config.Config) error {
 	}
 	for _, t := range tartTargets {
 		cacheStores = append(cacheStores, t.store)
+	}
+
+	// Wire the health endpoint's disk section to the same cacheStores set
+	// the guard reclaims from — statfs only, never Measure (see
+	// health.DiskStatus's doc comment: /healthz can be polled, so this must
+	// stay cheap on every call, unlike 'runner cache').
+	if healthServer != nil {
+		healthServer.SetDiskProvider(func() []health.DiskStatus { return diskStatusesFor(cacheStores) })
 	}
 
 	// Start periodic Tart cache cleanup (one sweeper per unique TART_HOME, so
@@ -1153,6 +1162,44 @@ func buildCacheStores(scaleSets []config.ScaleSetConfig, dockerClients map[strin
 		stores = append(stores, t.store)
 	}
 	return stores
+}
+
+// diskStatusesFor reports capacity for every distinct filesystem stores
+// live on, deduplicated by filesystem so a host with many stores on one
+// disk (the common case) reports one row, not one per store — matching
+// diskguard.Guard.statByFilesystem's own per-filesystem grouping, though
+// this never reclaims or logs, it only reads. Statfs only, never Measure
+// (see health.DiskStatus's doc comment) — this is called on every /healthz
+// request, so it must stay that cheap. A store whose Path() fails statfs is
+// silently omitted rather than warned about: unlike diskguard.Guard (which
+// sweeps a handful of times an hour on its own schedule), this can run on
+// every poll from an external monitor, and logging on every one of those
+// would spam the log for a condition the response already reflects (that
+// filesystem's entry is simply missing).
+func diskStatusesFor(stores []cachestore.CacheStore) []health.DiskStatus {
+	seen := make(map[string]bool)
+	var statuses []health.DiskStatus
+	for _, s := range stores {
+		path := s.Path()
+		st, err := diskguard.StatFor(path)
+		if err != nil || seen[st.ID] {
+			continue
+		}
+		seen[st.ID] = true
+
+		var freePercent float64
+		if st.TotalBytes > 0 {
+			freePercent = float64(st.FreeBytes) / float64(st.TotalBytes) * 100
+		}
+		statuses = append(statuses, health.DiskStatus{
+			Filesystem:  path,
+			FreePercent: freePercent,
+			FreeBytes:   st.FreeBytes,
+			TotalBytes:  st.TotalBytes,
+		})
+	}
+	sort.Slice(statuses, func(i, j int) bool { return statuses[i].Filesystem < statuses[j].Filesystem })
+	return statuses
 }
 
 // logReclaimResult logs the outcome of one store's Reclaim call: Info with

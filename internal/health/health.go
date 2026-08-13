@@ -33,6 +33,7 @@ type HealthServer struct {
 	scalers   map[string]RunnerCounter
 	metrics   map[string]MetricsProvider
 	states    map[string]connectionState
+	diskFn    func() []DiskStatus
 }
 
 type connectionState struct {
@@ -62,12 +63,27 @@ type MetricsStatus struct {
 	RunningJobs    int   `json:"running_jobs,omitempty"`
 }
 
+// DiskStatus reports capacity for one filesystem a configured
+// cachestore.CacheStore lives on. It is populated from
+// internal/diskguard.StatFor only — a plain statfs — never from a store's
+// Measure, which can be expensive (it may walk a volume or spawn a helper
+// container): /healthz can be polled, so its disk section must stay cheap
+// on every call. For each store's actual measured usage, see the
+// 'runner cache' command instead.
+type DiskStatus struct {
+	Filesystem  string  `json:"filesystem"`
+	FreePercent float64 `json:"free_percent"`
+	FreeBytes   uint64  `json:"free_bytes"`
+	TotalBytes  uint64  `json:"total_bytes"`
+}
+
 // HealthResponse is the JSON response for /healthz.
 type HealthResponse struct {
 	Status    string           `json:"status"`
 	Version   string           `json:"version"`
 	Uptime    string           `json:"uptime"`
 	ScaleSets []ScaleSetStatus `json:"scale_sets"`
+	Disk      []DiskStatus     `json:"disk,omitempty"`
 }
 
 // NewHealthServer creates a new health check HTTP server.
@@ -148,6 +164,19 @@ func (h *HealthServer) RegisterMetrics(name string, m MetricsProvider) {
 	h.mu.Unlock()
 }
 
+// SetDiskProvider registers the function /healthz calls to populate its
+// disk section — see DiskStatus's doc comment for why it must stay cheap.
+// main wires this to a function that calls internal/diskguard.StatFor per
+// configured cachestore.CacheStore, never Measure. Until this is called,
+// /healthz reports no disk section at all (Disk stays nil, omitted by its
+// omitempty tag) — the same "empty until registered" shape RegisterScaler
+// gives ScaleSets before any scale set has started.
+func (h *HealthServer) SetDiskProvider(fn func() []DiskStatus) {
+	h.mu.Lock()
+	h.diskFn = fn
+	h.mu.Unlock()
+}
+
 func (h *HealthServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -164,6 +193,9 @@ func (h *HealthServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		Version:   h.version,
 		Uptime:    time.Since(h.startTime).Truncate(time.Second).String(),
 		ScaleSets: make([]ScaleSetStatus, 0, len(h.scalers)),
+	}
+	if h.diskFn != nil {
+		resp.Disk = h.diskFn()
 	}
 
 	names := make([]string, 0, len(h.scalers))

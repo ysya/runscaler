@@ -478,9 +478,68 @@ nested-bad = 3
 	}
 }
 
+// TestLoad_DiskSettings pins that [disk] — a top-level-only section, never
+// part of ScaleSetConfig — decodes into Config.Disk directly, independent of
+// [[scaleset]] entries.
+func TestLoad_DiskSettings(t *testing.T) {
+	cfg := loadTOML(t, `
+[disk]
+guard = false
+min-free = "15%"
+target-free = "35%"
+interval = "30m"
+max-tier = 2
+`)
+	if cfg.IsDiskGuardEnabled() {
+		t.Error("guard = false should disable the guard")
+	}
+	if cfg.Disk.MinFree != "15%" {
+		t.Errorf("min-free = %q, want 15%%", cfg.Disk.MinFree)
+	}
+	if cfg.Disk.TargetFree != "35%" {
+		t.Errorf("target-free = %q, want 35%%", cfg.Disk.TargetFree)
+	}
+	if cfg.Disk.Interval != 30*time.Minute {
+		t.Errorf("interval = %v, want 30m", cfg.Disk.Interval)
+	}
+	if cfg.Disk.MaxTier != 2 {
+		t.Errorf("max-tier = %d, want 2", cfg.Disk.MaxTier)
+	}
+	if err := cfg.Disk.Validate(); err != nil {
+		t.Errorf("Validate() unexpected error: %v", err)
+	}
+}
+
+// TestLoad_DiskSettingsDefaults pins that an absent [disk] section decodes
+// to a zero-value DiskConfig that both IsDiskGuardEnabled and Validate treat
+// as "use the defaults" — the shape every pre-[disk] config on disk today
+// has, which must keep loading and validating with zero changes.
+func TestLoad_DiskSettingsDefaults(t *testing.T) {
+	cfg := loadTOML(t, `
+[[scaleset]]
+url = "https://github.com/org-a"
+name = "runners-a"
+token = "token-a"
+`)
+	if cfg.Disk != (DiskConfig{}) {
+		t.Errorf("Disk = %+v, want zero value when [disk] is absent", cfg.Disk)
+	}
+	if !cfg.IsDiskGuardEnabled() {
+		t.Error("absent [disk] should still default the guard to enabled")
+	}
+	if err := cfg.Disk.Validate(); err != nil {
+		t.Errorf("Validate() unexpected error: %v", err)
+	}
+}
+
 // TestLoad_ValidConfigNoWarnings pins that a fully populated valid config
 // produces zero warnings — guarding against Metadata.Unused false positives
-// (e.g. squashed structs or nested tables being misreported).
+// (e.g. squashed structs or nested tables being misreported). [disk] is
+// included specifically to pin that this top-level-only section does not
+// leak a spurious "unknown config key" warning into the [[scaleset]]
+// entries below it (ScaleSetConfig has no Disk field, so decoding "disk.*"
+// into it would mark those keys Unused if the inherited-vs-own-key filter
+// in Load ever regressed).
 func TestLoad_ValidConfigNoWarnings(t *testing.T) {
 	cfg := loadTOML(t, `
 log-level = "debug"
@@ -492,6 +551,13 @@ backend = "docker"
 runner-image = "ghcr.io/actions/actions-runner:latest"
 runner-group = "default"
 max-runners = 10
+
+[disk]
+guard = true
+min-free = "10%"
+target-free = "20%"
+interval = "1h"
+max-tier = 3
 
 [docker]
 socket = "/var/run/docker.sock"

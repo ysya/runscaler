@@ -82,4 +82,18 @@ const (
 
 	// DefaultBuildxCleanupInterval is the period between buildx cleanup sweeps.
 	DefaultBuildxCleanupInterval = 6 * time.Hour
+
+	// DefaultDiskGuard enables the disk guard by default. Unlike prune, the
+	// guard only acts under disk pressure and never overrides a store the
+	// operator disabled, so leaving it on is safe.
+	DefaultDiskGuard = true
+	// DefaultDiskMinFree is the free-space level that triggers reclamation.
+	DefaultDiskMinFree = "10%"
+	// DefaultDiskTargetFree is the level reclamation aims to restore.
+	DefaultDiskTargetFree = "20%"
+	// DefaultDiskGuardInterval is the period between guard sweeps.
+	DefaultDiskGuardInterval = time.Hour
+	// DefaultDiskMaxTier stops short of wiping cache volumes — that makes
+	// the next build cold, so it requires an explicit opt-in.
+	DefaultDiskMaxTier = 3
 )

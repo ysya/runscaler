@@ -396,6 +396,107 @@ func TestParseCacheVolumes(t *testing.T) {
 			})
 		}
 	})
+
+	t.Run("long form entry with budget and on-exceed", func(t *testing.T) {
+		dc := DockerConfig{Cache: []CacheVolumeSpec{
+			{Name: "ccache", Path: "/home/runner/.ccache", Budget: "20GB", OnExceed: "wipe"},
+		}}
+		mounts, err := dc.ParseCacheVolumes()
+		if err != nil {
+			t.Fatalf("ParseCacheVolumes() error: %v", err)
+		}
+		want := CacheVolumeMount{Volume: "ccache", Path: "/home/runner/.ccache", BudgetBytes: 20 * 1024 * 1024 * 1024, OnExceed: "wipe"}
+		if len(mounts) != 1 || mounts[0] != want {
+			t.Errorf("mounts = %+v, want [%+v]", mounts, want)
+		}
+	})
+
+	t.Run("long form entry with no budget resolves to zero, same as the short form", func(t *testing.T) {
+		dc := DockerConfig{Cache: []CacheVolumeSpec{{Name: "ccache", Path: "/home/runner/.ccache"}}}
+		mounts, err := dc.ParseCacheVolumes()
+		if err != nil {
+			t.Fatalf("ParseCacheVolumes() error: %v", err)
+		}
+		want := CacheVolumeMount{Volume: "ccache", Path: "/home/runner/.ccache"}
+		if len(mounts) != 1 || mounts[0] != want {
+			t.Errorf("mounts = %+v, want [%+v]", mounts, want)
+		}
+	})
+
+	t.Run("same name in both forms: long form wins entirely, not merged field by field", func(t *testing.T) {
+		dc := DockerConfig{
+			CacheVolumes: []string{"ccache:/home/runner/.ccache-short"},
+			Cache: []CacheVolumeSpec{
+				{Name: "ccache", Path: "/home/runner/.ccache-long", Budget: "5GB", OnExceed: "warn"},
+			},
+		}
+		mounts, err := dc.ParseCacheVolumes()
+		if err != nil {
+			t.Fatalf("ParseCacheVolumes() error: %v", err)
+		}
+		want := CacheVolumeMount{Volume: "ccache", Path: "/home/runner/.ccache-long", BudgetBytes: 5 * 1024 * 1024 * 1024, OnExceed: "warn"}
+		if len(mounts) != 1 || mounts[0] != want {
+			t.Errorf("mounts = %+v, want [%+v] (the short-form entry must be fully discarded)", mounts, want)
+		}
+	})
+
+	t.Run("short and long form entries with distinct names both survive, short form ordered first", func(t *testing.T) {
+		dc := DockerConfig{
+			CacheVolumes: []string{"gradle-cache:/home/runner/.gradle"},
+			Cache:        []CacheVolumeSpec{{Name: "ccache", Path: "/home/runner/.ccache", Budget: "20GB"}},
+		}
+		mounts, err := dc.ParseCacheVolumes()
+		if err != nil {
+			t.Fatalf("ParseCacheVolumes() error: %v", err)
+		}
+		if len(mounts) != 2 || mounts[0].Volume != "gradle-cache" || mounts[1].Volume != "ccache" {
+			t.Errorf("mounts = %+v, want [gradle-cache, ccache] in that order", mounts)
+		}
+	})
+
+	t.Run("on-exceed empty string is valid (behaves as warn downstream)", func(t *testing.T) {
+		dc := DockerConfig{Cache: []CacheVolumeSpec{{Name: "x", Path: "/x", Budget: "1GB"}}}
+		mounts, err := dc.ParseCacheVolumes()
+		if err != nil {
+			t.Fatalf("ParseCacheVolumes() unexpected error: %v", err)
+		}
+		if len(mounts) != 1 || mounts[0].OnExceed != "" {
+			t.Errorf("mounts = %+v, want OnExceed \"\" preserved as-is", mounts)
+		}
+	})
+
+	t.Run("duplicate container path across the two forms", func(t *testing.T) {
+		dc := DockerConfig{
+			CacheVolumes: []string{"a:/shared-path"},
+			Cache:        []CacheVolumeSpec{{Name: "b", Path: "/shared-path"}},
+		}
+		if _, err := dc.ParseCacheVolumes(); err == nil {
+			t.Error("ParseCacheVolumes() expected a duplicate-path error")
+		}
+	})
+
+	t.Run("long form validation errors", func(t *testing.T) {
+		tests := []struct {
+			name string
+			spec CacheVolumeSpec
+		}{
+			{name: "missing name", spec: CacheVolumeSpec{Path: "/x"}},
+			{name: "missing path", spec: CacheVolumeSpec{Name: "x"}},
+			{name: "invalid volume name", spec: CacheVolumeSpec{Name: "bad/name", Path: "/x"}},
+			{name: "relative path", spec: CacheVolumeSpec{Name: "x", Path: "relative"}},
+			{name: "percentage budget rejected", spec: CacheVolumeSpec{Name: "x", Path: "/x", Budget: "10%"}},
+			{name: "unparseable budget", spec: CacheVolumeSpec{Name: "x", Path: "/x", Budget: "lots"}},
+			{name: "bad on-exceed", spec: CacheVolumeSpec{Name: "x", Path: "/x", OnExceed: "delete"}},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				dc := DockerConfig{Cache: []CacheVolumeSpec{tt.spec}}
+				if mounts, err := dc.ParseCacheVolumes(); err == nil {
+					t.Errorf("ParseCacheVolumes() expected error for %+v, got mounts %v", tt.spec, mounts)
+				}
+			})
+		}
+	})
 }
 
 func TestApplyDefaults_BackendDefault(t *testing.T) {

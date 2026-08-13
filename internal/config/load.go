@@ -20,14 +20,78 @@ var globalOnlyKeys = []string{"log-level", "log-format", "log-file", "health-por
 // inherited from the top level.
 var identityKeys = []string{"url", "name", "token", "labels", "min-runners"}
 
+// aliasSpec is one deprecated-key → canonical-key mapping applied at the
+// map level, before any struct decode happens. table is the top-level
+// settings key the pair lives under ("docker" or "tart"); oldKey and newKey
+// are the bare keys within that table.
+//
+// Only cache-space-budget and shared-volume-ttl need an entry: the design's
+// vocabulary-unification pass (docs/superpowers/specs/
+// 2026-08-13-cache-architecture-design.md, section D) found build-cache-budget
+// and build-cache-max-age already using the canonical names.
+type aliasSpec struct {
+	table  string
+	oldKey string
+	newKey string
+}
+
+var configAliases = []aliasSpec{
+	{table: "docker", oldKey: "shared-volume-ttl", newKey: "shared-volume-max-age"},
+	{table: "tart", oldKey: "cache-space-budget", newKey: "cache-budget"},
+}
+
+// applyAliases moves each deprecated key in configAliases onto its
+// canonical replacement within settings' nested table maps, mutating those
+// tables in place, and returns one warning per pair where both the old and
+// new key were set. It must run before settings reaches decodeStrict: the
+// old key is always deleted from its table — whether its value was moved or
+// discarded — so the strict decoder, which reports every source key it
+// cannot match to a struct field, never sees it and never reports it as
+// unknown.
+//
+// Per pair: old present, new absent → old's value moves onto the new key.
+// Both present → the new key's value is kept, the old key's value is
+// discarded, and a warning is returned (silently preferring the new key
+// with no warning would hide a config that thinks it is setting one value
+// while actually getting another). Neither present, or new-only, is a
+// no-op — settings is left untouched for that pair.
+//
+// Called twice per Load: once on the top-level settings map (covering
+// single mode and what [[scaleset]] entries inherit as their base), and
+// once per [[scaleset]] entry before it is merged onto that base — see
+// Load's own comments at each call site for why both are needed.
+func applyAliases(settings map[string]any) []string {
+	var warnings []string
+	for _, a := range configAliases {
+		table, ok := settings[a.table].(map[string]any)
+		if !ok {
+			continue
+		}
+		oldVal, hasOld := table[a.oldKey]
+		if !hasOld {
+			continue
+		}
+		if _, hasNew := table[a.newKey]; hasNew {
+			warnings = append(warnings, fmt.Sprintf(
+				"%[1]s.%[2]s is deprecated in favor of %[1]s.%[3]s — both are set, %[1]s.%[3]s wins (remove %[1]s.%[2]s)",
+				a.table, a.oldKey, a.newKey))
+		} else {
+			table[a.newKey] = oldVal
+		}
+		delete(table, a.oldKey)
+	}
+	return warnings
+}
+
 // Load builds a Config from the given viper instance. Inheritance for
 // [[scaleset]] entries happens here at the map level: a key present in a
 // scaleset entry always wins, even when set to a zero value (e.g.
 // `memory = 0` or `dind = false` override a non-zero default).
 //
 // Non-fatal issues — unknown keys, single-mode keys mixed with [[scaleset]]
-// entries — are collected into Config.Warnings instead of failing, so
-// deployments whose config was written for another version keep starting.
+// entries, a deprecated key aliased alongside its canonical replacement —
+// are collected into Config.Warnings instead of failing, so deployments
+// whose config was written for another version keep starting.
 func Load(v *viper.Viper) (Config, error) {
 	settings := v.AllSettings()
 
@@ -36,23 +100,43 @@ func Load(v *viper.Viper) (Config, error) {
 		return Config{}, err
 	}
 
+	// Alias deprecated keys before anything decodes settings, so both the
+	// top-level decode below and scalesetDefaults (which clones settings
+	// for [[scaleset]] entries to inherit from) see only canonical keys.
+	var warnings []string
+	warnings = append(warnings, applyAliases(settings)...)
+
 	var cfg Config
 	topUnused, err := decodeStrict(settings, &cfg)
 	if err != nil {
 		return Config{}, err
 	}
 
-	var warnings []string
-	var scaleSetUnknown []string
+	var scaleSetWarnings []string
 
 	if len(rawScaleSets) > 0 {
 		// Defaults every [[scaleset]] entry inherits: compiled-in defaults
 		// overlaid with the top-level settings (minus global-only and
 		// identity keys). Each entry is then overlaid on top of that base.
+		// settings was already aliased above, so base carries canonical
+		// keys only — a [[scaleset]] entry that sets neither the old nor
+		// new form of an aliased key still inherits the top level's
+		// (already-canonical) value through the ordinary merge below.
 		base := deepMerge(builtinDefaults(), scalesetDefaults(settings))
 
 		cfg.ScaleSets = make([]ScaleSetConfig, 0, len(rawScaleSets))
 		for i, entry := range rawScaleSets {
+			// Alias this entry's own keys before merging it onto base. A
+			// [[scaleset]] block that sets the deprecated form itself (e.g.
+			// [scaleset.docker] shared-volume-ttl = "24h") must override the
+			// inherited canonical key, not survive alongside it as a second,
+			// differently-named key deepMerge would treat as unrelated —
+			// aliasing entry first means both sides carry the same
+			// canonical key by the time deepMerge runs its per-key overlay.
+			for _, w := range applyAliases(entry) {
+				scaleSetWarnings = append(scaleSetWarnings, fmt.Sprintf("scaleset[%d]: %s", i, w))
+			}
+
 			var ss ScaleSetConfig
 			unused, err := decodeStrict(deepMerge(base, entry), &ss)
 			if err != nil {
@@ -63,7 +147,7 @@ func Load(v *viper.Viper) (Config, error) {
 				// reported by the top-level decode; only report keys this
 				// entry sets itself.
 				if hasKeyPath(entry, key) {
-					scaleSetUnknown = append(scaleSetUnknown, fmt.Sprintf(
+					scaleSetWarnings = append(scaleSetWarnings, fmt.Sprintf(
 						"scaleset[%d]: unknown config key %q — ignored (check for typos; run 'runner validate')", i, key))
 				}
 			}
@@ -83,7 +167,7 @@ func Load(v *viper.Viper) (Config, error) {
 		warnings = append(warnings, fmt.Sprintf(
 			"unknown config key %q — ignored (check for typos; run 'runner validate')", key))
 	}
-	warnings = append(warnings, scaleSetUnknown...)
+	warnings = append(warnings, scaleSetWarnings...)
 
 	cfg.Warnings = warnings
 	if cfg.HealthAddress == "" {

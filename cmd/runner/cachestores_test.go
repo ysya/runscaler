@@ -147,9 +147,9 @@ func TestSharedVolumeSweepTargetsFor(t *testing.T) {
 
 	t.Run("dedups by volume name, first wins, distinct names both get a target", func(t *testing.T) {
 		sets := []config.ScaleSetConfig{
-			{Docker: config.DockerConfig{SharedVolume: "/shared", SharedVolumeTTL: 24 * time.Hour}},  // default volume name
-			{Docker: config.DockerConfig{SharedVolume: "/shared", SharedVolumeTTL: 999 * time.Hour}}, // same default name, ignored
-			{Docker: config.DockerConfig{SharedVolume: "/shared", SharedVolumeTTL: time.Hour, SharedVolumeName: "team-a"}},
+			{Docker: config.DockerConfig{SharedVolume: "/shared", SharedVolumeMaxAge: 24 * time.Hour}},  // default volume name
+			{Docker: config.DockerConfig{SharedVolume: "/shared", SharedVolumeMaxAge: 999 * time.Hour}}, // same default name, ignored
+			{Docker: config.DockerConfig{SharedVolume: "/shared", SharedVolumeMaxAge: time.Hour, SharedVolumeName: "team-a"}},
 		}
 		targets := sharedVolumeSweepTargetsFor(sets, nil, "/root", slog.New(slog.DiscardHandler))
 		if len(targets) != 2 {
@@ -171,7 +171,7 @@ func TestSharedVolumeSweepTargetsFor(t *testing.T) {
 	})
 
 	t.Run("interval defaults when unset", func(t *testing.T) {
-		sets := []config.ScaleSetConfig{{Docker: config.DockerConfig{SharedVolume: "/shared", SharedVolumeTTL: time.Hour}}}
+		sets := []config.ScaleSetConfig{{Docker: config.DockerConfig{SharedVolume: "/shared", SharedVolumeMaxAge: time.Hour}}}
 		targets := sharedVolumeSweepTargetsFor(sets, nil, "/root", slog.New(slog.DiscardHandler))
 		if len(targets) != 1 || targets[0].interval != config.DefaultSharedVolumeCleanupInterval {
 			t.Errorf("targets = %+v, want 1 target with default interval", targets)
@@ -210,7 +210,7 @@ func TestTartCacheStores(t *testing.T) {
 			{Backend: "tart", Tart: config.TartConfig{Home: "/Volumes/A", CacheCleanup: &no}},                // skipped: disabled
 			{Backend: "tart", Tart: config.TartConfig{Home: "/Volumes/A", CacheMaxAge: 3 * 24 * time.Hour}},  // enabled by default, wins for /Volumes/A
 			{Backend: "tart", Tart: config.TartConfig{Home: "/Volumes/A", CacheMaxAge: 99 * 24 * time.Hour}}, // ignored
-			{Backend: "tart", Tart: config.TartConfig{Home: "/Volumes/B", CacheSpaceBudgetGB: 50}},
+			{Backend: "tart", Tart: config.TartConfig{Home: "/Volumes/B", CacheBudgetGB: 50}},
 		}
 		targets := tartCacheStores(sets, slog.New(slog.DiscardHandler))
 		if len(targets) != 2 {
@@ -258,6 +258,37 @@ func TestCacheVolumeStoresFor(t *testing.T) {
 		sets := []config.ScaleSetConfig{{Backend: "tart"}}
 		if stores := cacheVolumeStoresFor(sets, nil, "/root"); len(stores) != 0 {
 			t.Errorf("stores = %d, want 0 for a Tart scaleset", len(stores))
+		}
+	})
+
+	// TestLoad_DockerCacheLongForm (internal/config) already pins that TOML
+	// [[docker.cache]] decodes into DockerConfig.Cache; this pins the next
+	// link in the chain — that a parsed long-form budget/on-exceed actually
+	// reaches the constructed cachestore.CacheStore's Budget(), which is
+	// what internal/diskguard.Guard.enforceBudgets reads. Without this,
+	// on-exceed = "wipe" would parse and validate cleanly but never fire.
+	t.Run("long-form budget and on-exceed reach the constructed store", func(t *testing.T) {
+		sets := []config.ScaleSetConfig{
+			{RunnerImage: "img-a", Docker: config.DockerConfig{
+				CacheVolumes: []string{"gradle-cache:/home/runner/.gradle"},
+				Cache: []config.CacheVolumeSpec{
+					{Name: "ccache", Path: "/home/runner/.ccache", Budget: "20GB", OnExceed: "wipe"},
+				},
+			}},
+		}
+		stores := cacheVolumeStoresFor(sets, nil, "/root")
+		if len(stores) != 2 {
+			t.Fatalf("stores = %d, want 2", len(stores))
+		}
+		byName := make(map[string]cachestore.CacheStore, len(stores))
+		for _, s := range stores {
+			byName[s.Name()] = s
+		}
+		if budget, onExceed := byName["cache-volume:ccache"].Budget(); budget != 20*1024*1024*1024 || onExceed != "wipe" {
+			t.Errorf("ccache Budget() = (%d, %q), want (20GiB, \"wipe\")", budget, onExceed)
+		}
+		if budget, onExceed := byName["cache-volume:gradle-cache"].Budget(); budget != 0 || onExceed != "" {
+			t.Errorf("gradle-cache (short form) Budget() = (%d, %q), want (0, \"\")", budget, onExceed)
 		}
 	})
 }

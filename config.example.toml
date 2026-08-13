@@ -27,6 +27,36 @@ max-runners = 10
 #                         # retires old runner versions, and one that may not
 #                         # update is refused and exits, leaving jobs queued.
 
+# --- Single scale set mode ---
+# Use top-level fields when managing a single org/repo.
+# These are ignored when [[scaleset]] entries exist.
+#
+# Placed here, before [disk]/[docker]/[tart] below, on purpose: TOML has no
+# way to "close" a table other than opening the next one, so bare keys like
+# these must never directly follow an active table — see the note above
+# [[docker.cache]] for the same rule applied inside [docker].
+
+# url = "https://github.com/your-org"
+# name = "my-runners"
+# token = "ghp_xxx"
+# max-runners = 10
+# min-runners = 0
+# labels = ["self-hosted", "linux"]
+
+# --- Disk guard ---
+# Host-wide: watches every scale set's stores grouped by filesystem, not
+# part of any one scale set. Reclaims space only under real pressure — see
+# README's Caching section for the three-layer model this fits into
+# (guard / each store's own retention settings / `runner cache` visibility).
+# All values below are the defaults; uncomment only what you want to change.
+
+# [disk]
+# guard = true         # reclaim under disk pressure; set false if this host's disk isn't runner's to manage
+# min-free = "10%"     # free-space floor that triggers reclamation: a percentage of the filesystem, or a size like "20GB"
+# target-free = "20%"  # free-space level reclamation aims to restore before stopping; must be greater than min-free
+# interval = "1h"      # how often the periodic check runs
+# max-tier = 3         # highest reclaim tier allowed (1-4); tier 4 wipes cache volumes, so it needs explicit opt-in
+
 [docker]
 socket = "/var/run/docker.sock"
 dind = true
@@ -40,8 +70,8 @@ dind = true
 #   "gradle-cache:/home/runner/.gradle",
 #   "pnpm-store:/home/runner/.local/share/pnpm/store",
 # ]
-# shared-volume-ttl = "168h"               # delete shared-volume files older than this; 0 = disabled
-# shared-volume-cleanup-interval = "6h"    # how often to run the TTL sweep
+# shared-volume-max-age = "168h"           # delete shared-volume files older than this; 0 = disabled
+# shared-volume-cleanup-interval = "6h"    # how often to run the cleanup sweep
 # buildx-cleanup = true                    # daemon-wide; opt in only when dedicated to runners
 # buildx-cleanup-ttl = "24h"
 # buildx-cleanup-interval = "6h"
@@ -51,25 +81,27 @@ dind = true
 # build-cache-max-age = "168h"             # prune build cache entries not used within this window
 # build-cache-budget = 0                   # cap daemon build cache to N GB (LRU-evicted down to the cap); 0 = no cap
 
+# Long form of cache-volumes, for an entry that needs a retention budget. A
+# name also listed in cache-volumes above is replaced entirely by its
+# [[docker.cache]] entry, not merged field by field. Keep this the LAST
+# [docker] entry in the file: TOML has no way to "close" a table other than
+# opening the next one, so every bare key below an array-of-tables header
+# belongs to that array entry, not back to [docker] — see [tart] right
+# after this for where the table actually ends.
+# [[docker.cache]]
+# name = "ccache"
+# path = "/home/runner/.ccache"
+# budget = "20GB"                          # absolute size only (no percentages); enforced independently of disk pressure
+# on-exceed = "warn"                       # warn (default: log only, leave data for the tool's own LRU) | wipe (delete everything)
+
 # [tart]
 # runner-dir = "/Users/admin/actions-runner"
 # cpu = 0        # 0 = use image default
 # memory = 0     # MB, 0 = use image default
 # pool-size = 0  # pre-warmed VMs, 0 = disabled
 # home = "/Users/admin/.tart"             # TART_HOME for tart CLI ("" = ~/.tart)
-# cache-space-budget = 0                  # cap OCI/IPSW cache size in GB; 0 = disabled
+# cache-budget = 0                        # cap OCI/IPSW cache size in GB; 0 = disabled
 # cache-cleanup-interval = "24h"          # how often to run `tart prune --space-budget`
-
-# --- Single scale set mode ---
-# Use top-level fields when managing a single org/repo.
-# These are ignored when [[scaleset]] entries exist.
-
-# url = "https://github.com/your-org"
-# name = "my-runners"
-# token = "ghp_xxx"
-# max-runners = 10
-# min-runners = 0
-# labels = ["self-hosted", "linux"]
 
 # --- Multiple scale sets mode ---
 # Use [[scaleset]] entries to manage multiple orgs/repos from one process.

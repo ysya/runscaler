@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ysya/runscaler/internal/cachestore"
 )
@@ -293,5 +294,71 @@ func TestGuard_BudgetWipeRespectsTiersForGate(t *testing.T) {
 	if len(s.reclaimedTiers) != 0 {
 		t.Errorf("reclaimedTiers = %v, want none — TiersFor(KindScratch) excludes Tier4, so the budget wipe must be skipped entirely, not routed through Reclaim",
 			s.reclaimedTiers)
+	}
+}
+
+// TestGuard_SweepDoesNotRunConcurrently is a fix-round addition (Task 9
+// review): since scaler.WithDiskChecker landed, this Guard's Sweep can be
+// called from several goroutines at once (every scale set's
+// pre-job-start check, plus the periodic ticker, all sharing one
+// instance) — see Sweep's own doc comment. This test drives Sweep from
+// several goroutines concurrently against a store that deliberately blocks
+// inside Reclaim until released, and asserts both halves of the
+// TryLock/return-immediately design: no two Reclaim calls ever overlap,
+// and none of the concurrent callers queues behind the in-progress one —
+// they all return right away instead.
+func TestGuard_SweepDoesNotRunConcurrently(t *testing.T) {
+	statFn := func(string) (FSStat, error) {
+		return FSStat{ID: "fs1", TotalBytes: 100, FreeBytes: 1}, nil // always below MinFree
+	}
+	s := &blockingStore{
+		name: "docker-garbage", kind: cachestore.KindGarbage, path: "/",
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	g := New(Config{Enabled: true, MinFree: mustThreshold("10%"),
+		TargetFree: mustThreshold("20%"), MaxTier: cachestore.Tier1},
+		[]cachestore.CacheStore{s}, statFn, slog.New(slog.DiscardHandler))
+
+	// Start a first sweep and let it run until it's inside Reclaim — at
+	// that point it holds sweepMu and is blocked until this test releases
+	// it below.
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- g.Sweep(context.Background()) }()
+	<-s.entered
+
+	// Several more Sweep calls race in while the first is still in
+	// progress. Each must return immediately (nil, no wait) rather than
+	// queue behind it — that is the whole point of TryLock over Lock here.
+	const extra = 5
+	othersDone := make(chan error, extra)
+	for range extra {
+		go func() { othersDone <- g.Sweep(context.Background()) }()
+	}
+	for range extra {
+		select {
+		case err := <-othersDone:
+			if err != nil {
+				t.Errorf("concurrent Sweep() error = %v, want nil", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("a concurrent Sweep() did not return promptly — it must not queue behind an in-progress sweep")
+		}
+	}
+
+	// Only now release the first sweep, having already proven the other
+	// five didn't wait for this.
+	close(s.release)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first Sweep() error = %v, want nil", err)
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.maxActive > 1 {
+		t.Errorf("max concurrent Reclaim calls = %d, want at most 1 — Sweep must never run concurrently with itself", s.maxActive)
+	}
+	if s.reclaimed != 1 {
+		t.Errorf("Reclaim invocations = %d, want exactly 1 — every concurrent Sweep call must skip the work entirely, not repeat it", s.reclaimed)
 	}
 }

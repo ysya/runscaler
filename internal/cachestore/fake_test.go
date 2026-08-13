@@ -49,6 +49,14 @@ type fakeDockerAPI struct {
 	// production code uses against a real daemon. The shared-volume and
 	// cache-volume stores (Task 3) parse this to read `du -sb` output.
 	containerLogsStdout string
+
+	// containerList and volumeList are the canned results ContainerList and
+	// VolumeList return (default empty Items, matching every prior test's
+	// expectations). The buildx store's tests (Task 4) populate these to
+	// exercise CleanupOrphanedBuildxBuilders' actual builder-matching and
+	// dangling-volume-reap logic through fakeDockerAPI, not just call counts.
+	containerList dockerclient.ContainerListResult
+	volumeList    dockerclient.VolumeListResult
 }
 
 func (f *fakeDockerAPI) ContainerCreate(_ context.Context, options dockerclient.ContainerCreateOptions) (dockerclient.ContainerCreateResult, error) {
@@ -129,11 +137,11 @@ func (f *fakeDockerAPI) VolumeRemove(_ context.Context, volumeID string, _ docke
 }
 
 func (f *fakeDockerAPI) ContainerList(_ context.Context, _ dockerclient.ContainerListOptions) (dockerclient.ContainerListResult, error) {
-	return dockerclient.ContainerListResult{}, nil
+	return f.containerList, nil
 }
 
 func (f *fakeDockerAPI) VolumeList(_ context.Context, _ dockerclient.VolumeListOptions) (dockerclient.VolumeListResult, error) {
-	return dockerclient.VolumeListResult{}, nil
+	return f.volumeList, nil
 }
 
 func (f *fakeDockerAPI) Info(_ context.Context, _ dockerclient.InfoOptions) (dockerclient.SystemInfoResult, error) {

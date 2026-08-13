@@ -469,29 +469,18 @@ func run(ctx context.Context, cfg config.Config) error {
 	wg.Wait()
 	close(errs)
 
-	// Clean up shared Docker resources once, after all Docker-backed scale
-	// sets have finished shutting down. Doing this per-backend races with
-	// container removal and concurrent prune operations.
+	// Prune dangling Docker images once, after all Docker-backed scale sets
+	// have finished shutting down. Doing this per-backend races with
+	// container removal and concurrent prune operations. The shared volume
+	// is deliberately left alone here — see CleanupSharedDocker's doc
+	// comment: it holds handoff data for in-flight runs, so only the
+	// max-age sweep and disk guard reclaim it, never exit.
 	if needsDocker {
-		for socket, sets := range dockerSets {
+		for socket := range dockerSets {
 			dockerClient := dockerClients[socket]
-			// Unique named volumes backing the shared-volume mounts of Docker
-			// scalesets; each is removed at exit. Cache volumes are persistent
-			// and deliberately survive.
-			var volumeNames []string
-			seenVolumes := make(map[string]bool)
-			for _, ss := range sets {
-				if ss.IsTart() || ss.Docker.SharedVolume == "" {
-					continue
-				}
-				if name := ss.SharedVolumeName(); !seenVolumes[name] {
-					seenVolumes[name] = true
-					volumeNames = append(volumeNames, name)
-				}
-			}
 			// Build cache belongs to the daemon, not this process. Retention is
 			// only performed by the explicit runtime-prune setting.
-			backend.CleanupSharedDocker(context.WithoutCancel(ctx), dockerClient, volumeNames, false, logger)
+			backend.CleanupSharedDocker(context.WithoutCancel(ctx), dockerClient, false, logger)
 		}
 	}
 

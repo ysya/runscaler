@@ -4,7 +4,6 @@ import (
 	"context"
 	"io"
 	"log/slog"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -51,9 +50,9 @@ type mockDocker struct {
 	imagesPruneErr     error
 	buildCachePruneErr error
 
-	// When true, VolumeRemove blocks until its context is done, simulating a
+	// When true, ImagePrune blocks until its context is done, simulating a
 	// wedged daemon that never answers.
-	volumeRemoveBlocks bool
+	imagePruneBlocks bool
 }
 
 func (m *mockDocker) ContainerCreate(_ context.Context, options dockerclient.ContainerCreateOptions) (dockerclient.ContainerCreateResult, error) {
@@ -80,8 +79,12 @@ func (m *mockDocker) ContainerPrune(_ context.Context, _ dockerclient.ContainerP
 	return dockerclient.ContainerPruneResult{}, nil
 }
 
-func (m *mockDocker) ImagePrune(_ context.Context, options dockerclient.ImagePruneOptions) (dockerclient.ImagePruneResult, error) {
+func (m *mockDocker) ImagePrune(ctx context.Context, options dockerclient.ImagePruneOptions) (dockerclient.ImagePruneResult, error) {
 	m.imagesPruneFilters = append(m.imagesPruneFilters, options.Filters)
+	if m.imagePruneBlocks {
+		<-ctx.Done()
+		return dockerclient.ImagePruneResult{}, ctx.Err()
+	}
 	if m.imagesPruneErr != nil {
 		return dockerclient.ImagePruneResult{}, m.imagesPruneErr
 	}
@@ -96,12 +99,8 @@ func (m *mockDocker) BuildCachePrune(_ context.Context, opts dockerclient.BuildC
 	return dockerclient.BuildCachePruneResult{}, nil
 }
 
-func (m *mockDocker) VolumeRemove(ctx context.Context, volumeID string, _ dockerclient.VolumeRemoveOptions) (dockerclient.VolumeRemoveResult, error) {
+func (m *mockDocker) VolumeRemove(_ context.Context, volumeID string, _ dockerclient.VolumeRemoveOptions) (dockerclient.VolumeRemoveResult, error) {
 	m.volumesRemoved = append(m.volumesRemoved, volumeID)
-	if m.volumeRemoveBlocks {
-		<-ctx.Done()
-		return dockerclient.VolumeRemoveResult{}, ctx.Err()
-	}
 	return dockerclient.VolumeRemoveResult{}, nil
 }
 
@@ -531,47 +530,25 @@ func TestDockerBackend_Shutdown_IsNoOp(t *testing.T) {
 	}
 }
 
-func TestCleanupSharedDocker_RemovesVolume(t *testing.T) {
+func TestCleanupSharedDocker_NeverRemovesVolumes(t *testing.T) {
+	// The shared volume carries handoff data between jobs of one workflow
+	// run (a build job writes, a later job reads). Exit-time cleanup used to
+	// delete it, which broke runs still in flight across a restart.
 	md := &mockDocker{}
-	ctx := context.Background()
 
-	CleanupSharedDocker(ctx, md, []string{"runner-shared"}, true, slog.New(slog.DiscardHandler))
-
-	if len(md.volumesRemoved) != 1 {
-		t.Fatalf("expected 1 volume removed, got %d", len(md.volumesRemoved))
-	}
-	if md.volumesRemoved[0] != "runner-shared" {
-		t.Errorf("volume removed = %q, want %q", md.volumesRemoved[0], "runner-shared")
-	}
-}
-
-func TestCleanupSharedDocker_RemovesMultipleVolumes(t *testing.T) {
-	md := &mockDocker{}
-	ctx := context.Background()
-
-	CleanupSharedDocker(ctx, md, []string{"runner-shared", "team-a-shared"}, true, slog.New(slog.DiscardHandler))
-
-	want := []string{"runner-shared", "team-a-shared"}
-	if !reflect.DeepEqual(md.volumesRemoved, want) {
-		t.Errorf("volumes removed = %v, want %v", md.volumesRemoved, want)
-	}
-}
-
-func TestCleanupSharedDocker_SkipsVolumesWhenNoneNamed(t *testing.T) {
-	md := &mockDocker{}
-	ctx := context.Background()
-
-	CleanupSharedDocker(ctx, md, nil, true, slog.New(slog.DiscardHandler))
+	CleanupSharedDocker(context.Background(), md, false, slog.New(slog.DiscardHandler))
 
 	if len(md.volumesRemoved) != 0 {
-		t.Errorf("should not remove volumes when none are named, removed %d", len(md.volumesRemoved))
+		t.Errorf("exit cleanup removed volumes %v — the shared volume holds "+
+			"handoff data for in-flight runs and must survive a restart",
+			md.volumesRemoved)
 	}
 }
 
 func TestCleanupSharedDocker_WipesBuildCacheWhenRequested(t *testing.T) {
 	md := &mockDocker{}
 
-	CleanupSharedDocker(context.Background(), md, nil, true, slog.New(slog.DiscardHandler))
+	CleanupSharedDocker(context.Background(), md, true, slog.New(slog.DiscardHandler))
 
 	// Dangling images are always pruned; the full build-cache wipe runs too.
 	if len(md.imagesPruneFilters) != 1 {
@@ -589,7 +566,7 @@ func TestCleanupSharedDocker_WipesBuildCacheWhenRequested(t *testing.T) {
 func TestCleanupSharedDocker_SkipsDaemonPruneWhenNotRequested(t *testing.T) {
 	md := &mockDocker{}
 
-	CleanupSharedDocker(context.Background(), md, nil, false, slog.New(slog.DiscardHandler))
+	CleanupSharedDocker(context.Background(), md, false, slog.New(slog.DiscardHandler))
 
 	if len(md.imagesPruneFilters) != 0 {
 		t.Fatalf("expected no images prune, got %d", len(md.imagesPruneFilters))
@@ -600,15 +577,16 @@ func TestCleanupSharedDocker_SkipsDaemonPruneWhenNotRequested(t *testing.T) {
 }
 
 func TestCleanupSharedDocker_BoundedWhenDaemonWedges(t *testing.T) {
-	// A daemon that never answers VolumeRemove used to hang shutdown forever:
-	// the exit-time cleanup ran on a context with no deadline.
-	md := &mockDocker{volumeRemoveBlocks: true}
+	// A daemon that never answers ImagePrune used to hang shutdown forever:
+	// the exit-time cleanup ran on a context with no deadline. (The shared
+	// volume is no longer removed here, so the prune calls are now the only
+	// way this sweep can wedge.)
+	md := &mockDocker{imagePruneBlocks: true}
 
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		cleanupSharedDockerWith(context.Background(), md, []string{"runner-shared"},
-			true, 50*time.Millisecond, slog.New(slog.DiscardHandler))
+		cleanupSharedDockerWith(context.Background(), md, true, 50*time.Millisecond, slog.New(slog.DiscardHandler))
 	}()
 
 	select {

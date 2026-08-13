@@ -247,20 +247,24 @@ func (b *DockerBackend) buildContainerEnv(jitConfig string) []string {
 	return env
 }
 
-// CleanupSharedDocker removes the shared Docker volumes named in volumeNames
-// (empty slice = nothing to remove) and prunes dangling images. Cache volumes
-// are deliberately not touched — they are persistent caches. The full
-// daemon prune only runs when pruneDaemon is true. Shared volume removal is
-// scoped by explicit names, but images and build cache are daemon-global and
-// must never be touched implicitly on a shared daemon.
+// CleanupSharedDocker prunes dangling images at exit. It deliberately does
+// NOT remove the shared volume: that volume carries handoff data between
+// jobs of one workflow run (a build job writes, a later job reads), so
+// deleting it on restart breaks runs that are still in flight — and the
+// failure surfaces in the workflow, not here. Reclamation is left to the
+// max-age sweep and the disk guard, matching every other store's lifecycle.
+//
+// The full daemon prune (dangling images plus build cache) only runs when
+// pruneDaemon is true — images and build cache are daemon-global and must
+// never be touched implicitly on a shared daemon.
 // It is safe to call once after all Docker-backed scale sets have finished
 // shutting down; calling it concurrently or per-backend will race with
 // container removal and other prune operations.
 //
 // The whole sweep is bounded by cleanupSharedDockerTimeout so an unresponsive
 // daemon cannot hang shutdown.
-func CleanupSharedDocker(ctx context.Context, client DockerAPI, volumeNames []string, pruneDaemon bool, logger *slog.Logger) {
-	cleanupSharedDockerWith(ctx, client, volumeNames, pruneDaemon, cleanupSharedDockerTimeout, logger)
+func CleanupSharedDocker(ctx context.Context, client DockerAPI, pruneDaemon bool, logger *slog.Logger) {
+	cleanupSharedDockerWith(ctx, client, pruneDaemon, cleanupSharedDockerTimeout, logger)
 }
 
 // cleanupSharedDockerTimeout bounds the exit-time cleanup. The Docker API
@@ -274,7 +278,7 @@ const cleanupSharedDockerTimeout = 45 * time.Second
 
 // cleanupSharedDockerWith is the testable core: it performs the sweep under
 // the supplied timeout. The exported wrapper above supplies the default.
-func cleanupSharedDockerWith(ctx context.Context, client DockerAPI, volumeNames []string, pruneDaemon bool, timeout time.Duration, logger *slog.Logger) {
+func cleanupSharedDockerWith(ctx context.Context, client DockerAPI, pruneDaemon bool, timeout time.Duration, logger *slog.Logger) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -286,14 +290,6 @@ func cleanupSharedDockerWith(ctx context.Context, client DockerAPI, volumeNames 
 				slog.Duration("timeout", timeout))
 		}
 	}()
-
-	for _, name := range volumeNames {
-		logger.Debug("Removing shared volume", slog.String("volume", name))
-		if _, err := client.VolumeRemove(ctx, name, dockerclient.VolumeRemoveOptions{Force: true}); err != nil {
-			logger.Error("Failed to remove shared volume",
-				slog.String("volume", name), slog.Any("error", err))
-		}
-	}
 
 	if pruneDaemon {
 		logger.Debug("Pruning Docker resources")

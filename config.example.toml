@@ -70,7 +70,7 @@ dind = true
 #   "gradle-cache:/home/runner/.gradle",
 #   "pnpm-store:/home/runner/.local/share/pnpm/store",
 # ]
-# shared-volume-max-age = "168h"           # delete shared-volume files older than this; 0 = disabled
+# shared-volume-max-age = "168h"           # delete shared-volume files older than this; unset = never reclaimed
 # shared-volume-cleanup-interval = "6h"    # how often to run the cleanup sweep
 # buildx-cleanup = true                    # daemon-wide; opt in only when dedicated to runners
 # buildx-cleanup-ttl = "24h"

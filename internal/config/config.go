@@ -134,8 +134,17 @@ type DockerConfig struct {
 	Cache []CacheVolumeSpec `mapstructure:"cache"`
 
 	// SharedVolumeMaxAge deletes files in shared-volume older than this
-	// duration. 0 (default) disables cleanup. Accepts Go duration strings,
-	// e.g. "168h".
+	// duration. Accepts Go duration strings, e.g. "168h". It must exceed
+	// the longest workflow run on this host: the volume holds handoff data
+	// a later job in the same run still reads.
+	//
+	// 0 (default) is not "cleanup off, everything else unchanged" — it is
+	// the only retention policy this volume has. runner stopped removing
+	// the volume at exit (that broke runs in flight across a restart), and
+	// the disk guard cannot reclaim un-expired scratch data at any tier, so
+	// with no max-age nothing ever frees it. The volume is still measured
+	// and listed by `runner cache`, and startup warns about the missing
+	// setting.
 	SharedVolumeMaxAge time.Duration `mapstructure:"shared-volume-max-age"`
 	// SharedVolumeTTL is this field's pre-2026-08-14 name.
 	//

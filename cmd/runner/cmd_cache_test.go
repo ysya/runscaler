@@ -21,6 +21,12 @@ type fakeCacheStore struct {
 	measureFn   func(context.Context) (uint64, error)
 	budgetBytes uint64
 	onExceed    string
+
+	// reclaimed, when non-nil, receives every tier Reclaim is called with.
+	// A channel rather than a counter because the periodic sweepers call
+	// Reclaim from goroutines of their own (see startSharedVolumeCleanup),
+	// so a test needs to wait for a call rather than poll for one.
+	reclaimed chan cachestore.Tier
 }
 
 func (f *fakeCacheStore) Name() string               { return f.name }
@@ -28,7 +34,10 @@ func (f *fakeCacheStore) Kind() cachestore.StoreKind { return f.kind }
 func (f *fakeCacheStore) Path() string               { return f.path }
 func (f *fakeCacheStore) Enabled() bool              { return f.enabled }
 func (f *fakeCacheStore) Budget() (uint64, string)   { return f.budgetBytes, f.onExceed }
-func (f *fakeCacheStore) Reclaim(context.Context, cachestore.Tier) (uint64, error) {
+func (f *fakeCacheStore) Reclaim(_ context.Context, tier cachestore.Tier) (uint64, error) {
+	if f.reclaimed != nil {
+		f.reclaimed <- tier
+	}
 	return 0, nil
 }
 func (f *fakeCacheStore) Measure(ctx context.Context) (uint64, error) {

@@ -111,3 +111,50 @@ func TestGuard_ShortfallWarningNamesDisabledStores(t *testing.T) {
 		t.Errorf("shortfall warning does not name the disabled store it could not reclaim from: %s", out)
 	}
 }
+
+func TestGuard_EnforcesBudgetEvenWhenDiskHealthy(t *testing.T) {
+	// 磁碟充裕 → tier ladder 完全不該啟動
+	statFn := func(string) (FSStat, error) {
+		return FSStat{ID: "fs1", TotalBytes: 100, FreeBytes: 90}, nil
+	}
+	over := &fakeStore{
+		name: "ccache", kind: cachestore.KindCache, path: "/",
+		size: 25 << 30, budget: 20 << 30, onExceed: "wipe",
+	}
+	under := &fakeStore{
+		name: "gradle", kind: cachestore.KindCache, path: "/",
+		size: 1 << 30, budget: 20 << 30, onExceed: "wipe",
+	}
+	g := New(Config{Enabled: true, MinFree: mustThreshold("10%"),
+		TargetFree: mustThreshold("20%"), MaxTier: cachestore.Tier3},
+		[]cachestore.CacheStore{over, under}, statFn, slog.New(slog.DiscardHandler))
+
+	if err := g.Sweep(context.Background()); err != nil {
+		t.Fatalf("Sweep error: %v", err)
+	}
+	if len(over.reclaimedTiers) != 1 || over.reclaimedTiers[0] != cachestore.Tier4 {
+		t.Errorf("over-budget store should be wiped regardless of disk pressure, got %v",
+			over.reclaimedTiers)
+	}
+	if len(under.reclaimedTiers) != 0 {
+		t.Errorf("under-budget store must be left alone, got %v", under.reclaimedTiers)
+	}
+}
+
+func TestGuard_BudgetWarnDoesNotTouchData(t *testing.T) {
+	statFn := func(string) (FSStat, error) {
+		return FSStat{ID: "fs1", TotalBytes: 100, FreeBytes: 90}, nil
+	}
+	over := &fakeStore{
+		name: "ccache", kind: cachestore.KindCache, path: "/",
+		size: 25 << 30, budget: 20 << 30, onExceed: "warn",
+	}
+	g := New(Config{Enabled: true, MinFree: mustThreshold("10%"),
+		TargetFree: mustThreshold("20%"), MaxTier: cachestore.Tier3},
+		[]cachestore.CacheStore{over}, statFn, slog.New(slog.DiscardHandler))
+
+	_ = g.Sweep(context.Background())
+	if len(over.reclaimedTiers) != 0 {
+		t.Error(`on-exceed="warn" must never delete data — the tool's own LRU handles it`)
+	}
+}

@@ -127,6 +127,10 @@ func (s *dockerGarbageStore) Reclaim(ctx context.Context, tier Tier) (uint64, er
 	return freed, errors.Join(errs...)
 }
 
+// Budget reports no cap: already-unreferenced garbage has no retention
+// policy to enforce — it is removed by PruneTTL alone, not a size budget.
+func (s *dockerGarbageStore) Budget() (uint64, string) { return 0, "" }
+
 // --- Build-cache store: BuildKit layer cache (Tier2 trim, Tier4 wipe) ---
 
 // DockerBuildCacheConfig mirrors the [docker] build-cache settings.
@@ -239,3 +243,13 @@ func (s *dockerBuildCacheStore) reclaimAll(ctx context.Context) (uint64, error) 
 	}
 	return r.Report.SpaceReclaimed, nil
 }
+
+// Budget reports no cap for the disk guard's independent budget-enforcement
+// pass. cfg.BudgetGB is a real cap, but it is already fully consumed by
+// reclaimByAgeAndBudget above via BuildKit's own MaxUsedSpace — a
+// disk-pressure-gated (Tier2), graceful trim performed by BuildKit itself.
+// Surfacing it here too would let the guard's unconditional, pressure-
+// independent Tier4 wipe (see Sweep's budget phase) fire on the same
+// number that already drives a softer mechanism, entangling the two
+// budget concepts the architecture deliberately keeps separate.
+func (s *dockerBuildCacheStore) Budget() (uint64, string) { return 0, "" }

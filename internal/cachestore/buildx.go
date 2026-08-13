@@ -78,3 +78,7 @@ func (s *buildxStore) Reclaim(ctx context.Context, tier Tier) (uint64, error) {
 	// was met, so it never depends on a store's self-reported total.
 	return 0, nil
 }
+
+// Budget reports no cap: orphaned builders are already-abandoned garbage
+// (see NewBuildxStore), not a retained cache with a size policy to enforce.
+func (s *buildxStore) Budget() (uint64, string) { return 0, "" }

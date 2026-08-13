@@ -273,6 +273,11 @@ func (s *sharedVolumeStore) Reclaim(ctx context.Context, tier Tier) (uint64, err
 	return freed, nil
 }
 
+// Budget reports no cap: this store's un-expired contents are live
+// handoff data (see NewSharedVolumeStore), not a cache with a retention
+// budget — SharedVolumeConfig carries no such field.
+func (s *sharedVolumeStore) Budget() (uint64, string) { return 0, "" }
+
 // --- Cache-volume store: persistent tool caches (Tier4 wipe only) ---
 
 // CacheVolumeConfig configures one persistent cache-volume store (e.g.
@@ -342,3 +347,12 @@ func (s *cacheVolumeStore) Reclaim(ctx context.Context, tier Tier) (uint64, erro
 	}
 	return freed, nil
 }
+
+// Budget reports cfg.BudgetBytes/cfg.OnExceed verbatim — carried unused
+// since NewCacheVolumeStore (see CacheVolumeConfig's doc comment) precisely
+// so the disk guard's independent budget-enforcement pass could act on
+// them once it existed. Unlike the Docker build cache and Tart stores, this
+// store has no tool-native "trim to budget" mechanism of its own (Reclaim
+// only ever does a full Tier4 wipe), so there is no other consumer of this
+// cap to entangle with — the guard's own enforcement is the only one.
+func (s *cacheVolumeStore) Budget() (uint64, string) { return s.cfg.BudgetBytes, s.cfg.OnExceed }

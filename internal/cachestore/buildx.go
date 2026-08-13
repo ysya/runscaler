@@ -29,6 +29,7 @@ func NewBuildxStore(client backend.DockerAPI, cfg BuildxConfig) CacheStore {
 	return &buildxStore{client: client, cfg: cfg}
 }
 
+// Name returns "buildx". cmd/runner/cmd_cache.go keys its "size unknown" rendering off this exact string (Measure below always returns 0) — a rename here must update that map too.
 func (s *buildxStore) Name() string    { return "buildx" }
 func (s *buildxStore) Kind() StoreKind { return KindGarbage }
 

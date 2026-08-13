@@ -3,6 +3,7 @@ package backend
 import (
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"reflect"
 	"strings"
@@ -122,6 +123,13 @@ func (m *mockDocker) Info(_ context.Context, _ dockerclient.InfoOptions) (docker
 
 func (m *mockDocker) DiskUsage(_ context.Context, _ dockerclient.DiskUsageOptions) (dockerclient.DiskUsageResult, error) {
 	return dockerclient.DiskUsageResult{}, nil
+}
+
+// ContainerLogs is unused by this package's own tests (only
+// internal/cachestore's volume helper reads logs) — a minimal stub keeps
+// mockDocker satisfying DockerAPI.
+func (m *mockDocker) ContainerLogs(_ context.Context, _ string, _ dockerclient.ContainerLogsOptions) (dockerclient.ContainerLogsResult, error) {
+	return io.NopCloser(strings.NewReader("")), nil
 }
 
 func (m *mockDocker) ContainerWait(_ context.Context, _ string, _ dockerclient.ContainerWaitOptions) dockerclient.ContainerWaitResult {

@@ -104,20 +104,30 @@ func (m *mockScaleset) GenerateJitRunnerConfig(_ context.Context, _ *scaleset.Ru
 // fakeChecker is a DiskChecker double for the pre-job-start disk-pressure
 // check: it reports whatever NeedsReclaim/Sweep verdict a test configures
 // and counts Sweep calls so a test can assert a healthy disk never pays for
-// one.
+// one. It also records the deadline Sweep was handed and can block until
+// that deadline expires, so the timeout wrapped around the sweep is
+// testable.
 type fakeChecker struct {
-	needs    bool
-	needsErr error
-	sweepErr error
-	sweeps   int
+	needs       bool
+	needsErr    error
+	sweepErr    error
+	sweepBlocks bool // Sweep waits for its context to end, simulating a slow store
+	sweeps      int
+
+	sweepDeadline    time.Time
+	sweepHadDeadline bool
 }
 
 func (f *fakeChecker) NeedsReclaim() (bool, error) {
 	return f.needs, f.needsErr
 }
 
-func (f *fakeChecker) Sweep(_ context.Context) error {
+func (f *fakeChecker) Sweep(ctx context.Context) error {
 	f.sweeps++
+	f.sweepDeadline, f.sweepHadDeadline = ctx.Deadline()
+	if f.sweepBlocks {
+		<-ctx.Done()
+	}
 	return f.sweepErr
 }
 
@@ -472,5 +482,76 @@ func TestStartRunner_ProceedsWhenNeedsReclaimErrors(t *testing.T) {
 	}
 	if chk.sweeps != 0 {
 		t.Errorf("NeedsReclaim error must skip the sweep entirely, got %d", chk.sweeps)
+	}
+}
+
+// TestStartRunner_ReclaimIsBounded pins the timeout the spec's
+// error-handling table requires around the pre-job sweep. Each store
+// carries its own 10-minute bound, but a sweep walks all of them, so an
+// unbounded aggregate lets one job start wait for their sum — and
+// startRunner is called once per runner inside HandleDesiredRunnerCount's
+// scale-up loop, with reconcileMu held throughout.
+func TestStartRunner_ReclaimIsBounded(t *testing.T) {
+	chk := &fakeChecker{needs: true}
+	s := NewScaler(1, 0, 1, &mockBackend{}, &mockScaleset{}, slog.New(slog.DiscardHandler), WithDiskChecker(chk))
+
+	// A parent with no deadline of its own: any deadline Sweep sees must
+	// have come from startRunner.
+	if _, err := s.startRunner(context.Background()); err != nil {
+		t.Fatalf("startRunner error: %v", err)
+	}
+	if !chk.sweepHadDeadline {
+		t.Fatal("Sweep was handed a context with no deadline — the pre-job reclaim is unbounded")
+	}
+	if budget := time.Until(chk.sweepDeadline); budget > preJobReclaimTimeout {
+		t.Errorf("Sweep deadline is %s away, want <= preJobReclaimTimeout (%s)", budget, preJobReclaimTimeout)
+	}
+}
+
+// TestReclaimBeforeStart_ReturnsWhenTheSweepOverruns pins the behaviour on
+// timeout: the reclaim is abandoned and the caller carries on to start the
+// job. A reclaim that cannot finish must never turn into a refusal to serve
+// jobs — the timeout is driven through the testable core so the assertion
+// costs milliseconds rather than preJobReclaimTimeout.
+func TestReclaimBeforeStart_ReturnsWhenTheSweepOverruns(t *testing.T) {
+	chk := &fakeChecker{needs: true, sweepBlocks: true}
+	s := NewScaler(1, 0, 1, &mockBackend{}, &mockScaleset{}, slog.New(slog.DiscardHandler), WithDiskChecker(chk))
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.reclaimBeforeStartWith(context.Background(), 50*time.Millisecond)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a sweep that never finishes still blocks the job start — the timeout is not in effect")
+	}
+	if chk.sweeps != 1 {
+		t.Errorf("sweeps = %d, want 1", chk.sweeps)
+	}
+}
+
+// TestStartRunner_ProceedsAfterAnOverrunningReclaim is the end-to-end
+// counterpart: a sweep abandoned by its bound must still leave startRunner
+// returning a live runner, not an error. It drives the whole path — check,
+// bounded sweep, JIT config, backend start — with a sweep that only ends
+// when its context does.
+func TestStartRunner_ProceedsAfterAnOverrunningReclaim(t *testing.T) {
+	chk := &fakeChecker{needs: true, sweepBlocks: true}
+	s := NewScaler(1, 0, 1, &mockBackend{}, &mockScaleset{}, slog.New(slog.DiscardHandler), WithDiskChecker(chk))
+
+	// A parent deadline shorter than preJobReclaimTimeout ends the blocked
+	// sweep here, so this costs milliseconds; the bound startRunner applies
+	// on its own is asserted above.
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	name, err := s.startRunner(ctx)
+	if err != nil {
+		t.Fatalf("an abandoned reclaim must not block the job: %v", err)
+	}
+	if name == "" {
+		t.Error("startRunner returned no runner name")
 	}
 }

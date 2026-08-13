@@ -2,6 +2,7 @@ package scaler
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -163,9 +164,7 @@ func (s *Scaler) startRunner(ctx context.Context) (string, error) {
 			s.logger.Warn("Disk check failed, starting runner anyway", slog.Any("error", err))
 		} else if need {
 			s.logger.Info("Free space below threshold, reclaiming before starting runner")
-			if err := s.diskChecker.Sweep(ctx); err != nil {
-				s.logger.Warn("Reclaim before runner start failed", slog.Any("error", err))
-			}
+			s.reclaimBeforeStart(ctx)
 		}
 	}
 
@@ -190,6 +189,53 @@ func (s *Scaler) startRunner(ctx context.Context) (string, error) {
 		go s.watchRunner(ctx, watcher, name, resourceID)
 	}
 	return name, nil
+}
+
+// preJobReclaimTimeout bounds the synchronous reclaim startRunner performs
+// when free space is low. This is how long a job start may be delayed, so
+// it is chosen against both edges rather than picked for roundness:
+//
+//   - It must comfortably exceed the cheapest, highest-value tier's real
+//     cost, or the reclaim would time out before doing the one thing it is
+//     best at. Pruning a large dangling-image backlog has taken about a
+//     minute on a real host, so anything at or under that would routinely
+//     be cut off mid-Tier1.
+//   - It must stay small next to the scale-up loop that multiplies it.
+//     startRunner runs once per runner inside HandleDesiredRunnerCount while
+//     reconcileMu is held, so scaling up five runners can serialize five
+//     bounded reclaims with this scale set's listener blocked throughout.
+//
+// Nothing is lost when the deadline cuts a sweep short: the guard's own
+// periodic ticker and the four store sweepers reclaim the remainder on
+// their normal schedules. The job starts either way — the spec's
+// error-handling table is explicit that a reclaim timeout warns and
+// proceeds, never refuses service.
+const preJobReclaimTimeout = 2 * time.Minute
+
+// reclaimBeforeStart runs the disk guard's sweep under preJobReclaimTimeout.
+// The individual stores carry their own 10-minute bounds, but nothing bounds
+// the aggregate: a sweep walks every store on every filesystem, so without
+// this the sum of those bounds is what a job start could wait for.
+func (s *Scaler) reclaimBeforeStart(ctx context.Context) {
+	s.reclaimBeforeStartWith(ctx, preJobReclaimTimeout)
+}
+
+// reclaimBeforeStartWith is the testable core: it sweeps under the supplied
+// timeout, so a test can drive the deadline path without waiting out
+// preJobReclaimTimeout for real.
+func (s *Scaler) reclaimBeforeStartWith(ctx context.Context, timeout time.Duration) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	if err := s.diskChecker.Sweep(ctx); err != nil {
+		s.logger.Warn("Reclaim before runner start failed", slog.Any("error", err))
+	}
+	// Only the deadline is worth reporting: a cancelled parent means the
+	// process is shutting down, which is not a reclaim problem.
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		s.logger.Warn("Reclaim before runner start timed out, starting runner anyway",
+			slog.Duration("timeout", timeout))
+	}
 }
 
 func (s *Scaler) watchRunner(ctx context.Context, watcher backend.RunnerWatcher, name, resourceID string) {

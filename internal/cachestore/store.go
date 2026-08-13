@@ -55,8 +55,14 @@ type CacheStore interface {
 	// Path is where this store's data lives, used to resolve which
 	// filesystem its usage counts against.
 	Path() string
-	// Enabled reports whether the operator left this store's cleanup on.
-	// The guard skips disabled stores rather than overriding the choice.
+	// Enabled reports whether the operator left this store's own routine
+	// periodic cleanup on — consulted by that periodic sweep, not by the
+	// disk guard (internal/diskguard.Guard), which reclaims from every
+	// store regardless of Enabled() once the disk is actually under
+	// pressure (revised 2026-08-14: Enabled() means "skip my own routine
+	// schedule", not "never touch this even if the disk is full" — a host
+	// whose disk the guard must never touch opts out wholesale via
+	// `[disk] guard = false` instead).
 	Enabled() bool
 	// Measure reports current usage. May be expensive (it can walk a
 	// volume), so it is never called on the pre-job check path.

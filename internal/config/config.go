@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -18,6 +17,8 @@ import (
 	charmlog "charm.land/log/v2"
 	"github.com/actions/scaleset"
 	"github.com/hashicorp/go-retryablehttp"
+
+	"github.com/ysya/runscaler/internal/bytesize"
 )
 
 // Config holds the complete runner configuration.
@@ -500,19 +501,34 @@ func (dc DiskConfig) Validate() error {
 		targetFree = DefaultDiskTargetFree
 	}
 
-	min, err := parseDiskThreshold(minFree)
+	min, err := bytesize.ParseThreshold(minFree)
 	if err != nil {
 		return fmt.Errorf("min-free: %w", err)
 	}
-	target, err := parseDiskThreshold(targetFree)
+	target, err := bytesize.ParseThreshold(targetFree)
 	if err != nil {
 		return fmt.Errorf("target-free: %w", err)
 	}
-	less, comparable := min.lessThan(target)
-	if !comparable {
+
+	// bytesize.Threshold doesn't itself record whether it came from a
+	// percentage or an absolute size (ParseThreshold sets exactly one of
+	// Percent/Bytes — see its doc comment), and BytesOf's own "Bytes != 0
+	// means absolute" heuristic isn't precise enough here: it would treat a
+	// literal "0%" as indistinguishable from an absolute zero-byte
+	// threshold, a distinction BytesOf's caller (the guard, which always
+	// has a real totalBytes to scale a percentage against) never needs to
+	// make but this comparison does. Reading the "%" suffix off the
+	// original strings instead is exact.
+	minIsPercent := strings.HasSuffix(minFree, "%")
+	targetIsPercent := strings.HasSuffix(targetFree, "%")
+	if minIsPercent != targetIsPercent {
 		return fmt.Errorf("min-free and target-free must both be percentages or both be sizes to compare")
 	}
-	if !less {
+	if minIsPercent {
+		if min.Percent >= target.Percent {
+			return fmt.Errorf("min-free must be less than target-free")
+		}
+	} else if min.Bytes >= target.Bytes {
 		return fmt.Errorf("min-free must be less than target-free")
 	}
 
@@ -525,90 +541,6 @@ func (dc DiskConfig) Validate() error {
 	}
 
 	return nil
-}
-
-// diskThreshold is a parsed [disk] free-space threshold: either a
-// percentage (0-100) of total filesystem capacity or an absolute byte
-// count — the same two shapes diskguard.Threshold models.
-//
-// This is a deliberate duplication of diskguard.ParseThreshold's parsing,
-// not a shared type: package diskguard transitively imports this package
-// (diskguard -> cachestore -> backend -> config, all confirmed via `go list
-// -deps`), so importing diskguard from here would be a compile-time import
-// cycle. cachestore/volume.go's shellQuote sets the same precedent — a
-// small helper duplicated across this exact kind of package boundary rather
-// than exported for one caller.
-type diskThreshold struct {
-	percent   float64
-	bytes     uint64
-	isPercent bool
-}
-
-// lessThan reports whether dt < other, and whether the two are even
-// comparable (both percentages or both absolute sizes — a percentage of one
-// filesystem's capacity and an absolute byte count are not comparable
-// without knowing that filesystem's size, which Validate does not have).
-func (dt diskThreshold) lessThan(other diskThreshold) (less, comparable bool) {
-	if dt.isPercent != other.isPercent {
-		return false, false
-	}
-	if dt.isPercent {
-		return dt.percent < other.percent, true
-	}
-	return dt.bytes < other.bytes, true
-}
-
-// diskByteUnits mirrors diskguard.Threshold's byte-unit table exactly
-// (longest-suffix-first so "GB" is tried before the bare "B" suffix it
-// would otherwise also match).
-var diskByteUnits = []struct {
-	suffix     string
-	multiplier uint64
-}{
-	{"TB", 1024 * 1024 * 1024 * 1024},
-	{"GB", 1024 * 1024 * 1024},
-	{"MB", 1024 * 1024},
-	{"KB", 1024},
-	{"B", 1},
-}
-
-// parseDiskThreshold parses s the same way diskguard.ParseThreshold does: a
-// percentage like "10%" (0-100 inclusive) or an absolute size like "20GB"
-// (binary units, case-insensitive: B/KB/MB/GB/TB).
-func parseDiskThreshold(s string) (diskThreshold, error) {
-	if rest, ok := strings.CutSuffix(s, "%"); ok {
-		pct, err := strconv.ParseFloat(rest, 64)
-		// Negation of the in-range condition, not `pct < 0 || pct > 100`:
-		// every ordered comparison with NaN is false, so the direct form
-		// would let ParseFloat's accepted "NaN"/"Inf" spellings silently
-		// pass through as a threshold instead of failing validation —
-		// mirrors diskguard.ParseThreshold's identical guard exactly.
-		if err != nil || !(pct >= 0 && pct <= 100) {
-			return diskThreshold{}, invalidDiskThresholdError(s)
-		}
-		return diskThreshold{percent: pct, isPercent: true}, nil
-	}
-
-	upper := strings.ToUpper(s)
-	for _, u := range diskByteUnits {
-		numPart, ok := strings.CutSuffix(upper, u.suffix)
-		if !ok || numPart == "" {
-			continue
-		}
-		n, err := strconv.ParseUint(numPart, 10, 64)
-		if err != nil {
-			continue
-		}
-		return diskThreshold{bytes: n * u.multiplier}, nil
-	}
-
-	return diskThreshold{}, invalidDiskThresholdError(s)
-}
-
-// invalidDiskThresholdError reports the legal formats so a misconfigured
-// value is actionable without reading source.
-func invalidDiskThresholdError(s string) error {
-	return fmt.Errorf("invalid threshold %q: want a percentage like \"10%%\" or a size like \"20GB\"", s)
 }
 
 // --- Standalone utility functions (not struct methods) ---

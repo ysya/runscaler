@@ -3,6 +3,7 @@ package diskguard
 import (
 	"context"
 
+	"github.com/ysya/runscaler/internal/bytesize"
 	"github.com/ysya/runscaler/internal/cachestore"
 )
 
@@ -49,8 +50,8 @@ func (f *fakeStore) Budget() (uint64, string) { return f.budget, f.onExceed }
 // mustThreshold parses s and panics on error — a test-only helper so
 // table-driven test setup can stay a one-liner instead of threading `t` and
 // `t.Fatalf` through every threshold literal.
-func mustThreshold(s string) Threshold {
-	th, err := ParseThreshold(s)
+func mustThreshold(s string) bytesize.Threshold {
+	th, err := bytesize.ParseThreshold(s)
 	if err != nil {
 		panic(err)
 	}

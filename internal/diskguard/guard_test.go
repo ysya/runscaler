@@ -37,31 +37,59 @@ func TestGuard_StopsAsSoonAsTargetMet(t *testing.T) {
 	}
 }
 
-func TestGuard_SkipsDisabledStore(t *testing.T) {
+// TestGuard_ReclaimsFromDisabledStore pins the 2026-08-14 spec revision
+// (docs/superpowers/specs/2026-08-13-cache-architecture-design.md,
+// "各 store 的啟用開關只約束例行清理"): Enabled()==false means the operator left
+// this store off its own periodic sweep schedule ("don't run routine
+// cleanup"), not "never touch this even if the disk is full". The guard
+// must reclaim from a disabled store exactly like an enabled one of the
+// same kind — a host whose disk the guard must never touch at all should
+// set `[disk] guard = false` (Config.Enabled, the guard-wide switch)
+// instead, which is a deliberate, explicit opt-out rather than one
+// borrowed from a setting designed for something else.
+func TestGuard_ReclaimsFromDisabledStore(t *testing.T) {
 	statFn := func(string) (FSStat, error) {
 		return FSStat{ID: "fs1", TotalBytes: 100, FreeBytes: 1}, nil
 	}
 	disabled := &fakeStore{name: "docker", kind: cachestore.KindGarbage, path: "/", disabled: true}
-	// Control: a second, enabled store of the same kind in the same sweep.
-	// Without it, disabled.reclaimedTiers being empty would be equally
-	// consistent with a guard that reclaims from nothing at all — this
-	// proves the guard actively distinguishes disabled from enabled rather
-	// than merely doing nothing here.
-	enabled := &fakeStore{name: "buildx", kind: cachestore.KindGarbage, path: "/"}
 	g := New(Config{Enabled: true, MinFree: mustThreshold("10%"),
-		TargetFree: mustThreshold("20%"), MaxTier: cachestore.Tier4},
-		[]cachestore.CacheStore{disabled, enabled}, statFn, slog.New(slog.DiscardHandler))
+		TargetFree: mustThreshold("20%"), MaxTier: cachestore.Tier1},
+		[]cachestore.CacheStore{disabled}, statFn, slog.New(slog.DiscardHandler))
 
 	if err := g.Sweep(context.Background()); err != nil {
 		t.Fatalf("Sweep error: %v", err)
 	}
-	if len(disabled.reclaimedTiers) != 0 {
-		t.Error("a disabled store must not be reclaimed — the operator turned it off deliberately")
-	}
 	want := []cachestore.Tier{cachestore.Tier1}
-	if !slices.Equal(enabled.reclaimedTiers, want) {
-		t.Errorf("enabled control store reclaimedTiers = %v, want %v — an enabled store of the same kind in the same sweep must still be reclaimed",
-			enabled.reclaimedTiers, want)
+	if !slices.Equal(disabled.reclaimedTiers, want) {
+		t.Errorf("reclaimedTiers = %v, want %v — the guard must reclaim from a disabled store under disk pressure",
+			disabled.reclaimedTiers, want)
+	}
+}
+
+// TestGuard_TiersForGateStillAppliesRegardlessOfEnabled pins that the
+// Enabled() change above did not loosen TiersFor — a KindScratch store
+// (live inter-job handoff data) must still be unreachable at Tier4 whether
+// or not it is enabled. This is a data-safety rule, not an operator
+// preference, so it is orthogonal to Enabled() entirely.
+func TestGuard_TiersForGateStillAppliesRegardlessOfEnabled(t *testing.T) {
+	statFn := func(string) (FSStat, error) {
+		return FSStat{ID: "fs1", TotalBytes: 100, FreeBytes: 1}, nil // never healthy
+	}
+	s := &fakeStore{name: "shared-volume", kind: cachestore.KindScratch, path: "/", disabled: true}
+	g := New(Config{Enabled: true, MinFree: mustThreshold("10%"),
+		TargetFree: mustThreshold("20%"), MaxTier: cachestore.Tier4},
+		[]cachestore.CacheStore{s}, statFn, slog.New(slog.DiscardHandler))
+
+	if err := g.Sweep(context.Background()); err != nil {
+		t.Fatalf("Sweep error: %v", err)
+	}
+	// TiersFor(KindScratch) == {Tier3}; Tier4 must never be attempted even
+	// though MaxTier permits it and the store is disabled (irrelevant either
+	// way now — this proves TiersFor, not Enabled(), is what still gates it).
+	want := []cachestore.Tier{cachestore.Tier3}
+	if !slices.Equal(s.reclaimedTiers, want) {
+		t.Errorf("reclaimedTiers = %v, want %v — TiersFor(KindScratch) must still exclude Tier4 regardless of Enabled()",
+			s.reclaimedTiers, want)
 	}
 }
 
@@ -152,17 +180,22 @@ func TestGuard_NeedsReclaimUsesReadableFilesystemWhenOneFails(t *testing.T) {
 	}
 }
 
-// TestGuard_ShortfallWarningNamesDisabledStores is not one of the brief's
-// given tests — added because none of them can check log content
-// (slog.DiscardHandler discards it), yet property 3 ("say in the warning
-// which stores it could not touch and why") is specifically about that
-// content. Uses a real handler over a buffer instead.
-func TestGuard_ShortfallWarningNamesDisabledStores(t *testing.T) {
+// TestGuard_ShortfallWarningReportsShortfall checks the shortfall warning's
+// actual log content (slog.DiscardHandler, used by every other test here,
+// discards it) rather than just that Sweep didn't error. Since the
+// 2026-08-14 revision (see TestGuard_ReclaimsFromDisabledStore), the
+// warning no longer names disabled stores — that mechanism is gone — but it
+// must still fire and report the shortfall once every allowed tier has run
+// and the target is still unmet.
+func TestGuard_ShortfallWarningReportsShortfall(t *testing.T) {
 	statFn := func(string) (FSStat, error) {
 		return FSStat{ID: "fs1", TotalBytes: 100, FreeBytes: 1}, nil // never healthy
 	}
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	// Enabled() irrelevant to reaching this warning post-revision — set
+	// disabled anyway to confirm reclaim (and therefore the eventual
+	// shortfall) still happens for it as it would for any other store.
 	s := &fakeStore{name: "docker-garbage", kind: cachestore.KindGarbage, path: "/", disabled: true}
 	g := New(Config{Enabled: true, MinFree: mustThreshold("10%"),
 		TargetFree: mustThreshold("20%"), MaxTier: cachestore.Tier1},
@@ -172,8 +205,14 @@ func TestGuard_ShortfallWarningNamesDisabledStores(t *testing.T) {
 		t.Fatalf("Sweep error: %v", err)
 	}
 	out := buf.String()
-	if !strings.Contains(out, "docker-garbage") {
-		t.Errorf("shortfall warning does not name the disabled store it could not reclaim from: %s", out)
+	if !strings.Contains(out, "reached max-tier without meeting target-free") {
+		t.Errorf("shortfall warning did not fire: %s", out)
+	}
+	if !strings.Contains(out, "shortfall_bytes") {
+		t.Errorf("shortfall warning does not report shortfall_bytes: %s", out)
+	}
+	if strings.Contains(out, "disabled_stores") || strings.Contains(out, "disabled_reason") {
+		t.Errorf("shortfall warning still mentions disabled stores — that mechanism was removed: %s", out)
 	}
 }
 

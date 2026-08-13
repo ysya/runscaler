@@ -20,6 +20,16 @@ import (
 // enough.
 const dockerInfoTimeout = 10 * time.Second
 
+// dockerReclaimTimeout bounds every prune call dockerGarbageStore and
+// dockerBuildCacheStore make to the Docker daemon, mirroring the bound the
+// retired backend.PruneDockerRuntime used to carry
+// (context.WithTimeout(ctx, 10*time.Minute) around its own prune calls) —
+// see volumeHelperTimeout in volume.go for the equivalent bound on the
+// volume-backed stores. Without this, a wedged daemon blocks the sweeper
+// goroutine (or the disk guard's sweep) forever; this is the same class of
+// bug commit 6cc66b0 fixed for the exit-time cleanup path.
+const dockerReclaimTimeout = 10 * time.Minute
+
 // resolveDockerRootDir resolves the Docker daemon's data-root directory
 // once, bounded by dockerInfoTimeout so a wedged daemon cannot hang store
 // construction. A failed lookup returns "" rather than an error — the disk
@@ -90,17 +100,23 @@ func (s *dockerGarbageStore) Measure(ctx context.Context) (uint64, error) {
 }
 
 // Reclaim prunes stopped containers and dangling images older than
-// PruneTTL at Tier1; every other tier is a no-op. A disabled store prunes
-// nothing — the operator turned it off deliberately (prune touches the
-// whole daemon and may affect non-runner objects), and the guard must not
-// override that choice.
+// PruneTTL at Tier1; every other tier is a no-op. Enabled() is deliberately
+// NOT checked here (revised 2026-08-14 — see store.go's Enabled doc
+// comment): a disabled store still means the operator left the *periodic*
+// prune sweep off, not "never touch this" — cmd/runner's sweeper is what
+// consults Enabled() to decide whether to run at all, so by the time this
+// method is reached from that path Enabled() is already known true; the
+// disk guard reaches this method regardless, on purpose.
 func (s *dockerGarbageStore) Reclaim(ctx context.Context, tier Tier) (uint64, error) {
-	if !s.cfg.Enabled || tier != Tier1 {
+	if tier != Tier1 {
 		return 0, nil
 	}
 	if s.cfg.PruneTTL <= 0 {
 		return 0, nil
 	}
+
+	timeoutCtx, cancel := context.WithTimeout(ctx, dockerReclaimTimeout)
+	defer cancel()
 
 	var freed uint64
 	var errs []error
@@ -111,14 +127,14 @@ func (s *dockerGarbageStore) Reclaim(ctx context.Context, tier Tier) (uint64, er
 	// moby v28.5.2 — and continues past a container-prune failure to still
 	// attempt the image prune, matching that function's resilience.
 	untilFilter := make(dockerclient.Filters).Add("until", s.cfg.PruneTTL.String())
-	if r, err := s.client.ContainerPrune(ctx, dockerclient.ContainerPruneOptions{Filters: untilFilter}); err != nil {
+	if r, err := s.client.ContainerPrune(timeoutCtx, dockerclient.ContainerPruneOptions{Filters: untilFilter}); err != nil {
 		errs = append(errs, fmt.Errorf("prune stopped containers: %w", err))
 	} else {
 		freed += r.Report.SpaceReclaimed
 	}
 
 	imageFilters := make(dockerclient.Filters).Add("dangling", "true").Add("until", s.cfg.PruneTTL.String())
-	if r, err := s.client.ImagePrune(ctx, dockerclient.ImagePruneOptions{Filters: imageFilters}); err != nil {
+	if r, err := s.client.ImagePrune(timeoutCtx, dockerclient.ImagePruneOptions{Filters: imageFilters}); err != nil {
 		errs = append(errs, fmt.Errorf("prune dangling images: %w", err))
 	} else {
 		freed += r.Report.SpaceReclaimed
@@ -173,18 +189,18 @@ func (s *dockerBuildCacheStore) Measure(ctx context.Context) (uint64, error) {
 }
 
 // Reclaim trims build cache by age and/or budget at Tier2, and performs an
-// unconditional full wipe at Tier4; every other tier is a no-op. A disabled
-// store reclaims nothing, matching every other store's respect for the
-// operator's own choice.
+// unconditional full wipe at Tier4; every other tier is a no-op. Enabled()
+// is deliberately NOT checked here — see dockerGarbageStore.Reclaim's
+// identical note and store.go's Enabled doc comment (revised 2026-08-14):
+// the disk guard reaches this method regardless of Enabled(), by design.
 func (s *dockerBuildCacheStore) Reclaim(ctx context.Context, tier Tier) (uint64, error) {
-	if !s.cfg.Enabled {
-		return 0, nil
-	}
+	timeoutCtx, cancel := context.WithTimeout(ctx, dockerReclaimTimeout)
+	defer cancel()
 	switch tier {
 	case Tier2:
-		return s.reclaimByAgeAndBudget(ctx)
+		return s.reclaimByAgeAndBudget(timeoutCtx)
 	case Tier4:
-		return s.reclaimAll(ctx)
+		return s.reclaimAll(timeoutCtx)
 	default:
 		return 0, nil
 	}

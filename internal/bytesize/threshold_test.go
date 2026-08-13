@@ -1,4 +1,4 @@
-package diskguard
+package bytesize
 
 import "testing"
 

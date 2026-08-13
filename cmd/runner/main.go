@@ -27,6 +27,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/ysya/runscaler/internal/backend"
+	"github.com/ysya/runscaler/internal/bytesize"
 	"github.com/ysya/runscaler/internal/cachestore"
 	"github.com/ysya/runscaler/internal/config"
 	"github.com/ysya/runscaler/internal/diskguard"
@@ -379,35 +380,42 @@ func run(ctx context.Context, cfg config.Config) error {
 		logger.Info("Health check server started", slog.String("address", cfg.HealthAddress), slog.Int("port", cfg.HealthPort))
 	}
 
-	// buildCacheStores gives the disk guard its host-wide view of every
-	// configured store — see the "cachestore.CacheStore construction"
-	// section above dockerCacheStoresForSocket for the shared derivation
-	// logic behind it. The sweepers below reconstruct their own per-socket
-	// / per-TART_HOME store(s) through the exact same helper functions
-	// (dockerCacheStoresForSocket, tartCacheSweepTargetsFor) rather than
-	// picking their instances back out of this flat list — a store's
-	// Name() is not socket-qualified (see dockerSocketStores' doc comment),
-	// so a flat list cannot be searched by name without ambiguity once more
-	// than one Docker socket is configured. The extra construction this
-	// costs is one more daemon Info() call per socket at startup — cheap,
-	// one-time, and produces byte-for-byte equivalent stores (same
-	// deterministic selection over the same scaleSets), not a second,
-	// independently-drifting derivation of "which scaleset's settings win".
-	cacheStores := buildCacheStores(scaleSets, dockerClients, logger)
-
+	// Build every cachestore.CacheStore exactly once — keyed by socket (and,
+	// for Tart, by TART_HOME) rather than flattened up front, so the
+	// sweepers below can address a specific store directly instead of
+	// searching a flat list by Name() (not socket-qualified — see
+	// dockerSocketStores' doc comment — so ambiguous once more than one
+	// Docker socket is configured). Both the sweepers and the disk guard
+	// reclaim through these exact same instances: constructing them twice
+	// (once for the guard's flat list, once more for sweeper-wiring) used
+	// to also log every "Conflicting ... settings" warning twice at
+	// startup. buildCacheStores (used by callers outside run(), e.g. Task
+	// 8's `runner cache`) is intentionally not called here for the same
+	// reason.
+	//
 	// Cleanup ownership is per daemon. Group scale sets so distinct sockets
 	// never share a client or a global-daemon sweeper.
 	dockerSets := groupDockerScaleSets(scaleSets)
+	storesBySocket := make(map[string]dockerSocketStores, len(dockerSets))
 	for socket, sets := range dockerSets {
-		socketStores := dockerCacheStoresForSocket(sets, dockerClients[socket], logger)
+		storesBySocket[socket] = dockerCacheStoresForSocket(sets, dockerClients[socket], logger)
+	}
+	tartTargets := tartCacheStores(scaleSets, logger)
+
+	var cacheStores []cachestore.CacheStore
+	for _, socketStores := range storesBySocket {
+		cacheStores = append(cacheStores, socketStores.flatten()...)
 		startSharedVolumeCleanup(ctx, socketStores.sharedVolume, logger)
 		startBuildxCleanup(ctx, socketStores, logger)
 		startDockerPrune(ctx, socketStores, logger)
 	}
+	for _, t := range tartTargets {
+		cacheStores = append(cacheStores, t.store)
+	}
 
 	// Start periodic Tart cache cleanup (one sweeper per unique TART_HOME, so
 	// scalesets sharing a TART_HOME share a sweeper and won't race).
-	startTartCacheCleanup(ctx, tartCacheSweepTargetsFor(scaleSets, logger), logger)
+	startTartCacheCleanup(ctx, tartTargets, logger)
 
 	// Start the periodic disk-pressure guard over every store built above.
 	startDiskGuard(ctx, cacheStores, cfg, logger)
@@ -795,63 +803,89 @@ func dockerCacheStoresForSocket(sets []config.ScaleSetConfig, client *dockerclie
 	}
 }
 
-// dockerPruneSettingsFor picks the settings for one socket's garbage and
-// build-cache stores, plus the interval their shared sweep ticks on, all
-// from the first scaleset in sets with prune enabled — the pre-Task-7
-// startDockerPrune's own "first scaleset with prune enabled, in sets order"
-// selection, extracted into one pass so the two configs and the interval
-// can never disagree about which scaleset won. Only a PruneTTL of exactly 0
-// (not negative) falls back to its default: a negative value is an explicit
-// "disable the container/image portion, keep build-cache retention" signal
-// (see DockerConfig.PruneTTL's doc comment) that dockerGarbageStore.Reclaim's
-// own `PruneTTL <= 0` no-op check honors.
-func dockerPruneSettingsFor(sets []config.ScaleSetConfig) (cachestore.DockerGarbageConfig, cachestore.DockerBuildCacheConfig, time.Duration) {
+// dockerSettingsSource picks which scaleset in sets provides settings for a
+// daemon-global store: the first with the routine sweep enabled, so its
+// values (and the periodic sweeper's interval) match what the sweeper
+// itself would use. If none enables it, settings still come from the first
+// Docker scaleset in sets (defaults applied the same way) rather than a
+// bare zero value — the disk guard reclaims through these stores
+// regardless of Enabled() (2026-08-14 revision: "各 store 的啟用開關只約束例行清理",
+// see docs/superpowers/specs/2026-08-13-cache-architecture-design.md), so
+// it needs real settings even when no scaleset opted into the periodic
+// sweep — a bare zero-value PruneTTL/MaxAge would leave the guard just as
+// unable to reclaim as respecting Enabled() did. enabled reports whether
+// the *periodic sweeper* should run at all; it is independent of whether
+// the returned scaleset's own settings are populated.
+func dockerSettingsSource(sets []config.ScaleSetConfig, isEnabled func(config.ScaleSetConfig) bool) (source config.ScaleSetConfig, enabled bool, ok bool) {
+	var dockerSets []config.ScaleSetConfig
 	for _, ss := range sets {
-		if ss.IsTart() || !ss.IsDockerPruneEnabled() {
-			continue
+		if !ss.IsTart() {
+			dockerSets = append(dockerSets, ss)
 		}
-		ttl := ss.Docker.PruneTTL
-		if ttl == 0 {
-			ttl = config.DefaultDockerPruneTTL
-		}
-		interval := ss.Docker.PruneInterval
-		if interval <= 0 {
-			interval = config.DefaultDockerPruneInterval
-		}
-		cacheMaxAge := ss.Docker.BuildCacheMaxAge
-		if cacheMaxAge == 0 {
-			cacheMaxAge = config.DefaultDockerBuildCacheMaxAge
-		}
-		return cachestore.DockerGarbageConfig{Enabled: true, PruneTTL: ttl},
-			cachestore.DockerBuildCacheConfig{Enabled: true, MaxAge: cacheMaxAge, BudgetGB: ss.Docker.BuildCacheBudgetGB},
-			interval
 	}
-	// Enabled: false on both — no scaleset opted in.
-	return cachestore.DockerGarbageConfig{}, cachestore.DockerBuildCacheConfig{}, 0
+	if len(dockerSets) == 0 {
+		return config.ScaleSetConfig{}, false, false
+	}
+
+	source = dockerSets[0]
+	for _, ss := range dockerSets {
+		if isEnabled(ss) {
+			return ss, true, true
+		}
+	}
+	return source, false, true
+}
+
+// dockerPruneSettingsFor picks the settings for one socket's garbage and
+// build-cache stores, plus the interval their shared sweep ticks on — see
+// dockerSettingsSource for the selection rule. Only a PruneTTL of exactly 0
+// (not negative) falls back to the default: a negative value is an
+// explicit "disable the container/image portion, keep build-cache
+// retention" signal (see DockerConfig.PruneTTL's doc comment) that
+// dockerGarbageStore.Reclaim's own `PruneTTL <= 0` no-op check honors.
+func dockerPruneSettingsFor(sets []config.ScaleSetConfig) (cachestore.DockerGarbageConfig, cachestore.DockerBuildCacheConfig, time.Duration) {
+	source, enabled, ok := dockerSettingsSource(sets, func(ss config.ScaleSetConfig) bool { return ss.IsDockerPruneEnabled() })
+	if !ok {
+		return cachestore.DockerGarbageConfig{}, cachestore.DockerBuildCacheConfig{}, 0
+	}
+
+	ttl := source.Docker.PruneTTL
+	if ttl == 0 {
+		ttl = config.DefaultDockerPruneTTL
+	}
+	interval := source.Docker.PruneInterval
+	if interval <= 0 {
+		interval = config.DefaultDockerPruneInterval
+	}
+	cacheMaxAge := source.Docker.BuildCacheMaxAge
+	if cacheMaxAge == 0 {
+		cacheMaxAge = config.DefaultDockerBuildCacheMaxAge
+	}
+	return cachestore.DockerGarbageConfig{Enabled: enabled, PruneTTL: ttl},
+		cachestore.DockerBuildCacheConfig{Enabled: enabled, MaxAge: cacheMaxAge, BudgetGB: source.Docker.BuildCacheBudgetGB},
+		interval
 }
 
 // buildxConfigFor picks the settings for one socket's buildx store and the
-// interval its own sweep ticks on, matching startBuildxCleanup's pre-Task-7
-// "first scaleset with buildx-cleanup enabled" selection exactly (ttl <= 0,
-// not == 0, falls back to the default — buildx-cleanup-ttl has no "negative
-// disables just one portion" meaning the way prune-ttl does, so any
-// non-positive value is simply unset).
+// interval its own sweep ticks on — see dockerSettingsSource for the
+// selection rule (ttl <= 0, not == 0, falls back to the default here:
+// buildx-cleanup-ttl has no "negative disables just one portion" meaning
+// the way prune-ttl does, so any non-positive value is simply unset).
 func buildxConfigFor(sets []config.ScaleSetConfig, rootDir string) (cachestore.BuildxConfig, time.Duration) {
-	for _, ss := range sets {
-		if ss.IsTart() || !ss.IsBuildxCleanupEnabled() {
-			continue
-		}
-		ttl := ss.Docker.BuildxCleanupTTL
-		if ttl <= 0 {
-			ttl = config.DefaultBuildxCleanupTTL
-		}
-		interval := ss.Docker.BuildxCleanupInterval
-		if interval <= 0 {
-			interval = config.DefaultBuildxCleanupInterval
-		}
-		return cachestore.BuildxConfig{Enabled: true, MaxAge: ttl, RootDir: rootDir}, interval
+	source, enabled, ok := dockerSettingsSource(sets, func(ss config.ScaleSetConfig) bool { return ss.IsBuildxCleanupEnabled() })
+	if !ok {
+		return cachestore.BuildxConfig{RootDir: rootDir}, 0
 	}
-	return cachestore.BuildxConfig{RootDir: rootDir}, 0
+
+	ttl := source.Docker.BuildxCleanupTTL
+	if ttl <= 0 {
+		ttl = config.DefaultBuildxCleanupTTL
+	}
+	interval := source.Docker.BuildxCleanupInterval
+	if interval <= 0 {
+		interval = config.DefaultBuildxCleanupInterval
+	}
+	return cachestore.BuildxConfig{Enabled: enabled, MaxAge: ttl, RootDir: rootDir}, interval
 }
 
 // sharedVolumeSweepTarget pairs a shared-volume store with the settings its
@@ -875,6 +909,20 @@ type sharedVolumeSweepTarget struct {
 // conflicting later one") extracted so both that sweeper and
 // dockerCacheStoresForSocket (and so, transitively, the disk guard) select
 // from it identically.
+//
+// Deliberately NOT given the "construct regardless, default the settings"
+// treatment dockerPruneSettingsFor/buildxConfigFor/tartCacheStoreFor now
+// get (2026-08-14 Enabled() revision): those stores have a boolean routine-
+// cleanup switch plus separate TTL/MaxAge fields with sensible always-on
+// defaults, so a disabled switch still leaves a real, safe value to reclaim
+// by. A shared volume has no such separate default — SharedVolumeTTL *is*
+// the retention policy, and 0 means "no policy configured" with no
+// project-wide fallback (see DockerConfig.SharedVolumeTTL's doc comment).
+// Constructing a store here with MaxAge=0 would make Reclaim(Tier3)'s own
+// `days < 1 { days = 1 }` floor silently invent a 1-day TTL nobody
+// configured, deleting handoff files an operator never opted into a
+// retention policy for at all. So: no TTL configured still means no store,
+// exactly as before this revision.
 func sharedVolumeSweepTargetsFor(sets []config.ScaleSetConfig, client *dockerclient.Client, rootDir string, logger *slog.Logger) []sharedVolumeSweepTarget {
 	type settings struct {
 		volumeName, mountPath, helperImage string
@@ -974,33 +1022,62 @@ func cacheVolumeStoresFor(sets []config.ScaleSetConfig, client *dockerclient.Cli
 }
 
 // tartCacheSweepTarget pairs a Tart-cache store with the settings its own
-// periodic sweep logs and ticks on — the same split sharedVolumeSweepTarget
-// makes, for the same reason.
+// periodic sweep logs and ticks on, and whether that periodic sweep is
+// itself enabled. enabled is tracked separately from the store's own
+// Enabled() (which the disk guard does not consult — see store.go's
+// Enabled doc comment): cmd/runner's sweeper-launching code still needs to
+// know whether to start a goroutine for this home at all — every home gets
+// a target now (see tartCacheStores), not just the ones with a periodic
+// sweep turned on.
 type tartCacheSweepTarget struct {
 	store         cachestore.CacheStore
 	home          string
 	maxAge        time.Duration
 	spaceBudgetGB int
 	interval      time.Duration
+	enabled       bool
 }
 
-// tartCacheSweepTargetsFor selects one target per unique TART_HOME among
-// scaleSets, in first-occurrence order. This is startTartCacheCleanup's
-// pre-Task-7 dedup ("first Tart scaleset with cache-cleanup enabled per
-// TART_HOME wins, warn on a conflicting later one") extracted the same way
-// sharedVolumeSweepTargetsFor extracts startSharedVolumeCleanup's.
-func tartCacheSweepTargetsFor(scaleSets []config.ScaleSetConfig, logger *slog.Logger) []tartCacheSweepTarget {
-	type settings struct {
-		home          string
-		maxAge        time.Duration
-		spaceBudgetGB int
-		interval      time.Duration
+// tartCacheStores builds one target per unique TART_HOME across scaleSets —
+// every Tart scaleset contributes its home, regardless of whether
+// cache-cleanup is enabled there. This is a deliberate difference from
+// pre-Task-7 (which built nothing for a disabled home): the disk guard
+// reclaims through these stores regardless of Enabled() (2026-08-14
+// revision — see dockerSettingsSource's identical rationale, which this
+// mirrors for Tart), so it needs to see every configured home, not just
+// the ones with a periodic sweep turned on.
+func tartCacheStores(scaleSets []config.ScaleSetConfig, logger *slog.Logger) map[string]tartCacheSweepTarget {
+	homes := make(map[string][]config.ScaleSetConfig)
+	for _, ss := range scaleSets {
+		if ss.IsTart() {
+			homes[ss.Tart.Home] = append(homes[ss.Tart.Home], ss)
+		}
 	}
 
-	picked := make(map[string]settings)
-	var order []string
-	for _, ss := range scaleSets {
-		if !ss.IsTart() || !ss.IsTartCacheCleanupEnabled() {
+	targets := make(map[string]tartCacheSweepTarget, len(homes))
+	for home, sets := range homes {
+		targets[home] = tartCacheStoreFor(home, sets, logger)
+	}
+	return targets
+}
+
+// tartCacheStoreFor builds the target for one TART_HOME: settings come from
+// the first scaleset sharing it with cache-cleanup enabled — matching
+// startTartCacheCleanup's pre-Task-7 "first enabled wins, warn on a
+// conflicting later enabled one" dedup exactly, which also determines what
+// the periodic sweeper itself uses — or, if no scaleset sharing this home
+// enables it, from the first scaleset's own values (still defaulted)
+// purely so the disk guard has something real to reclaim by; see
+// tartCacheStores' doc comment.
+func tartCacheStoreFor(home string, sets []config.ScaleSetConfig, logger *slog.Logger) tartCacheSweepTarget {
+	type settings struct {
+		maxAge, interval time.Duration
+		budgetGB         int
+	}
+
+	var chosen *settings
+	for _, ss := range sets {
+		if !ss.IsTartCacheCleanupEnabled() {
 			continue
 		}
 		maxAge := ss.Tart.CacheMaxAge
@@ -1011,58 +1088,95 @@ func tartCacheSweepTargetsFor(scaleSets []config.ScaleSetConfig, logger *slog.Lo
 		if interval <= 0 {
 			interval = config.DefaultTartCacheCleanupInterval
 		}
-		s := settings{home: ss.Tart.Home, maxAge: maxAge, spaceBudgetGB: ss.Tart.CacheSpaceBudgetGB, interval: interval}
-		if existing, ok := picked[ss.Tart.Home]; ok {
-			if existing != s {
-				logger.Warn("Conflicting tart cache cleanup settings for TART_HOME, keeping first",
-					slog.String("home", ss.Tart.Home),
-					slog.Duration("kept_max_age", existing.maxAge),
-					slog.Int("kept_budget_gb", existing.spaceBudgetGB),
-					slog.Duration("kept_interval", existing.interval),
-					slog.Duration("ignored_max_age", s.maxAge),
-					slog.Int("ignored_budget_gb", s.spaceBudgetGB),
-					slog.Duration("ignored_interval", s.interval),
-				)
-			}
+		s := settings{maxAge: maxAge, interval: interval, budgetGB: ss.Tart.CacheSpaceBudgetGB}
+		if chosen == nil {
+			chosen = &s
 			continue
 		}
-		picked[ss.Tart.Home] = s
-		order = append(order, ss.Tart.Home)
+		if *chosen != s {
+			logger.Warn("Conflicting tart cache cleanup settings for TART_HOME, keeping first",
+				slog.String("home", home),
+				slog.Duration("kept_max_age", chosen.maxAge),
+				slog.Int("kept_budget_gb", chosen.budgetGB),
+				slog.Duration("kept_interval", chosen.interval),
+				slog.Duration("ignored_max_age", s.maxAge),
+				slog.Int("ignored_budget_gb", s.budgetGB),
+				slog.Duration("ignored_interval", s.interval),
+			)
+		}
 	}
 
-	targets := make([]tartCacheSweepTarget, 0, len(order))
-	for _, home := range order {
-		s := picked[home]
-		store := cachestore.NewTartStore(execCommandRunner{}, cachestore.TartConfig{
-			Enabled:  true,
-			Home:     s.home,
-			MaxAge:   s.maxAge,
-			BudgetGB: s.spaceBudgetGB,
-		})
-		targets = append(targets, tartCacheSweepTarget{
-			store: store, home: s.home, maxAge: s.maxAge, spaceBudgetGB: s.spaceBudgetGB, interval: s.interval,
-		})
+	enabled := chosen != nil
+	if chosen == nil {
+		// No scaleset sharing this home enables cache-cleanup — the
+		// periodic sweeper stays off, but the disk guard still needs real
+		// settings to reclaim by. Fall back to the first scaleset's own
+		// values, still defaulted the same way.
+		maxAge := sets[0].Tart.CacheMaxAge
+		if maxAge <= 0 {
+			maxAge = config.DefaultTartCacheMaxAge
+		}
+		chosen = &settings{maxAge: maxAge, budgetGB: sets[0].Tart.CacheSpaceBudgetGB}
 	}
-	return targets
+
+	store := cachestore.NewTartStore(execCommandRunner{}, cachestore.TartConfig{
+		Enabled:  enabled,
+		Home:     home,
+		MaxAge:   chosen.maxAge,
+		BudgetGB: chosen.budgetGB,
+	})
+	return tartCacheSweepTarget{
+		store: store, home: home, maxAge: chosen.maxAge, spaceBudgetGB: chosen.budgetGB,
+		interval: chosen.interval, enabled: enabled,
+	}
 }
 
 // buildCacheStores constructs every cachestore.CacheStore configured across
 // scaleSets: the Docker-daemon-scoped stores for each unique socket (via
 // dockerCacheStoresForSocket) and the Tart-scoped stores for each unique
-// TART_HOME (via tartCacheSweepTargetsFor). It is the one place this flat,
-// host-wide set is assembled — used both for the disk guard's input in
-// run() and as the standalone entry point for callers that only want the
-// full set without also wiring the periodic sweepers: Task 8's `runner
-// cache` and Task 9's pre-job disk check.
+// TART_HOME (via tartCacheStores). It is the one place this flat, host-wide
+// set is assembled — used both for the disk guard's input in run() and as
+// the standalone entry point for callers that only want the full set
+// without also wiring the periodic sweepers: Task 8's `runner cache` and
+// Task 9's pre-job disk check.
+//
+// NOTE: run() itself does not call this function — see its own comment at
+// the call site for why (avoiding double construction and double
+// "Conflicting ... settings" warnings). It is kept for Task 8/9 and is
+// covered directly by this package's own tests.
 func buildCacheStores(scaleSets []config.ScaleSetConfig, dockerClients map[string]*dockerclient.Client, logger *slog.Logger) []cachestore.CacheStore {
 	var stores []cachestore.CacheStore
 	for socket, sets := range groupDockerScaleSets(scaleSets) {
 		stores = append(stores, dockerCacheStoresForSocket(sets, dockerClients[socket], logger).flatten()...)
 	}
-	for _, t := range tartCacheSweepTargetsFor(scaleSets, logger) {
+	for _, t := range tartCacheStores(scaleSets, logger) {
 		stores = append(stores, t.store)
 	}
 	return stores
+}
+
+// logReclaimResult logs the outcome of one store's Reclaim call: Info with
+// the reclaimed total when it freed anything — so a data-deleting sweep
+// leaves a record an operator can find, restoring the completion logging
+// the pre-Task-7 backend.PruneDockerRuntime ("Docker runtime prune
+// reclaimed disk") and CleanupSharedVolumeStale ("Shared volume cleanup
+// completed") used to do before cachestore.CacheStore.Reclaim's uniform
+// (bytes, error) return replaced their own bespoke summaries — Debug when
+// it ran but found nothing to reclaim, and Warn when it failed outright.
+// action names what ran (e.g. "Docker garbage prune"); store names which
+// store — dockerSocketStores' sweep reclaims through two stores in one
+// pass, so it calls this once per store rather than logging one combined
+// line that would hide which one actually did anything.
+func logReclaimResult(logger *slog.Logger, action, store string, freed uint64, err error) {
+	if err != nil {
+		logger.Warn(action+" failed", slog.String("store", store), slog.Any("error", err))
+		return
+	}
+	if freed > 0 {
+		logger.Info(action+" reclaimed disk", slog.String("store", store), slog.String("reclaimed", backend.FormatBytes(freed)))
+		return
+	}
+	logger.Debug(action+" found nothing to reclaim", slog.String("store", store))
 }
 
 // startSharedVolumeCleanup launches one background goroutine per shared-volume
@@ -1083,13 +1197,15 @@ func startSharedVolumeCleanup(ctx context.Context, targets []sharedVolumeSweepTa
 			slog.String("path", t.mountPath),
 		)
 
+		sweep := func() {
+			freed, err := t.store.Reclaim(ctx, cachestore.Tier3)
+			logReclaimResult(logger, "Shared volume cleanup", t.store.Name(), freed, err)
+		}
+
 		// Run an initial sweep so users don't wait `interval` for the first cleanup
 		// after startup (especially relevant after a crash leaves the volume bloated).
 		go func() {
-			if _, err := t.store.Reclaim(ctx, cachestore.Tier3); err != nil {
-				logger.Warn("Initial shared volume cleanup failed", slog.Any("error", err))
-			}
-
+			sweep()
 			ticker := time.NewTicker(t.interval)
 			defer ticker.Stop()
 			for {
@@ -1097,9 +1213,7 @@ func startSharedVolumeCleanup(ctx context.Context, targets []sharedVolumeSweepTa
 				case <-ctx.Done():
 					return
 				case <-ticker.C:
-					if _, err := t.store.Reclaim(ctx, cachestore.Tier3); err != nil {
-						logger.Warn("Periodic shared volume cleanup failed", slog.Any("error", err))
-					}
+					sweep()
 				}
 			}
 		}()
@@ -1128,13 +1242,15 @@ func startBuildxCleanup(ctx context.Context, stores dockerSocketStores, logger *
 		slog.Duration("interval", stores.buildxInterval),
 	)
 
+	sweep := func() {
+		freed, err := stores.buildx.Reclaim(ctx, cachestore.Tier1)
+		logReclaimResult(logger, "Buildx builder cleanup", stores.buildx.Name(), freed, err)
+	}
+
 	// Run an initial sweep so a bloated daemon is reclaimed promptly at startup
 	// rather than after a full interval.
 	go func() {
-		if _, err := stores.buildx.Reclaim(ctx, cachestore.Tier1); err != nil {
-			logger.Warn("Initial buildx cleanup failed", slog.Any("error", err))
-		}
-
+		sweep()
 		ticker := time.NewTicker(stores.buildxInterval)
 		defer ticker.Stop()
 		for {
@@ -1142,9 +1258,7 @@ func startBuildxCleanup(ctx context.Context, stores dockerSocketStores, logger *
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if _, err := stores.buildx.Reclaim(ctx, cachestore.Tier1); err != nil {
-					logger.Warn("Periodic buildx cleanup failed", slog.Any("error", err))
-				}
+				sweep()
 			}
 		}
 	}()
@@ -1163,14 +1277,19 @@ func startBuildxCleanup(ctx context.Context, stores dockerSocketStores, logger *
 // This is opt-in because the target daemon may also contain non-runner
 // workloads. No-op when prune is not enabled for this socket.
 //
-// build-cache-budget only takes effect through this sweep (or the disk
-// guard's own Tier2 pass — see Guard.enforceBudgets' doc comment on the
-// distinction): both funnel into dockerBuildCacheStore.Reclaim(Tier2), which
-// is the only place BudgetGB is consumed (see that store's Budget() doc
-// comment on why it is deliberately not surfaced to the guard's separate
-// budget-enforcement pass too). If prune is disabled, a configured
-// build-cache-budget goes unenforced entirely — this reproduces the
-// pre-Task-7 behavior exactly, but is worth being explicit about.
+// build-cache-budget only takes effect through dockerBuildCacheStore.Reclaim
+// (Tier2) — the only place BudgetGB is consumed (see that store's Budget()
+// doc comment on why it is deliberately not surfaced to the disk guard's
+// separate, statfs-triggered budget-enforcement pass too, which would
+// otherwise double-drive the same number). Reclaim(Tier2) is reached two
+// ways: this sweep (only when prune is enabled here) and the disk guard's
+// own tier ladder under disk pressure, which — since the 2026-08-14 Enabled()
+// revision (see store.go's Enabled doc comment) — runs regardless of
+// whether prune is enabled, as long as max-tier >= 2 (the default is 3).
+// So: with prune disabled, a configured build-cache-budget is enforced only
+// once the guard's tier ladder reaches Tier2 under real disk pressure, not
+// on this sweep's own schedule — it is not "unenforced entirely" the way it
+// was before that revision.
 func startDockerPrune(ctx context.Context, stores dockerSocketStores, logger *slog.Logger) {
 	if !stores.garbageCfg.Enabled {
 		return
@@ -1183,19 +1302,18 @@ func startDockerPrune(ctx context.Context, stores dockerSocketStores, logger *sl
 		slog.Int("build_cache_budget_gb", stores.buildCacheCfg.BudgetGB),
 	)
 
-	sweep := func() error {
-		_, garbageErr := stores.garbage.Reclaim(ctx, cachestore.Tier1)
-		_, buildCacheErr := stores.buildCache.Reclaim(ctx, cachestore.Tier2)
-		return errors.Join(garbageErr, buildCacheErr)
+	sweep := func() {
+		freed, err := stores.garbage.Reclaim(ctx, cachestore.Tier1)
+		logReclaimResult(logger, "Docker garbage prune", stores.garbage.Name(), freed, err)
+
+		freed, err = stores.buildCache.Reclaim(ctx, cachestore.Tier2)
+		logReclaimResult(logger, "Docker build-cache prune", stores.buildCache.Name(), freed, err)
 	}
 
 	// Run an initial sweep so a bloated daemon is reclaimed promptly at startup
 	// rather than after a full interval.
 	go func() {
-		if err := sweep(); err != nil {
-			logger.Warn("Initial docker runtime prune failed", slog.Any("error", err))
-		}
-
+		sweep()
 		ticker := time.NewTicker(stores.pruneInterval)
 		defer ticker.Stop()
 		for {
@@ -1203,24 +1321,26 @@ func startDockerPrune(ctx context.Context, stores dockerSocketStores, logger *sl
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if err := sweep(); err != nil {
-					logger.Warn("Periodic docker runtime prune failed", slog.Any("error", err))
-				}
+				sweep()
 			}
 		}
 	}()
 }
 
-// startTartCacheCleanup launches one background goroutine per Tart cache
-// sweep target (see tartCacheSweepTargetsFor for the dedup/settings
-// selection), running `tart prune` on a timer through the tart store's own
-// Reclaim(Tier2) — the same reclaim path the disk guard uses (see
-// cachestore.tartStore.Reclaim, which itself still delegates to
-// backend.PruneTartCache — see this task's report for why that backend
-// function was kept rather than retired). Enabled by default; no-op when
-// targets is empty (no Tart scaleset has cleanup enabled).
-func startTartCacheCleanup(ctx context.Context, targets []tartCacheSweepTarget, logger *slog.Logger) {
+// startTartCacheCleanup launches one background goroutine per enabled Tart
+// cache target (see tartCacheStores for the per-home dedup/settings
+// selection — targets includes every configured TART_HOME, so this
+// function filters for enabled itself), running `tart prune` on a timer
+// through the tart store's own Reclaim(Tier2) — the same reclaim path the
+// disk guard uses (see cachestore.tartStore.Reclaim, which itself still
+// delegates to backend.PruneTartCache — see this task's report for why
+// that backend function was kept rather than retired). Enabled by default;
+// no-op for any home where no Tart scaleset has cleanup enabled.
+func startTartCacheCleanup(ctx context.Context, targets map[string]tartCacheSweepTarget, logger *slog.Logger) {
 	for _, s := range targets {
+		if !s.enabled {
+			continue
+		}
 		s := s
 		logger.Info("Tart cache cleanup enabled",
 			slog.String("home", s.home),
@@ -1228,14 +1348,17 @@ func startTartCacheCleanup(ctx context.Context, targets []tartCacheSweepTarget, 
 			slog.Int("space_budget_gb", s.spaceBudgetGB),
 			slog.Duration("interval", s.interval),
 		)
+
+		sweep := func() {
+			freed, err := s.store.Reclaim(ctx, cachestore.Tier2)
+			logReclaimResult(logger, "Tart cache cleanup", s.store.Name(), freed, err)
+		}
+
 		go func() {
 			// Run an initial sweep so users don't wait `interval` for the
 			// first cleanup after startup (especially after a crash leaves
 			// the cache bloated).
-			if _, err := s.store.Reclaim(ctx, cachestore.Tier2); err != nil {
-				logger.Warn("Initial tart cache cleanup failed", slog.Any("error", err))
-			}
-
+			sweep()
 			ticker := time.NewTicker(s.interval)
 			defer ticker.Stop()
 			for {
@@ -1243,9 +1366,7 @@ func startTartCacheCleanup(ctx context.Context, targets []tartCacheSweepTarget, 
 				case <-ctx.Done():
 					return
 				case <-ticker.C:
-					if _, err := s.store.Reclaim(ctx, cachestore.Tier2); err != nil {
-						logger.Warn("Periodic tart cache cleanup failed", slog.Any("error", err))
-					}
+					sweep()
 				}
 			}
 		}()
@@ -1280,12 +1401,12 @@ func startDiskGuard(ctx context.Context, stores []cachestore.CacheStore, cfg con
 	// unparseable threshold or an inverted min/target pair, so these two
 	// parses cannot fail here; handled anyway rather than ignored, matching
 	// this file's error-handling style everywhere else.
-	minThreshold, err := diskguard.ParseThreshold(minFree)
+	minThreshold, err := bytesize.ParseThreshold(minFree)
 	if err != nil {
 		logger.Warn("Disk guard: invalid min-free, guard disabled", slog.Any("error", err))
 		return
 	}
-	targetThreshold, err := diskguard.ParseThreshold(targetFree)
+	targetThreshold, err := bytesize.ParseThreshold(targetFree)
 	if err != nil {
 		logger.Warn("Disk guard: invalid target-free, guard disabled", slog.Any("error", err))
 		return

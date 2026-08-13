@@ -475,6 +475,55 @@ func TestParseCacheVolumes(t *testing.T) {
 		}
 	})
 
+	// Fix round 1: a rewrite regression let a repeated volume name within
+	// one form silently keep only the last entry (cache-volumes =
+	// ["cache:/a", "cache:/b"] used to yield two mounts, then started
+	// yielding one) instead of erroring — and internal/backend/docker.go
+	// mounts exactly what ParseCacheVolumes returns, so the dropped path
+	// never reached the runner container with no warning anywhere. These
+	// two pin that it is now a rejected config, not a silent drop, and the
+	// third pins that the *intentional* same-name case (a long-form entry
+	// overriding a short-form one) still isn't affected by that rejection.
+	t.Run("duplicate volume name within the short form is rejected, not silently dropped", func(t *testing.T) {
+		dc := DockerConfig{CacheVolumes: []string{"cache:/a", "cache:/b"}}
+		mounts, err := dc.ParseCacheVolumes()
+		if err == nil {
+			t.Fatalf("ParseCacheVolumes() = %+v, want an error", mounts)
+		}
+		if !contains(err.Error(), "cache-volumes") || !contains(err.Error(), "duplicate") || !contains(err.Error(), "cache") {
+			t.Errorf("error = %q, want it to name cache-volumes, duplicate, and the volume name %q", err.Error(), "cache")
+		}
+	})
+
+	t.Run("duplicate volume name within the long form is rejected, not silently dropped", func(t *testing.T) {
+		dc := DockerConfig{Cache: []CacheVolumeSpec{
+			{Name: "ccache", Path: "/a"},
+			{Name: "ccache", Path: "/b"},
+		}}
+		mounts, err := dc.ParseCacheVolumes()
+		if err == nil {
+			t.Fatalf("ParseCacheVolumes() = %+v, want an error", mounts)
+		}
+		if !contains(err.Error(), "[[docker.cache]]") || !contains(err.Error(), "duplicate") || !contains(err.Error(), "ccache") {
+			t.Errorf("error = %q, want it to name [[docker.cache]], duplicate, and the volume name %q", err.Error(), "ccache")
+		}
+	})
+
+	t.Run("cross-form same name is an override, not a rejected duplicate", func(t *testing.T) {
+		dc := DockerConfig{
+			CacheVolumes: []string{"ccache:/short-path"},
+			Cache:        []CacheVolumeSpec{{Name: "ccache", Path: "/long-path", Budget: "1GB"}},
+		}
+		mounts, err := dc.ParseCacheVolumes()
+		if err != nil {
+			t.Fatalf("ParseCacheVolumes() unexpected error: %v", err)
+		}
+		want := CacheVolumeMount{Volume: "ccache", Path: "/long-path", BudgetBytes: 1024 * 1024 * 1024}
+		if len(mounts) != 1 || mounts[0] != want {
+			t.Errorf("mounts = %+v, want [%+v] (long form wins, cross-form repeat is not an error)", mounts, want)
+		}
+	})
+
 	t.Run("long form validation errors", func(t *testing.T) {
 		tests := []struct {
 			name string

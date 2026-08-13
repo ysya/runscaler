@@ -270,15 +270,17 @@ func parseCacheVolumeBudget(budget string) (uint64, error) {
 // section E of docs/superpowers/specs/2026-08-13-cache-architecture-design.md).
 //
 // Errors: an empty volume name or path, a non-absolute/non-clean container
-// path, a volume name outside Docker's volume-name pattern, two entries
-// (from either form) resolving to the same container path, a long-form
-// Budget that fails to parse or names a percentage (see
-// parseCacheVolumeBudget), or a long-form OnExceed other than "", "warn",
-// "wipe".
+// path, a volume name outside Docker's volume-name pattern, the same volume
+// name repeated within one form (CacheVolumes or Cache — but not across the
+// two; see above), two entries (from either form) resolving to the same
+// container path, a long-form Budget that fails to parse or names a
+// percentage (see parseCacheVolumeBudget), or a long-form OnExceed other
+// than "", "warn", "wipe".
 func (dc DockerConfig) ParseCacheVolumes() ([]CacheVolumeMount, error) {
 	order := make([]string, 0, len(dc.CacheVolumes)+len(dc.Cache))
 	byName := make(map[string]CacheVolumeMount, len(dc.CacheVolumes)+len(dc.Cache))
 
+	seenShort := make(map[string]bool, len(dc.CacheVolumes))
 	for _, entry := range dc.CacheVolumes {
 		name, path, ok := strings.Cut(entry, ":")
 		if !ok || name == "" || path == "" {
@@ -290,12 +292,22 @@ func (dc DockerConfig) ParseCacheVolumes() ([]CacheVolumeMount, error) {
 		if err := validateContainerPath(path); err != nil {
 			return nil, fmt.Errorf("cache-volumes entry %q: %w", entry, err)
 		}
-		if _, exists := byName[name]; !exists {
-			order = append(order, name)
+		// A repeated name within this same list is rejected rather than
+		// silently resolving to whichever entry is seen last: two different
+		// paths under one volume name almost always means a copy-pasted
+		// entry whose name the operator forgot to change, not a deliberate
+		// request to mount one named volume at two paths. Cross-form
+		// repeats (a long-form entry naming a short-form one) are the
+		// opposite — a deliberate override — and stay unrestricted below.
+		if seenShort[name] {
+			return nil, fmt.Errorf("cache-volumes contains duplicate volume name %q", name)
 		}
+		seenShort[name] = true
+		order = append(order, name)
 		byName[name] = CacheVolumeMount{Volume: name, Path: path}
 	}
 
+	seenLong := make(map[string]bool, len(dc.Cache))
 	for _, spec := range dc.Cache {
 		if spec.Name == "" {
 			return nil, fmt.Errorf("[[docker.cache]] entry has an empty name")
@@ -315,6 +327,11 @@ func (dc DockerConfig) ParseCacheVolumes() ([]CacheVolumeMount, error) {
 		default:
 			return nil, fmt.Errorf("[[docker.cache]] entry %q: on-exceed must be \"warn\" or \"wipe\", got %q", spec.Name, spec.OnExceed)
 		}
+		// Same rationale as seenShort above, scoped to this form only.
+		if seenLong[spec.Name] {
+			return nil, fmt.Errorf("[[docker.cache]] contains duplicate volume name %q", spec.Name)
+		}
+		seenLong[spec.Name] = true
 
 		if _, exists := byName[spec.Name]; !exists {
 			order = append(order, spec.Name)

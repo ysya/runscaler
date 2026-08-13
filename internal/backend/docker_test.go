@@ -2,7 +2,6 @@ package backend
 
 import (
 	"context"
-	"errors"
 	"io"
 	"log/slog"
 	"reflect"
@@ -43,8 +42,12 @@ type mockDocker struct {
 	containers []container.Summary
 	volumes    []volume.Volume
 
-	// Recorded prune calls, in order, for PruneDockerRuntime /
-	// CleanupSharedDocker assertions.
+	// Recorded prune calls, in order, for CleanupSharedDocker assertions.
+	// containersPruneFilters is unused since PruneDockerRuntime's removal
+	// (its reclaim logic now lives in internal/cachestore's
+	// dockerGarbageStore, covered by that package's own tests) — kept for
+	// symmetry with imagesPruneFilters/buildCachePruneOpts, which
+	// CleanupSharedDocker's tests still exercise.
 	containersPruneFilters []dockerclient.Filters
 	imagesPruneFilters     []dockerclient.Filters
 	buildCachePruneOpts    []dockerclient.BuildCachePruneOptions
@@ -732,133 +735,6 @@ func TestDockerBackend_StartRunner_WithoutResourceLimits(t *testing.T) {
 	}
 }
 
-func TestCleanupSharedVolumeStale_NoOpWhenTTLZero(t *testing.T) {
-	md := &mockDocker{}
-	if err := CleanupSharedVolumeStale(context.Background(), md, "img", "runner-shared", "/shared", 0, slog.New(slog.DiscardHandler)); err != nil {
-		t.Fatalf("CleanupSharedVolumeStale() error: %v", err)
-	}
-	if len(md.created) != 0 {
-		t.Errorf("expected no container created, got %d", len(md.created))
-	}
-}
-
-func TestCleanupSharedVolumeStale_RunsHelperContainer(t *testing.T) {
-	md := &mockDocker{}
-	logger := slog.New(slog.DiscardHandler)
-
-	if err := CleanupSharedVolumeStale(context.Background(), md, "runner-img", "runner-shared", "/shared", 7*24*time.Hour, logger); err != nil {
-		t.Fatalf("CleanupSharedVolumeStale() error: %v", err)
-	}
-
-	if len(md.createCalls) != 1 {
-		t.Fatalf("expected 1 create call, got %d", len(md.createCalls))
-	}
-	call := md.createCalls[0]
-
-	// Helper container must use the runner image and run as root for delete perms.
-	if call.config.Image != "runner-img" {
-		t.Errorf("image = %q, want runner-img", call.config.Image)
-	}
-	if call.config.User != "root" {
-		t.Errorf("user = %q, want root", call.config.User)
-	}
-
-	// Mount the shared named volume at the configured path.
-	m := findMountByTarget(call.hostConfig.Mounts, "/shared")
-	if m == nil {
-		t.Fatal("shared volume mount not found")
-	}
-	if m.Type != mount.TypeVolume || m.Source != "runner-shared" {
-		t.Errorf("mount = %+v, want named volume runner-shared", m)
-	}
-
-	// Script must reference the configured TTL in days and the mount path.
-	cmd := strings.Join(call.config.Cmd, " ")
-	if !strings.Contains(cmd, "-mtime +7") {
-		t.Errorf("cmd should use -mtime +7, got: %q", cmd)
-	}
-	if !strings.Contains(cmd, "/shared") {
-		t.Errorf("cmd should reference /shared, got: %q", cmd)
-	}
-
-	// Labels mark the helper for doctor / observability.
-	if call.config.Labels["managed-by"] != "runner" {
-		t.Errorf("missing managed-by label, got: %v", call.config.Labels)
-	}
-	if call.config.Labels["purpose"] != "shared-volume-cleanup" {
-		t.Errorf("missing purpose label, got: %v", call.config.Labels)
-	}
-
-	// Container should be started and removed even on success.
-	if len(md.started) != 1 {
-		t.Errorf("expected 1 start, got %d", len(md.started))
-	}
-	if len(md.removed) != 1 {
-		t.Errorf("expected 1 remove, got %d", len(md.removed))
-	}
-}
-
-func TestCleanupSharedVolumeStale_QuotesMountPath(t *testing.T) {
-	md := &mockDocker{}
-	path := "/shared dir/it's"
-	if err := CleanupSharedVolumeStale(context.Background(), md, "img", "runner-shared", path, 24*time.Hour, slog.New(slog.DiscardHandler)); err != nil {
-		t.Fatal(err)
-	}
-	cmd := strings.Join(md.createCalls[0].config.Cmd, " ")
-	if !strings.Contains(cmd, shellQuote(path)) {
-		t.Fatalf("cleanup command does not shell-quote mount path: %q", cmd)
-	}
-}
-
-func TestCleanupSharedVolumeStale_CustomVolumeName(t *testing.T) {
-	md := &mockDocker{}
-	if err := CleanupSharedVolumeStale(context.Background(), md, "img", "team-a-shared", "/shared", 24*time.Hour, slog.New(slog.DiscardHandler)); err != nil {
-		t.Fatalf("CleanupSharedVolumeStale() error: %v", err)
-	}
-
-	m := findMountByTarget(md.createCalls[0].hostConfig.Mounts, "/shared")
-	if m == nil {
-		t.Fatal("shared volume mount not found")
-	}
-	if m.Type != mount.TypeVolume || m.Source != "team-a-shared" {
-		t.Errorf("mount = %+v, want named volume team-a-shared", m)
-	}
-}
-
-func TestCleanupSharedVolumeStale_RoundsSubDayTTLUp(t *testing.T) {
-	md := &mockDocker{}
-	if err := CleanupSharedVolumeStale(context.Background(), md, "img", "runner-shared", "/shared", 6*time.Hour, slog.New(slog.DiscardHandler)); err != nil {
-		t.Fatalf("CleanupSharedVolumeStale() error: %v", err)
-	}
-	cmd := strings.Join(md.createCalls[0].config.Cmd, " ")
-	if !strings.Contains(cmd, "-mtime +1") {
-		t.Errorf("sub-day TTL should round up to -mtime +1, got: %q", cmd)
-	}
-}
-
-func TestCleanupSharedVolumeStale_PropagatesNonZeroExit(t *testing.T) {
-	md := &mockDocker{waitStatus: 2}
-	err := CleanupSharedVolumeStale(context.Background(), md, "img", "runner-shared", "/shared", time.Hour, slog.New(slog.DiscardHandler))
-	if err == nil {
-		t.Fatal("expected error for non-zero exit, got nil")
-	}
-	if !strings.Contains(err.Error(), "status 2") {
-		t.Errorf("error should mention status 2, got: %v", err)
-	}
-	// Container must still be cleaned up on failure.
-	if len(md.removed) != 1 {
-		t.Errorf("expected container removed after failure, got %d removes", len(md.removed))
-	}
-}
-
-func TestCleanupSharedVolumeStale_PropagatesWaitError(t *testing.T) {
-	md := &mockDocker{waitErr: errors.New("docker died")}
-	err := CleanupSharedVolumeStale(context.Background(), md, "img", "runner-shared", "/shared", time.Hour, slog.New(slog.DiscardHandler))
-	if err == nil || !strings.Contains(err.Error(), "docker died") {
-		t.Errorf("expected wait error to propagate, got: %v", err)
-	}
-}
-
 func TestCleanupOrphanedBuildxBuilders_NoOpWhenMaxAgeZero(t *testing.T) {
 	md := &mockDocker{containers: []container.Summary{
 		{ID: "old", Names: []string{"/buildx_buildkit_builder-abc0"}, Created: 0},
@@ -905,131 +781,6 @@ func TestCleanupOrphanedBuildxBuilders_ReapsDanglingVolumes(t *testing.T) {
 
 	if len(md.volumesRemoved) != 1 || md.volumesRemoved[0] != "buildx_buildkit_builder-gone0_state" {
 		t.Errorf("expected only dangling buildx volume removed, got %v", md.volumesRemoved)
-	}
-}
-
-func TestPruneDockerRuntime(t *testing.T) {
-	const gb = int64(1024 * 1024 * 1024)
-	tests := []struct {
-		name        string
-		ttl         time.Duration
-		cacheMaxAge time.Duration
-		budgetGB    int
-
-		// Expected recorded calls, in order; nil means the prune must not run.
-		wantContainersFilters []dockerclient.Filters
-		wantImagesFilters     []dockerclient.Filters
-		wantCacheOpts         []dockerclient.BuildCachePruneOptions
-	}{
-		{
-			name:        "all portions enabled",
-			ttl:         24 * time.Hour,
-			cacheMaxAge: 7 * 24 * time.Hour,
-			budgetGB:    20,
-			wantContainersFilters: []dockerclient.Filters{
-				make(dockerclient.Filters).Add("until", "24h0m0s"),
-			},
-			wantImagesFilters: []dockerclient.Filters{
-				make(dockerclient.Filters).Add("dangling", "true").Add("until", "24h0m0s"),
-			},
-			wantCacheOpts: []dockerclient.BuildCachePruneOptions{
-				{All: true, Filters: make(dockerclient.Filters).Add("until", "168h0m0s")},
-				{All: true, MaxUsedSpace: 20 * gb},
-			},
-		},
-		{
-			name:        "ttl zero skips containers and images",
-			ttl:         0,
-			cacheMaxAge: 48 * time.Hour,
-			wantCacheOpts: []dockerclient.BuildCachePruneOptions{
-				{All: true, Filters: make(dockerclient.Filters).Add("until", "48h0m0s")},
-			},
-		},
-		{
-			name:        "negative ttl skips containers and images",
-			ttl:         -time.Hour,
-			cacheMaxAge: 48 * time.Hour,
-			wantCacheOpts: []dockerclient.BuildCachePruneOptions{
-				{All: true, Filters: make(dockerclient.Filters).Add("until", "48h0m0s")},
-			},
-		},
-		{
-			name:     "cacheMaxAge zero skips age-based cache prune",
-			ttl:      time.Hour,
-			budgetGB: 5,
-			wantContainersFilters: []dockerclient.Filters{
-				make(dockerclient.Filters).Add("until", "1h0m0s"),
-			},
-			wantImagesFilters: []dockerclient.Filters{
-				make(dockerclient.Filters).Add("dangling", "true").Add("until", "1h0m0s"),
-			},
-			wantCacheOpts: []dockerclient.BuildCachePruneOptions{
-				{All: true, MaxUsedSpace: 5 * gb},
-			},
-		},
-		{
-			name:        "budget zero skips budget prune",
-			ttl:         time.Hour,
-			cacheMaxAge: time.Hour,
-			budgetGB:    0,
-			wantContainersFilters: []dockerclient.Filters{
-				make(dockerclient.Filters).Add("until", "1h0m0s"),
-			},
-			wantImagesFilters: []dockerclient.Filters{
-				make(dockerclient.Filters).Add("dangling", "true").Add("until", "1h0m0s"),
-			},
-			wantCacheOpts: []dockerclient.BuildCachePruneOptions{
-				{All: true, Filters: make(dockerclient.Filters).Add("until", "1h0m0s")},
-			},
-		},
-		{
-			name: "everything disabled prunes nothing",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			md := &mockDocker{}
-
-			err := PruneDockerRuntime(context.Background(), md, tt.ttl, tt.cacheMaxAge, tt.budgetGB, slog.New(slog.DiscardHandler))
-			if err != nil {
-				t.Fatalf("PruneDockerRuntime() error: %v", err)
-			}
-
-			if !reflect.DeepEqual(md.containersPruneFilters, tt.wantContainersFilters) {
-				t.Errorf("containers prune filters = %+v, want %+v", md.containersPruneFilters, tt.wantContainersFilters)
-			}
-			if !reflect.DeepEqual(md.imagesPruneFilters, tt.wantImagesFilters) {
-				t.Errorf("images prune filters = %+v, want %+v", md.imagesPruneFilters, tt.wantImagesFilters)
-			}
-			if !reflect.DeepEqual(md.buildCachePruneOpts, tt.wantCacheOpts) {
-				t.Errorf("build cache prune opts = %+v, want %+v", md.buildCachePruneOpts, tt.wantCacheOpts)
-			}
-		})
-	}
-}
-
-func TestPruneDockerRuntime_ContinuesAfterPruneErrors(t *testing.T) {
-	md := &mockDocker{
-		containersPruneErr: errors.New("containers boom"),
-		imagesPruneErr:     errors.New("images boom"),
-	}
-
-	err := PruneDockerRuntime(context.Background(), md, time.Hour, time.Hour, 1, slog.New(slog.DiscardHandler))
-	if err == nil {
-		t.Fatal("expected joined error, got nil")
-	}
-	// Both failures surface in the joined error...
-	if !strings.Contains(err.Error(), "containers boom") || !strings.Contains(err.Error(), "images boom") {
-		t.Errorf("error should include both prune failures, got: %v", err)
-	}
-	// ...and the failures did not stop the later prunes: the images prune ran
-	// after the containers failure, and both build cache prunes still ran.
-	if len(md.imagesPruneFilters) != 1 {
-		t.Errorf("expected images prune to run after containers failure, got %d calls", len(md.imagesPruneFilters))
-	}
-	if len(md.buildCachePruneOpts) != 2 {
-		t.Errorf("expected both build cache prunes to run, got %d calls", len(md.buildCachePruneOpts))
 	}
 }
 

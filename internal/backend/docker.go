@@ -2,7 +2,6 @@ package backend
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -319,92 +318,6 @@ func cleanupSharedDockerWith(ctx context.Context, client DockerAPI, volumeNames 
 	}
 }
 
-// PruneDockerRuntime reclaims disk on the shared daemon while runner is up:
-// stopped containers and dangling images older than ttl, build cache entries
-// not used within cacheMaxAge, and — when cacheBudgetGB > 0 — build cache
-// beyond the budget (least-recently-used entries are evicted down to the
-// cap). With DooD, job-created garbage lands directly on the host daemon, so
-// an exit-time prune alone never reclaims disk on a long-running process.
-// Like buildx cleanup, this assumes the daemon is dedicated to runners:
-// matching objects are treated as garbage regardless of what created them.
-//
-// ttl <= 0 skips the container/image prunes and cacheMaxAge <= 0 skips the
-// age-based cache prune. A failed prune does not stop the remaining ones;
-// the errors are joined and returned.
-func PruneDockerRuntime(ctx context.Context, client DockerAPI, ttl, cacheMaxAge time.Duration, cacheBudgetGB int, logger *slog.Logger) error {
-	timeoutCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
-	defer cancel()
-
-	var (
-		errs              []error
-		containersRemoved int
-		imagesRemoved     int
-		reclaimed         uint64
-	)
-
-	if ttl > 0 {
-		// The daemon parses Go duration strings for `until` and prunes
-		// objects created before now-ttl (see getUntilFromPruneFilters
-		// in moby's daemon/prune.go).
-		untilFilter := make(dockerclient.Filters).Add("until", ttl.String())
-		if result, err := client.ContainerPrune(timeoutCtx, dockerclient.ContainerPruneOptions{Filters: untilFilter}); err != nil {
-			errs = append(errs, fmt.Errorf("prune stopped containers: %w", err))
-		} else {
-			containersRemoved = len(result.Report.ContainersDeleted)
-			reclaimed += result.Report.SpaceReclaimed
-		}
-
-		imageFilters := make(dockerclient.Filters).Add("dangling", "true").Add("until", ttl.String())
-		if result, err := client.ImagePrune(timeoutCtx, dockerclient.ImagePruneOptions{Filters: imageFilters}); err != nil {
-			errs = append(errs, fmt.Errorf("prune dangling images: %w", err))
-		} else {
-			imagesRemoved = len(result.Report.ImagesDeleted)
-			reclaimed += result.Report.SpaceReclaimed
-		}
-	}
-
-	if cacheMaxAge > 0 {
-		// BuildKit maps `until` to KeepDuration: cache entries not used
-		// within the window are removed (`unused-for` is its deprecated
-		// synonym; v28+ daemons validate both, `until` is canonical).
-		opts := dockerclient.BuildCachePruneOptions{
-			All:     true,
-			Filters: make(dockerclient.Filters).Add("until", cacheMaxAge.String()),
-		}
-		if result, err := client.BuildCachePrune(timeoutCtx, opts); err != nil {
-			errs = append(errs, fmt.Errorf("prune build cache by age: %w", err))
-		} else {
-			reclaimed += result.Report.SpaceReclaimed
-		}
-	}
-
-	if cacheBudgetGB > 0 {
-		// MaxUsedSpace is BuildKit's hard cache cap. ReservedSpace means the
-		// opposite (bytes protected from pruning) and must not be used here.
-		opts := dockerclient.BuildCachePruneOptions{
-			All:          true,
-			MaxUsedSpace: int64(cacheBudgetGB) * 1024 * 1024 * 1024,
-		}
-		if result, err := client.BuildCachePrune(timeoutCtx, opts); err != nil {
-			errs = append(errs, fmt.Errorf("prune build cache to budget: %w", err))
-		} else {
-			reclaimed += result.Report.SpaceReclaimed
-		}
-	}
-
-	summary := []any{
-		slog.Int("containers", containersRemoved),
-		slog.Int("images", imagesRemoved),
-		slog.String("reclaimed", FormatBytes(reclaimed)),
-	}
-	if containersRemoved > 0 || imagesRemoved > 0 || reclaimed > 0 {
-		logger.Info("Docker runtime prune reclaimed disk", summary...)
-	} else {
-		logger.Debug("Docker runtime prune found nothing to reclaim", summary...)
-	}
-	return errors.Join(errs...)
-}
-
 // buildxBuilderPrefix is the name prefix Docker gives to BuildKit builder
 // containers and their state volumes (e.g. buildx_buildkit_builder-<uuid>0).
 const buildxBuilderPrefix = "buildx_buildkit_"
@@ -529,102 +442,6 @@ func socketGroupID(path string) (int, error) {
 		return 0, fmt.Errorf("unsupported platform")
 	}
 	return int(stat.Gid), nil
-}
-
-// CleanupSharedVolumeStale runs an ephemeral helper container that mounts the
-// named shared volume at mountPath and deletes files whose mtime is older
-// than ttl. Empty directories left behind are also pruned. The helper image
-// must already be available locally; the runner image is reused so no
-// additional pull is required. A no-op when ttl <= 0.
-func CleanupSharedVolumeStale(ctx context.Context, client DockerAPI, helperImage, volumeName, mountPath string, ttl time.Duration, logger *slog.Logger) error {
-	if ttl <= 0 {
-		return nil
-	}
-	if helperImage == "" {
-		return fmt.Errorf("helper image is required for shared-volume cleanup")
-	}
-	if volumeName == "" {
-		return fmt.Errorf("volume name is required for shared-volume cleanup")
-	}
-	if mountPath == "" {
-		return fmt.Errorf("mount path is required for shared-volume cleanup")
-	}
-
-	// `find -mtime` works in 24h units; round up so sub-day TTLs still sweep.
-	days := int(ttl / (24 * time.Hour))
-	if days < 1 {
-		days = 1
-	}
-
-	// Two-phase delete: stale files/symlinks first, then any newly empty dirs.
-	// Errors from inside find (e.g. file vanished mid-walk) are swallowed via
-	// `|| true` so the container always exits 0.
-	script := fmt.Sprintf(
-		"set -e; "+
-			"find %[1]s -mindepth 1 -mtime +%[2]d \\( -type f -o -type l \\) -print -delete 2>/dev/null | wc -l; "+
-			"find %[1]s -mindepth 1 -type d -empty -delete 2>/dev/null || true",
-		shellQuote(mountPath), days,
-	)
-
-	timeoutCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
-	defer cancel()
-
-	name := fmt.Sprintf("runner-cleanup-%d", time.Now().UnixNano())
-	c, err := client.ContainerCreate(timeoutCtx, dockerclient.ContainerCreateOptions{
-		Config: &container.Config{
-			Image: helperImage,
-			User:  "root",
-			Cmd:   []string{"sh", "-c", script},
-			Labels: map[string]string{
-				"managed-by": "runner",
-				"purpose":    "shared-volume-cleanup",
-			},
-		},
-		HostConfig: &container.HostConfig{
-			Mounts: []mount.Mount{{
-				Type:   mount.TypeVolume,
-				Source: volumeName,
-				Target: mountPath,
-			}},
-		},
-		Name: name,
-	})
-	if err != nil {
-		return fmt.Errorf("create cleanup container: %w", err)
-	}
-
-	// Always remove the container, even if start/wait fails.
-	defer func() {
-		_, _ = client.ContainerRemove(context.WithoutCancel(timeoutCtx), c.ID, dockerclient.ContainerRemoveOptions{Force: true})
-	}()
-
-	if _, err := client.ContainerStart(timeoutCtx, c.ID, dockerclient.ContainerStartOptions{}); err != nil {
-		return fmt.Errorf("start cleanup container: %w", err)
-	}
-
-	wait := client.ContainerWait(timeoutCtx, c.ID, dockerclient.ContainerWaitOptions{Condition: container.WaitConditionNotRunning})
-	select {
-	case err := <-wait.Error:
-		if err != nil {
-			return fmt.Errorf("wait cleanup container: %w", err)
-		}
-	case status := <-wait.Result:
-		if status.Error != nil {
-			return fmt.Errorf("cleanup container error: %s", status.Error.Message)
-		}
-		if status.StatusCode != 0 {
-			return fmt.Errorf("cleanup container exited with status %d", status.StatusCode)
-		}
-	case <-timeoutCtx.Done():
-		return fmt.Errorf("cleanup timed out: %w", timeoutCtx.Err())
-	}
-
-	logger.Info("Shared volume cleanup completed",
-		slog.Int("ttl_days", days),
-		slog.String("volume", volumeName),
-		slog.String("path", mountPath),
-	)
-	return nil
 }
 
 // FormatBytes formats a byte count into a human-readable string.

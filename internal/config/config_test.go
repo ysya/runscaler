@@ -503,3 +503,93 @@ func TestIsUpdateDisabled(t *testing.T) {
 		})
 	}
 }
+
+func TestDiskConfigValidate(t *testing.T) {
+	tests := []struct {
+		name    string
+		disk    DiskConfig
+		wantErr string
+	}{
+		{name: "defaults are valid", disk: DiskConfig{}},
+		{name: "min >= target rejected",
+			disk:    DiskConfig{MinFree: "30%", TargetFree: "20%"},
+			wantErr: "min-free must be less than target-free"},
+		{name: "equal rejected",
+			disk:    DiskConfig{MinFree: "20%", TargetFree: "20%"},
+			wantErr: "min-free must be less than target-free"},
+		{name: "bad threshold rejected",
+			disk:    DiskConfig{MinFree: "lots"},
+			wantErr: "invalid threshold"},
+		{name: "bad target threshold rejected",
+			disk:    DiskConfig{TargetFree: "lots"},
+			wantErr: "invalid threshold"},
+		{name: "max-tier out of range",
+			disk:    DiskConfig{MaxTier: 9},
+			wantErr: "max-tier must be between 1 and 4"},
+		{name: "max-tier negative rejected",
+			disk:    DiskConfig{MaxTier: -1},
+			wantErr: "max-tier must be between 1 and 4"},
+		{name: "max-tier 1 through 4 all valid",
+			disk: DiskConfig{MaxTier: 1}},
+		{name: "mixed units rejected",
+			disk:    DiskConfig{MinFree: "10%", TargetFree: "20GB"},
+			wantErr: "must both be percentages or both be sizes"},
+		{name: "byte thresholds compared correctly",
+			disk: DiskConfig{MinFree: "10GB", TargetFree: "20GB"}},
+		{name: "byte thresholds min >= target rejected",
+			disk:    DiskConfig{MinFree: "2048MB", TargetFree: "1GB"}, // 2048MB == 2GB > 1GB
+			wantErr: "min-free must be less than target-free"},
+		{name: "only min-free overridden still compared against default target",
+			disk:    DiskConfig{MinFree: "25%"}, // default target-free is 20%
+			wantErr: "min-free must be less than target-free"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.disk.Validate()
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Errorf("Validate() unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil || !contains(err.Error(), tt.wantErr) {
+				t.Errorf("Validate() = %v, want error containing %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestIsDiskGuardEnabled(t *testing.T) {
+	tr, fa := true, false
+	tests := []struct {
+		name string
+		set  *bool
+		want bool
+	}{
+		{"unset inherits default", nil, DefaultDiskGuard},
+		{"explicit true", &tr, true},
+		{"explicit false disables the guard", &fa, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := Config{Disk: DiskConfig{Guard: tt.set}}
+			if got := c.IsDiskGuardEnabled(); got != tt.want {
+				t.Errorf("IsDiskGuardEnabled() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestValidateGlobal_RejectsInvalidDisk pins down that ValidateGlobal — the
+// single call site used by both `runner validate` and `runner run` — fails
+// on a bad [disk] section rather than merely warning (see DiskConfig's
+// Validate doc comment for why an inverted MinFree/TargetFree pair is more
+// than cosmetic: it can underflow the guard's shortfall calculation).
+func TestValidateGlobal_RejectsInvalidDisk(t *testing.T) {
+	cfg := Config{LogLevel: "info", LogFormat: "text", HealthPort: 8080,
+		Disk: DiskConfig{MinFree: "20%", TargetFree: "10%"}}
+	err := cfg.ValidateGlobal()
+	if err == nil || !contains(err.Error(), "min-free must be less than target-free") {
+		t.Errorf("ValidateGlobal() = %v, want min-free/target-free error", err)
+	}
+}

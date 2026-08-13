@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -37,6 +38,11 @@ type Config struct {
 	// Default values for scale sets + single-mode fields.
 	// Squashed so TOML keys (url, name, backend, etc.) stay at the top level.
 	Defaults ScaleSetConfig `mapstructure:",squash"`
+
+	// Disk configures the periodic disk-pressure guard (see DiskConfig).
+	// Global like the fields above: one guard watches every scale set's
+	// stores host-wide, grouped by filesystem rather than by scale set.
+	Disk DiskConfig `mapstructure:"disk"`
 
 	// Multi-scaleset mode: entries as produced by Load, with map-level
 	// inheritance from the top-level defaults already applied.
@@ -432,7 +438,177 @@ func (c *Config) ValidateGlobal() error {
 	if c.HealthPort < 0 || c.HealthPort > 65535 {
 		return fmt.Errorf("health-port must be between 0 and 65535")
 	}
+	if err := c.Disk.Validate(); err != nil {
+		return fmt.Errorf("disk: %w", err)
+	}
 	return nil
+}
+
+// DiskConfig configures the periodic disk-pressure guard (internal/diskguard):
+// the free-space thresholds that trigger and bound reclamation, how often it
+// sweeps, and the highest cachestore.Tier it may reach. See package
+// diskguard's Config and Guard for what these drive at runtime.
+type DiskConfig struct {
+	// Guard enables the periodic disk guard. Pointer: nil = inherit default
+	// (true) — see DefaultDiskGuard's doc comment for why leaving it on is
+	// safe even though it deletes data.
+	Guard *bool `mapstructure:"guard"`
+	// MinFree is the free-space threshold that triggers reclamation: a
+	// percentage like "10%" (of the filesystem's total capacity) or an
+	// absolute size like "20GB". Defaults to DefaultDiskMinFree when unset.
+	MinFree string `mapstructure:"min-free"`
+	// TargetFree is the free-space level reclamation aims to restore before
+	// stopping; must be strictly greater than MinFree (see Validate).
+	// Defaults to DefaultDiskTargetFree when unset.
+	TargetFree string `mapstructure:"target-free"`
+	// Interval is the period between guard sweeps. <= 0 (unset) resolves to
+	// DefaultDiskGuardInterval at the call site, matching every other sweep
+	// interval in this package (e.g. PruneInterval).
+	Interval time.Duration `mapstructure:"interval"`
+	// MaxTier is the highest cachestore.Tier the guard may reclaim at while
+	// chasing TargetFree; must be between 1 and 4 (see Validate). 0 (unset)
+	// resolves to DefaultDiskMaxTier.
+	MaxTier int `mapstructure:"max-tier"`
+}
+
+// IsDiskGuardEnabled reports whether the periodic disk guard is enabled
+// (default true unless explicitly disabled).
+func (c *Config) IsDiskGuardEnabled() bool {
+	if c.Disk.Guard != nil {
+		return *c.Disk.Guard
+	}
+	return DefaultDiskGuard
+}
+
+// Validate checks that the disk guard's thresholds are parseable and that
+// MinFree is strictly less than TargetFree, and that MaxTier is a real tier
+// (1-4). Both matter more than they look: MinFree >= TargetFree makes every
+// sweep both trigger immediately and never satisfy its own target, and
+// MaxTier outside 1-4 (in particular the zero value) silently disables the
+// tier ladder — see diskguard.Guard.sweepFilesystem's target/free
+// subtraction, which assumes the ladder ran at least one tier.
+//
+// A zero-value DiskConfig (the operator never touched [disk]) must pass:
+// defaults are substituted before parsing, not compared as raw zero values.
+func (dc DiskConfig) Validate() error {
+	minFree := dc.MinFree
+	if minFree == "" {
+		minFree = DefaultDiskMinFree
+	}
+	targetFree := dc.TargetFree
+	if targetFree == "" {
+		targetFree = DefaultDiskTargetFree
+	}
+
+	min, err := parseDiskThreshold(minFree)
+	if err != nil {
+		return fmt.Errorf("min-free: %w", err)
+	}
+	target, err := parseDiskThreshold(targetFree)
+	if err != nil {
+		return fmt.Errorf("target-free: %w", err)
+	}
+	less, comparable := min.lessThan(target)
+	if !comparable {
+		return fmt.Errorf("min-free and target-free must both be percentages or both be sizes to compare")
+	}
+	if !less {
+		return fmt.Errorf("min-free must be less than target-free")
+	}
+
+	maxTier := dc.MaxTier
+	if maxTier == 0 {
+		maxTier = DefaultDiskMaxTier
+	}
+	if maxTier < 1 || maxTier > 4 {
+		return fmt.Errorf("max-tier must be between 1 and 4")
+	}
+
+	return nil
+}
+
+// diskThreshold is a parsed [disk] free-space threshold: either a
+// percentage (0-100) of total filesystem capacity or an absolute byte
+// count — the same two shapes diskguard.Threshold models.
+//
+// This is a deliberate duplication of diskguard.ParseThreshold's parsing,
+// not a shared type: package diskguard transitively imports this package
+// (diskguard -> cachestore -> backend -> config, all confirmed via `go list
+// -deps`), so importing diskguard from here would be a compile-time import
+// cycle. cachestore/volume.go's shellQuote sets the same precedent — a
+// small helper duplicated across this exact kind of package boundary rather
+// than exported for one caller.
+type diskThreshold struct {
+	percent   float64
+	bytes     uint64
+	isPercent bool
+}
+
+// lessThan reports whether dt < other, and whether the two are even
+// comparable (both percentages or both absolute sizes — a percentage of one
+// filesystem's capacity and an absolute byte count are not comparable
+// without knowing that filesystem's size, which Validate does not have).
+func (dt diskThreshold) lessThan(other diskThreshold) (less, comparable bool) {
+	if dt.isPercent != other.isPercent {
+		return false, false
+	}
+	if dt.isPercent {
+		return dt.percent < other.percent, true
+	}
+	return dt.bytes < other.bytes, true
+}
+
+// diskByteUnits mirrors diskguard.Threshold's byte-unit table exactly
+// (longest-suffix-first so "GB" is tried before the bare "B" suffix it
+// would otherwise also match).
+var diskByteUnits = []struct {
+	suffix     string
+	multiplier uint64
+}{
+	{"TB", 1024 * 1024 * 1024 * 1024},
+	{"GB", 1024 * 1024 * 1024},
+	{"MB", 1024 * 1024},
+	{"KB", 1024},
+	{"B", 1},
+}
+
+// parseDiskThreshold parses s the same way diskguard.ParseThreshold does: a
+// percentage like "10%" (0-100 inclusive) or an absolute size like "20GB"
+// (binary units, case-insensitive: B/KB/MB/GB/TB).
+func parseDiskThreshold(s string) (diskThreshold, error) {
+	if rest, ok := strings.CutSuffix(s, "%"); ok {
+		pct, err := strconv.ParseFloat(rest, 64)
+		// Negation of the in-range condition, not `pct < 0 || pct > 100`:
+		// every ordered comparison with NaN is false, so the direct form
+		// would let ParseFloat's accepted "NaN"/"Inf" spellings silently
+		// pass through as a threshold instead of failing validation —
+		// mirrors diskguard.ParseThreshold's identical guard exactly.
+		if err != nil || !(pct >= 0 && pct <= 100) {
+			return diskThreshold{}, invalidDiskThresholdError(s)
+		}
+		return diskThreshold{percent: pct, isPercent: true}, nil
+	}
+
+	upper := strings.ToUpper(s)
+	for _, u := range diskByteUnits {
+		numPart, ok := strings.CutSuffix(upper, u.suffix)
+		if !ok || numPart == "" {
+			continue
+		}
+		n, err := strconv.ParseUint(numPart, 10, 64)
+		if err != nil {
+			continue
+		}
+		return diskThreshold{bytes: n * u.multiplier}, nil
+	}
+
+	return diskThreshold{}, invalidDiskThresholdError(s)
+}
+
+// invalidDiskThresholdError reports the legal formats so a misconfigured
+// value is actionable without reading source.
+func invalidDiskThresholdError(s string) error {
+	return fmt.Errorf("invalid threshold %q: want a percentage like \"10%%\" or a size like \"20GB\"", s)
 }
 
 // --- Standalone utility functions (not struct methods) ---

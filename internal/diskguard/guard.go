@@ -1,3 +1,11 @@
+// Package diskguard reclaims disk space from cachestore.CacheStore
+// instances under pressure: it groups stores by the filesystem their Path()
+// resolves to, reads point-in-time capacity via StatFor, and walks
+// cachestore's tier ladder (or a store's own configured budget) filesystem
+// by filesystem until TargetFree is met or every allowed tier has run.
+// Threshold parsing (percentages and absolute sizes) lives in the leaf
+// package internal/bytesize, imported by both this package and
+// internal/config.
 package diskguard
 
 import (
@@ -6,6 +14,7 @@ import (
 	"log/slog"
 	"slices"
 
+	"github.com/ysya/runscaler/internal/bytesize"
 	"github.com/ysya/runscaler/internal/cachestore"
 )
 
@@ -14,7 +23,7 @@ import (
 // highest tier it is allowed to reach while doing so.
 type Config struct {
 	Enabled             bool
-	MinFree, TargetFree Threshold
+	MinFree, TargetFree bytesize.Threshold
 	MaxTier             cachestore.Tier
 }
 
@@ -25,6 +34,18 @@ type Config struct {
 // MaxTier), and a disk-pressure tier ladder (Steps 1-4 — runs only when a
 // filesystem's free space has dropped below MinFree, and never reclaims
 // past MaxTier).
+//
+// Neither mechanism consults a store's Enabled() (revised 2026-08-14 —
+// see docs/superpowers/specs/2026-08-13-cache-architecture-design.md,
+// "各 store 的啟用開關只約束例行清理"). Enabled() means "run this store's own
+// routine periodic cleanup", not "never touch this even under disk
+// pressure" — the periodic sweepers in cmd/runner still gate on it, but the
+// guard reclaims from every configured store regardless, because refusing
+// to touch a store the operator merely left off its routine schedule would
+// leave the guard unable to reclaim anything on a stock config (prune and
+// buildx-cleanup default off since v0.4). A host whose disk this guard must
+// never touch at all should set `[disk] guard = false`, not rely on a
+// per-store Enabled() it was never designed to satisfy.
 type Guard struct {
 	cfg    Config
 	stores []cachestore.CacheStore
@@ -103,6 +124,13 @@ func (g *Guard) Sweep(ctx context.Context) error {
 // it can stop the instant TargetFree is met — it never trusts stores' own
 // freed-bytes reports to decide that, since several stores legitimately
 // report 0 while genuinely freeing space (see e.g. buildxStore.Reclaim).
+//
+// Every store in scope for a tier is reclaimed regardless of Enabled() —
+// see Guard's doc comment for why the guard does not treat Enabled() as an
+// opt-out the way the periodic sweepers do. TiersFor(s.Kind()) is still the
+// one gate that always applies: it is a data-safety rule (what tier a kind
+// of data may ever be reclaimed at), not an operator preference, so it is
+// not something Enabled() ever controlled in the first place.
 func (g *Guard) sweepFilesystem(ctx context.Context, grp filesystemGroup) {
 	st := grp.stat
 	if st.FreeBytes >= g.cfg.MinFree.BytesOf(st.TotalBytes) {
@@ -110,21 +138,10 @@ func (g *Guard) sweepFilesystem(ctx context.Context, grp filesystemGroup) {
 	}
 	targetBytes := g.cfg.TargetFree.BytesOf(st.TotalBytes)
 
-	// Names of stores this filesystem needed but could not touch because
-	// the operator disabled them — reported in the shortfall warning below
-	// if the target is never met, so the warning is actionable.
-	disabledSkipped := make(map[string]struct{})
-
 	for tier := cachestore.Tier1; tier <= g.cfg.MaxTier; tier++ {
 		for _, s := range grp.stores {
 			if !slices.Contains(cachestore.TiersFor(s.Kind()), tier) {
 				continue // this store has nothing to give at this tier
-			}
-			if !s.Enabled() {
-				// Enabled() == false is a deliberate operator choice; the
-				// guard must not override it.
-				disabledSkipped[s.Name()] = struct{}{}
-				continue
 			}
 			if _, err := s.Reclaim(ctx, tier); err != nil {
 				g.logger.Warn("Disk guard: reclaim failed",
@@ -144,15 +161,17 @@ func (g *Guard) sweepFilesystem(ctx context.Context, grp filesystemGroup) {
 		}
 	}
 
-	g.warnShortfall(grp.path, st, targetBytes, disabledSkipped)
+	g.warnShortfall(grp.path, st, targetBytes)
 }
 
 // warnShortfall reports that a filesystem is still short of TargetFree
-// after reclaiming through every tier up to MaxTier, and — if any store
-// this filesystem depends on was skipped for being disabled — names it and
-// why, so the operator knows what re-enabling would buy back.
-func (g *Guard) warnShortfall(path string, st FSStat, targetBytes uint64, disabledSkipped map[string]struct{}) {
-	attrs := []any{
+// after reclaiming through every tier up to MaxTier — every store in scope
+// was already reclaimed from regardless of Enabled() (see Guard's doc
+// comment), so raising max-tier or investigating what is actually filling
+// the disk are the only remaining options, and this warning says by how
+// much.
+func (g *Guard) warnShortfall(path string, st FSStat, targetBytes uint64) {
+	g.logger.Warn("Disk guard: reached max-tier without meeting target-free",
 		slog.String("path", path),
 		slog.Uint64("free_bytes", st.FreeBytes),
 		slog.Uint64("target_bytes", targetBytes),
@@ -160,34 +179,21 @@ func (g *Guard) warnShortfall(path string, st FSStat, targetBytes uint64, disabl
 		// only reaches this call when the loop above exits without ever
 		// meeting the target, so this subtraction cannot underflow.
 		slog.Uint64("shortfall_bytes", targetBytes-st.FreeBytes),
-	}
-	if len(disabledSkipped) > 0 {
-		names := make([]string, 0, len(disabledSkipped))
-		for name := range disabledSkipped {
-			names = append(names, name)
-		}
-		slices.Sort(names)
-		attrs = append(attrs,
-			slog.Any("disabled_stores", names),
-			slog.String("disabled_reason", "disabled by operator config, the guard will not reclaim from it"))
-	}
-	g.logger.Warn("Disk guard: reached max-tier without meeting target-free", attrs...)
+	)
 }
 
-// enforceBudgets checks every enabled store's own configured budget and
-// acts on it, independent of disk pressure and unbounded by MaxTier: it is
-// the store's own retention policy taking effect, not the guard's
-// disk-pressure escalation (that is sweepFilesystem, above). "Unbounded by
-// MaxTier" only means the tier ceiling does not apply here — the wipe path
-// below is still gated by TiersFor, the same kind-based safety rule every
-// tier-ladder Reclaim call goes through. It calls Measure, so — unlike the
-// rest of Sweep — it is never run from NeedsReclaim, which must stay on
-// the cheap statfs-only path.
+// enforceBudgets checks every store's own configured budget and acts on
+// it, independent of disk pressure, unbounded by MaxTier, and regardless of
+// Enabled() (see Guard's doc comment): it is the store's own retention
+// policy taking effect, not the guard's disk-pressure escalation (that is
+// sweepFilesystem, above). "Unbounded by MaxTier" only means the tier
+// ceiling does not apply here — the wipe path below is still gated by
+// TiersFor, the same kind-based safety rule every tier-ladder Reclaim call
+// goes through. It calls Measure, so — unlike the rest of Sweep — it is
+// never run from NeedsReclaim, which must stay on the cheap statfs-only
+// path.
 func (g *Guard) enforceBudgets(ctx context.Context) {
 	for _, s := range g.stores {
-		if !s.Enabled() {
-			continue
-		}
 		budget, onExceed := s.Budget()
 		if budget == 0 {
 			continue // no budget configured for this store

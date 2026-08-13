@@ -93,12 +93,11 @@ func (s *tartStore) Measure(ctx context.Context) (uint64, error) {
 
 // Reclaim trims the Tart cache by age and/or budget at Tier2 via the
 // existing backend.PruneTartCache; Tier4 is deliberately never a wholesale
-// wipe, and every other tier is a no-op. A disabled store reclaims nothing.
+// wipe, and every other tier is a no-op. Enabled() is deliberately NOT
+// checked here — see dockerGarbageStore.Reclaim's identical note and
+// store.go's Enabled doc comment (revised 2026-08-14): the disk guard
+// reaches this method regardless of Enabled(), by design.
 func (s *tartStore) Reclaim(ctx context.Context, tier Tier) (uint64, error) {
-	if !s.cfg.Enabled {
-		return 0, nil
-	}
-
 	switch tier {
 	case Tier2:
 		if err := backend.PruneTartCache(ctx, s.cfg.Home, s.cfg.MaxAge, s.cfg.BudgetGB, slog.Default()); err != nil {

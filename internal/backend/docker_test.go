@@ -43,14 +43,8 @@ type mockDocker struct {
 	volumes    []volume.Volume
 
 	// Recorded prune calls, in order, for CleanupSharedDocker assertions.
-	// containersPruneFilters is unused since PruneDockerRuntime's removal
-	// (its reclaim logic now lives in internal/cachestore's
-	// dockerGarbageStore, covered by that package's own tests) — kept for
-	// symmetry with imagesPruneFilters/buildCachePruneOpts, which
-	// CleanupSharedDocker's tests still exercise.
-	containersPruneFilters []dockerclient.Filters
-	imagesPruneFilters     []dockerclient.Filters
-	buildCachePruneOpts    []dockerclient.BuildCachePruneOptions
+	imagesPruneFilters  []dockerclient.Filters
+	buildCachePruneOpts []dockerclient.BuildCachePruneOptions
 
 	// Optional error injection for the prune calls.
 	containersPruneErr error
@@ -79,8 +73,7 @@ func (m *mockDocker) ContainerRemove(_ context.Context, id string, _ dockerclien
 	return dockerclient.ContainerRemoveResult{}, nil
 }
 
-func (m *mockDocker) ContainerPrune(_ context.Context, options dockerclient.ContainerPruneOptions) (dockerclient.ContainerPruneResult, error) {
-	m.containersPruneFilters = append(m.containersPruneFilters, options.Filters)
+func (m *mockDocker) ContainerPrune(_ context.Context, _ dockerclient.ContainerPruneOptions) (dockerclient.ContainerPruneResult, error) {
 	if m.containersPruneErr != nil {
 		return dockerclient.ContainerPruneResult{}, m.containersPruneErr
 	}

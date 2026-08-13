@@ -17,14 +17,28 @@ import (
 // config structs, not how sets selects them.
 
 func TestDockerPruneSettingsFor(t *testing.T) {
-	t.Run("no scaleset enabled yields disabled configs and zero interval", func(t *testing.T) {
+	// 2026-08-14 revision: Enabled tracks only whether cmd/runner's own
+	// periodic sweeper should run — PruneTTL/MaxAge/interval are still
+	// populated with real (defaulted) values regardless, because the disk
+	// guard reclaims through these stores whether or not any scaleset
+	// enabled the periodic sweep (see
+	// docs/superpowers/specs/2026-08-13-cache-architecture-design.md,
+	// "各 store 的啟用開關只約束例行清理"). A bare zero-value PruneTTL would leave
+	// the guard just as unable to reclaim as respecting Enabled() did.
+	t.Run("no scaleset enabled yields disabled=false but real defaulted settings", func(t *testing.T) {
 		sets := []config.ScaleSetConfig{{ScaleSetName: "a"}}
 		garbage, buildCache, interval := dockerPruneSettingsFor(sets)
 		if garbage.Enabled || buildCache.Enabled {
-			t.Errorf("garbage.Enabled=%v buildCache.Enabled=%v, want both false", garbage.Enabled, buildCache.Enabled)
+			t.Errorf("garbage.Enabled=%v buildCache.Enabled=%v, want both false — the periodic sweeper must still stay off", garbage.Enabled, buildCache.Enabled)
 		}
-		if interval != 0 {
-			t.Errorf("interval = %v, want 0", interval)
+		if garbage.PruneTTL != config.DefaultDockerPruneTTL {
+			t.Errorf("PruneTTL = %v, want default %v even though nothing is enabled", garbage.PruneTTL, config.DefaultDockerPruneTTL)
+		}
+		if buildCache.MaxAge != config.DefaultDockerBuildCacheMaxAge {
+			t.Errorf("build cache max age = %v, want default %v even though nothing is enabled", buildCache.MaxAge, config.DefaultDockerBuildCacheMaxAge)
+		}
+		if interval != config.DefaultDockerPruneInterval {
+			t.Errorf("interval = %v, want default %v", interval, config.DefaultDockerPruneInterval)
 		}
 	})
 
@@ -85,10 +99,19 @@ func TestDockerPruneSettingsFor(t *testing.T) {
 }
 
 func TestBuildxConfigFor(t *testing.T) {
-	t.Run("disabled by default", func(t *testing.T) {
+	// See dockerPruneSettingsFor's identical 2026-08-14 revision note: the
+	// periodic sweeper stays off (Enabled=false), but MaxAge/interval still
+	// get real defaults so the disk guard has something to reclaim by.
+	t.Run("disabled by default but real defaulted settings", func(t *testing.T) {
 		cfg, interval := buildxConfigFor([]config.ScaleSetConfig{{}}, "/var/lib/docker")
-		if cfg.Enabled || interval != 0 {
-			t.Errorf("cfg=%+v interval=%v, want disabled/0 (buildx-cleanup defaults off)", cfg, interval)
+		if cfg.Enabled {
+			t.Errorf("cfg.Enabled = true, want false — the periodic sweeper must stay off (buildx-cleanup defaults off)")
+		}
+		if cfg.MaxAge != config.DefaultBuildxCleanupTTL {
+			t.Errorf("cfg.MaxAge = %v, want default %v even though nothing is enabled", cfg.MaxAge, config.DefaultBuildxCleanupTTL)
+		}
+		if interval != config.DefaultBuildxCleanupInterval {
+			t.Errorf("interval = %v, want default %v even though nothing is enabled", interval, config.DefaultBuildxCleanupInterval)
 		}
 		if cfg.RootDir != "/var/lib/docker" {
 			t.Errorf("RootDir = %q, want passed through even when disabled", cfg.RootDir)
@@ -154,13 +177,28 @@ func TestSharedVolumeSweepTargetsFor(t *testing.T) {
 	})
 }
 
-func TestTartCacheSweepTargetsFor(t *testing.T) {
-	t.Run("disabled scaleset yields no target for its home", func(t *testing.T) {
+func TestTartCacheStores(t *testing.T) {
+	// 2026-08-14 revision: every configured TART_HOME gets a target now —
+	// even one where cache-cleanup is disabled everywhere it's shared —
+	// because the disk guard reclaims through it regardless of enabled;
+	// only the periodic sweeper (via target.enabled) skips it. See
+	// tartCacheStores' doc comment.
+	t.Run("disabled scaleset still yields a target, marked not enabled, with defaulted settings", func(t *testing.T) {
 		no := false
 		sets := []config.ScaleSetConfig{{Backend: "tart", Tart: config.TartConfig{Home: "/Volumes/A", CacheCleanup: &no}}}
-		targets := tartCacheSweepTargetsFor(sets, slog.New(slog.DiscardHandler))
-		if len(targets) != 0 {
-			t.Errorf("targets = %+v, want none (cache-cleanup disabled)", targets)
+		targets := tartCacheStores(sets, slog.New(slog.DiscardHandler))
+		if len(targets) != 1 {
+			t.Fatalf("targets = %+v, want 1 (the disk guard must still see this home)", targets)
+		}
+		tg := targets["/Volumes/A"]
+		if tg.enabled {
+			t.Error("enabled = true, want false — cache-cleanup is disabled, the periodic sweeper must stay off")
+		}
+		if tg.maxAge != config.DefaultTartCacheMaxAge {
+			t.Errorf("maxAge = %v, want default %v so the guard has something real to reclaim by", tg.maxAge, config.DefaultTartCacheMaxAge)
+		}
+		if tg.store == nil {
+			t.Error("target must carry a constructed store even when disabled")
 		}
 	})
 
@@ -172,28 +210,24 @@ func TestTartCacheSweepTargetsFor(t *testing.T) {
 			{Backend: "tart", Tart: config.TartConfig{Home: "/Volumes/A", CacheMaxAge: 99 * 24 * time.Hour}}, // ignored
 			{Backend: "tart", Tart: config.TartConfig{Home: "/Volumes/B", CacheSpaceBudgetGB: 50}},
 		}
-		targets := tartCacheSweepTargetsFor(sets, slog.New(slog.DiscardHandler))
+		targets := tartCacheStores(sets, slog.New(slog.DiscardHandler))
 		if len(targets) != 2 {
 			t.Fatalf("targets = %+v, want 2 (one per unique home)", targets)
 		}
-		byHome := map[string]tartCacheSweepTarget{}
-		for _, tg := range targets {
-			byHome[tg.home] = tg
+		if got := targets["/Volumes/A"]; got.maxAge != 3*24*time.Hour || !got.enabled {
+			t.Errorf("/Volumes/A = %+v, want maxAge=3days enabled=true (first enabled scaleset)", got)
 		}
-		if got := byHome["/Volumes/A"].maxAge; got != 3*24*time.Hour {
-			t.Errorf("/Volumes/A max age = %v, want 3 days (first enabled scaleset)", got)
+		if got := targets["/Volumes/B"]; got.spaceBudgetGB != 50 || !got.enabled {
+			t.Errorf("/Volumes/B = %+v, want spaceBudgetGB=50 enabled=true", got)
 		}
-		if got := byHome["/Volumes/B"].spaceBudgetGB; got != 50 {
-			t.Errorf("/Volumes/B budget = %d, want 50", got)
-		}
-		if byHome["/Volumes/A"].store == nil || byHome["/Volumes/B"].store == nil {
+		if targets["/Volumes/A"].store == nil || targets["/Volumes/B"].store == nil {
 			t.Error("every target must carry a constructed store")
 		}
 	})
 
 	t.Run("non-tart scaleset never contributes a target", func(t *testing.T) {
 		sets := []config.ScaleSetConfig{{Backend: "docker", Tart: config.TartConfig{Home: "/Volumes/A"}}}
-		if targets := tartCacheSweepTargetsFor(sets, slog.New(slog.DiscardHandler)); len(targets) != 0 {
+		if targets := tartCacheStores(sets, slog.New(slog.DiscardHandler)); len(targets) != 0 {
 			t.Errorf("targets = %+v, want none for a Docker scaleset", targets)
 		}
 	})

@@ -24,6 +24,15 @@ type fakeDockerAPI struct {
 	buildCachePruneCalls int
 	buildCachePruneOpts  []dockerclient.BuildCachePruneOptions
 
+	// Optional error injection for the three prune calls, so tests can pin
+	// that dockerGarbageStore/dockerBuildCacheStore's errors.Join behavior
+	// (one prune failing does not stop the others, and every failure
+	// surfaces in the returned error) actually holds — coverage that moved
+	// here from internal/backend's now-deleted PruneDockerRuntime tests.
+	containerPruneErr  error
+	imagePruneErr      error
+	buildCachePruneErr error
+
 	volumesRemoved    []string // VolumeRemove 收到的 volume 名稱
 	createdContainers int      // ContainerCreate 次數(helper container 用)
 	helperScripts     []string // 每個 helper container 的 sh -c 腳本
@@ -117,17 +126,26 @@ func stdcopyStdoutFrame(payload string) []byte {
 
 func (f *fakeDockerAPI) ContainerPrune(_ context.Context, _ dockerclient.ContainerPruneOptions) (dockerclient.ContainerPruneResult, error) {
 	f.containersPruneCalls++
+	if f.containerPruneErr != nil {
+		return dockerclient.ContainerPruneResult{}, f.containerPruneErr
+	}
 	return dockerclient.ContainerPruneResult{}, nil
 }
 
 func (f *fakeDockerAPI) ImagePrune(_ context.Context, _ dockerclient.ImagePruneOptions) (dockerclient.ImagePruneResult, error) {
 	f.imagesPruneCalls++
+	if f.imagePruneErr != nil {
+		return dockerclient.ImagePruneResult{}, f.imagePruneErr
+	}
 	return dockerclient.ImagePruneResult{}, nil
 }
 
 func (f *fakeDockerAPI) BuildCachePrune(_ context.Context, opts dockerclient.BuildCachePruneOptions) (dockerclient.BuildCachePruneResult, error) {
 	f.buildCachePruneCalls++
 	f.buildCachePruneOpts = append(f.buildCachePruneOpts, opts)
+	if f.buildCachePruneErr != nil {
+		return dockerclient.BuildCachePruneResult{}, f.buildCachePruneErr
+	}
 	return dockerclient.BuildCachePruneResult{}, nil
 }
 

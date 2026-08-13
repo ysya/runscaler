@@ -57,7 +57,16 @@ func TestBuildxStore_Tier1RemovesOrphanedBuildersAndStateVolumes(t *testing.T) {
 	}
 }
 
-func TestBuildxStore_DisabledReclaimsNothing(t *testing.T) {
+// TestBuildxStore_ReclaimsRegardlessOfEnabled pins the 2026-08-14 spec
+// revision (see store.go's Enabled doc comment): Enabled()==false means the
+// operator left buildx-cleanup off cmd/runner's own periodic schedule, not
+// "never touch this even under disk pressure" — the disk guard calls
+// Reclaim on a disabled store exactly like an enabled one, so this method
+// must not gate on cfg.Enabled itself. cmd/runner's sweeper is what still
+// respects Enabled(): it simply never launches the goroutine that would
+// call this method when disabled, which is a different (and unchanged)
+// code path from this one.
+func TestBuildxStore_ReclaimsRegardlessOfEnabled(t *testing.T) {
 	old := time.Now().Add(-48 * time.Hour).Unix()
 	fake := &fakeDockerAPI{
 		containerList: dockerclient.ContainerListResult{
@@ -72,8 +81,11 @@ func TestBuildxStore_DisabledReclaimsNothing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Reclaim(Tier1) error: %v", err)
 	}
-	if freed != 0 || len(fake.containersRemoved) != 0 {
-		t.Error("a disabled store must not remove anything — the operator turned it off deliberately")
+	if freed != 0 {
+		t.Errorf("Reclaim(Tier1) freed = %d, want 0 (CleanupOrphanedBuildxBuilders reports no total — see comment on the enabled-path test)", freed)
+	}
+	if len(fake.containersRemoved) != 1 || fake.containersRemoved[0] != "c1" {
+		t.Errorf("containersRemoved = %v, want [c1] — a disabled store must still reclaim when Reclaim is called directly", fake.containersRemoved)
 	}
 }
 

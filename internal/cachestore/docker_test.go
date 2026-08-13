@@ -2,7 +2,9 @@ package cachestore
 
 import (
 	"context"
+	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -41,7 +43,15 @@ func TestDockerGarbageStore_OnlyTier1(t *testing.T) {
 	}
 }
 
-func TestDockerGarbageStore_DisabledReclaimsNothing(t *testing.T) {
+// TestDockerGarbageStore_ReclaimsRegardlessOfEnabled pins the 2026-08-14
+// spec revision (see store.go's Enabled doc comment): Enabled()==false
+// means the operator left the periodic prune sweep off, not "never touch
+// this even under disk pressure" — the disk guard calls Reclaim on a
+// disabled store exactly like an enabled one, so this method must not gate
+// on cfg.Enabled. cmd/runner's sweeper is what still respects Enabled(): it
+// never launches the goroutine that would call this method when disabled,
+// a different code path from this one.
+func TestDockerGarbageStore_ReclaimsRegardlessOfEnabled(t *testing.T) {
 	fake := &fakeDockerAPI{rootDir: "/var/lib/docker"}
 	s := NewDockerGarbageStore(fake, DockerGarbageConfig{Enabled: false, PruneTTL: 24 * time.Hour})
 
@@ -49,8 +59,45 @@ func TestDockerGarbageStore_DisabledReclaimsNothing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Reclaim error: %v", err)
 	}
-	if freed != 0 || fake.containersPruneCalls != 0 {
-		t.Error("a disabled store must not prune — the operator turned it off deliberately")
+	_ = freed
+	if fake.containersPruneCalls != 1 || fake.imagesPruneCalls != 1 {
+		t.Errorf("a disabled store must still prune when Reclaim is called directly, got containers=%d images=%d",
+			fake.containersPruneCalls, fake.imagesPruneCalls)
+	}
+}
+
+// TestDockerGarbageStore_ContinuesAfterContainerPruneError pins that a
+// ContainerPrune failure does not stop the ImagePrune attempt, and that the
+// failure surfaces in the returned error — coverage that moved here from
+// internal/backend's now-deleted TestPruneDockerRuntime_ContinuesAfterPruneErrors.
+func TestDockerGarbageStore_ContinuesAfterContainerPruneError(t *testing.T) {
+	fake := &fakeDockerAPI{rootDir: "/var/lib/docker", containerPruneErr: errors.New("containers boom")}
+	s := NewDockerGarbageStore(fake, DockerGarbageConfig{Enabled: true, PruneTTL: 24 * time.Hour})
+
+	_, err := s.Reclaim(context.Background(), Tier1)
+	if err == nil || !strings.Contains(err.Error(), "containers boom") {
+		t.Fatalf("Reclaim(Tier1) error = %v, want it to mention the container-prune failure", err)
+	}
+	if fake.imagesPruneCalls != 1 {
+		t.Errorf("imagesPruneCalls = %d, want 1 — the image prune must still run after the container prune fails", fake.imagesPruneCalls)
+	}
+}
+
+// TestDockerGarbageStore_NegativePruneTTLSkipsReclaim pins that a negative
+// PruneTTL — the explicit "disable the container/image portion, keep
+// build-cache retention" signal (see cmd/runner's dockerPruneSettingsFor
+// and DockerConfig.PruneTTL's doc comment) — is treated the same as zero:
+// both skip the prune entirely, regardless of Enabled().
+func TestDockerGarbageStore_NegativePruneTTLSkipsReclaim(t *testing.T) {
+	fake := &fakeDockerAPI{rootDir: "/var/lib/docker"}
+	s := NewDockerGarbageStore(fake, DockerGarbageConfig{Enabled: true, PruneTTL: -time.Hour})
+
+	freed, err := s.Reclaim(context.Background(), Tier1)
+	if err != nil {
+		t.Fatalf("Reclaim(Tier1) error: %v", err)
+	}
+	if freed != 0 || fake.containersPruneCalls != 0 || fake.imagesPruneCalls != 0 {
+		t.Error("a negative PruneTTL should skip the garbage prune entirely, same as zero")
 	}
 }
 
@@ -154,6 +201,33 @@ func TestDockerBuildCacheStore_Tier2PrunesByAgeAndBudget(t *testing.T) {
 	}
 }
 
+// TestDockerBuildCacheStore_ContinuesAfterAgePruneError pins that Tier2's
+// age-based BuildCachePrune call failing does not stop the budget-based one
+// from still running, and that the failure surfaces in the returned error
+// — coverage that moved here from internal/backend's now-deleted
+// TestPruneDockerRuntime_ContinuesAfterPruneErrors. Both calls share one
+// injected error (fakeDockerAPI has no per-call error injection), but each
+// is wrapped with a distinct prefix in production code ("prune build cache
+// by age" vs "...to budget"), so the joined error's content still proves
+// both were attempted and both failures are visible, not just the first.
+func TestDockerBuildCacheStore_ContinuesAfterAgePruneError(t *testing.T) {
+	fake := &fakeDockerAPI{rootDir: "/var/lib/docker", buildCachePruneErr: errors.New("build cache boom")}
+	s := NewDockerBuildCacheStore(fake, DockerBuildCacheConfig{
+		Enabled: true, MaxAge: 7 * 24 * time.Hour, BudgetGB: 20,
+	})
+
+	_, err := s.Reclaim(context.Background(), Tier2)
+	if err == nil {
+		t.Fatal("Reclaim(Tier2) error = nil, want a joined error from both failed prune calls")
+	}
+	if !strings.Contains(err.Error(), "prune build cache by age") || !strings.Contains(err.Error(), "prune build cache to budget") {
+		t.Errorf("Reclaim(Tier2) error = %v, want it to mention both the age and budget prune failures", err)
+	}
+	if fake.buildCachePruneCalls != 2 {
+		t.Errorf("buildCachePruneCalls = %d, want 2 — the budget-based prune must still run after the age-based one fails", fake.buildCachePruneCalls)
+	}
+}
+
 // TestDockerBuildCacheStore_Tier4WipesUnconditionally is the distinction
 // the whole store split exists to make reachable: Tier4 passes neither a
 // Filters value nor MaxUsedSpace, regardless of MaxAge/BudgetGB — it is the
@@ -199,23 +273,27 @@ func TestDockerBuildCacheStore_Tier1AndTier3AreNoOps(t *testing.T) {
 	}
 }
 
-func TestDockerBuildCacheStore_DisabledReclaimsNothing(t *testing.T) {
+// TestDockerBuildCacheStore_ReclaimsRegardlessOfEnabled pins the 2026-08-14
+// spec revision — see TestDockerGarbageStore_ReclaimsRegardlessOfEnabled's
+// identical rationale, which applies here too (both stores are gated by the
+// same [docker] prune switch).
+func TestDockerBuildCacheStore_ReclaimsRegardlessOfEnabled(t *testing.T) {
 	fake := &fakeDockerAPI{rootDir: "/var/lib/docker"}
 	s := NewDockerBuildCacheStore(fake, DockerBuildCacheConfig{
 		Enabled: false, MaxAge: time.Hour, BudgetGB: 10,
 	})
 
 	for _, tier := range []Tier{Tier2, Tier4} {
-		freed, err := s.Reclaim(context.Background(), tier)
-		if err != nil {
+		if _, err := s.Reclaim(context.Background(), tier); err != nil {
 			t.Fatalf("Reclaim(%v) error: %v", tier, err)
 		}
-		if freed != 0 {
-			t.Errorf("Reclaim(%v) = %d, want 0", tier, freed)
-		}
 	}
-	if fake.buildCachePruneCalls != 0 {
-		t.Error("a disabled store must not prune — the operator turned it off deliberately")
+	// Tier2 issues two calls (age + budget, see
+	// TestDockerBuildCacheStore_Tier2PrunesByAgeAndBudget) and Tier4 issues
+	// one more (the unconditional wipe) — three total, none skipped for
+	// being disabled.
+	if fake.buildCachePruneCalls != 3 {
+		t.Errorf("buildCachePruneCalls = %d, want 3 — a disabled store must still prune when Reclaim is called directly", fake.buildCachePruneCalls)
 	}
 }
 

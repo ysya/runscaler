@@ -58,10 +58,12 @@ func (s *buildxStore) Measure(_ context.Context) (uint64, error) {
 }
 
 // Reclaim removes orphaned buildx builders older than cfg.MaxAge at Tier1;
-// every other tier is a no-op. A disabled store removes nothing — the
-// operator turned this off deliberately.
+// every other tier is a no-op. Enabled() is deliberately NOT checked here —
+// see dockerGarbageStore.Reclaim's identical note and store.go's Enabled
+// doc comment (revised 2026-08-14): the disk guard reaches this method
+// regardless of Enabled(), by design.
 func (s *buildxStore) Reclaim(ctx context.Context, tier Tier) (uint64, error) {
-	if !s.cfg.Enabled || tier != Tier1 {
+	if tier != Tier1 {
 		return 0, nil
 	}
 

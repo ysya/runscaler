@@ -1,7 +1,11 @@
-// Package diskguard parses free-space thresholds and reads filesystem
-// stats, so cachestore stores can be grouped and measured by the
-// filesystem they actually occupy rather than by their individual paths.
-package diskguard
+// Package bytesize parses free-space/capacity thresholds shared by
+// internal/config (validating [disk] and cache-volume budget settings) and
+// internal/diskguard (comparing them against live statfs results). It is a
+// leaf package — it imports nothing internal — specifically so both of
+// those packages can import it without an import cycle: internal/diskguard
+// transitively imports internal/config (diskguard -> cachestore -> backend
+// -> config), so internal/config cannot import internal/diskguard itself.
+package bytesize
 
 import (
 	"fmt"

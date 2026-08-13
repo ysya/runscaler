@@ -53,9 +53,11 @@ type Guard struct {
 	statFn func(string) (FSStat, error)
 	logger *slog.Logger
 
-	// sweepMu serializes Sweep against itself. See Sweep's doc comment for
-	// why concurrent calls are possible now, and why TryLock rather than
-	// Lock.
+	// sweepMu serializes Sweep against itself. It does not — and cannot —
+	// protect the stores themselves, which are shared with cmd/runner's
+	// periodic sweepers and guard their own Measure/Reclaim. See Sweep's doc
+	// comment for why concurrent calls are possible now, and why TryLock
+	// rather than Lock.
 	sweepMu sync.Mutex
 }
 
@@ -116,8 +118,19 @@ func (g *Guard) statByFilesystem() map[string]filesystemGroup {
 // call Sweep from their own goroutine (see startDiskGuard/runScaleSet in
 // cmd/runner/main.go). The store-level work Sweep drives — daemon prunes,
 // helper containers walking and deleting volume contents — is not safe to
-// run twice at once; see backend.CleanupSharedDocker's doc comment for the
-// same class of hazard on a related path.
+// run twice at once: two `du; find -delete; du` passes over one volume each
+// measure the other's deletions, and Docker's daemon-side prune lock rejects
+// the second caller outright ("a prune operation is already running"), which
+// this guard would read as "that tier freed nothing" and escalate past.
+//
+// sweepMu is not what protects against that, and never could: cmd/runner
+// gives the same store instances to the periodic sweepers as to this guard,
+// and those sweepers do not go through Sweep at all. Each store serializes
+// its own Measure/Reclaim instead, so any two callers of one store exclude
+// each other regardless of which path they arrived by — see
+// cachestore.serialized. sweepMu's remaining job is narrower: keeping one
+// Sweep from redundantly walking the whole tier ladder while another is
+// already walking it.
 //
 // sweepMu.TryLock, not Lock: a sweep already in flight is already
 // addressing whatever pressure triggered this call, so a second caller has

@@ -77,7 +77,7 @@ type dockerGarbageStore struct {
 // store (to group them by filesystem) and must stay statfs-cheap — it must
 // not pay a daemon round trip per store on every check.
 func NewDockerGarbageStore(client backend.DockerAPI, cfg DockerGarbageConfig) CacheStore {
-	return &dockerGarbageStore{client: client, cfg: cfg, rootDir: resolveDockerRootDir(client)}
+	return serialize(&dockerGarbageStore{client: client, cfg: cfg, rootDir: resolveDockerRootDir(client)})
 }
 
 func (s *dockerGarbageStore) Name() string    { return "docker-garbage" }
@@ -167,7 +167,7 @@ type dockerBuildCacheStore struct {
 // participates in Tier2 (age/budget trim) and Tier4 (unconditional wipe,
 // the guard's emergency tier; see TiersFor).
 func NewDockerBuildCacheStore(client backend.DockerAPI, cfg DockerBuildCacheConfig) CacheStore {
-	return &dockerBuildCacheStore{client: client, cfg: cfg, rootDir: resolveDockerRootDir(client)}
+	return serialize(&dockerBuildCacheStore{client: client, cfg: cfg, rootDir: resolveDockerRootDir(client)})
 }
 
 func (s *dockerBuildCacheStore) Name() string    { return "docker-build-cache" }

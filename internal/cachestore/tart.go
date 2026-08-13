@@ -29,7 +29,7 @@ type tartStore struct {
 // start — and structurally participates in Tier2 and Tier4 (see TiersFor);
 // Reclaim below keeps Tier4 a permanent no-op by design (see its comment).
 func NewTartStore(runner backend.CommandRunner, cfg TartConfig) CacheStore {
-	return &tartStore{runner: runner, cfg: cfg}
+	return serialize(&tartStore{runner: runner, cfg: cfg})
 }
 
 func (s *tartStore) Name() string    { return "tart-cache" }

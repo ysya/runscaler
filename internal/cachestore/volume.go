@@ -216,7 +216,7 @@ type sharedVolumeStore struct {
 // data a later job may still read, so it participates only in Tier3 (its
 // TTL-expired portion; see TiersFor) and is never removed wholesale.
 func NewSharedVolumeStore(client backend.DockerAPI, cfg SharedVolumeConfig) CacheStore {
-	return &sharedVolumeStore{client: client, cfg: cfg}
+	return serialize(&sharedVolumeStore{client: client, cfg: cfg})
 }
 
 func (s *sharedVolumeStore) Name() string    { return "shared-volume:" + s.cfg.VolumeName }
@@ -317,7 +317,7 @@ type cacheVolumeStore struct {
 // unlike the daemon's own build cache, it has no age metadata to trim
 // safely by, so Tier2 is always a no-op here (see Reclaim).
 func NewCacheVolumeStore(client backend.DockerAPI, cfg CacheVolumeConfig) CacheStore {
-	return &cacheVolumeStore{client: client, cfg: cfg}
+	return serialize(&cacheVolumeStore{client: client, cfg: cfg})
 }
 
 func (s *cacheVolumeStore) Name() string    { return "cache-volume:" + s.cfg.VolumeName }

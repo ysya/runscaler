@@ -26,7 +26,7 @@ type buildxStore struct {
 // an orphaned builder is already-abandoned data that nothing observes the
 // removal of — and so participates only in Tier1 (see TiersFor).
 func NewBuildxStore(client backend.DockerAPI, cfg BuildxConfig) CacheStore {
-	return &buildxStore{client: client, cfg: cfg}
+	return serialize(&buildxStore{client: client, cfg: cfg})
 }
 
 // Name returns "buildx". cmd/runner/cmd_cache.go keys its "size unknown" rendering off this exact string (Measure below always returns 0) — a rename here must update that map too.

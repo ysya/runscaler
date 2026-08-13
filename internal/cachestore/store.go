@@ -4,7 +4,10 @@
 // can reclaim from all of them without knowing their details.
 package cachestore
 
-import "context"
+import (
+	"context"
+	"fmt"
+)
 
 // StoreKind classifies a store by what happens when its contents vanish.
 // The reclaim ladder is derived from this rather than hand-maintained, so a
@@ -78,4 +81,72 @@ type CacheStore interface {
 	// returns (0, ""); the guard treats a zero budget as "not configured"
 	// and never measures it for this purpose.
 	Budget() (bytes uint64, onExceed string)
+}
+
+// serialized wraps store so that no two callers ever run its Measure or
+// Reclaim at the same time. Every constructor in this package returns one,
+// so the guarantee is a property of the store itself rather than of any one
+// caller's discipline.
+//
+// The hazard is not hypothetical: cmd/runner hands the very same store
+// instances to the periodic sweepers and to the disk guard, so a sweeper's
+// ticker can fire while the guard is mid-sweep. diskguard.Guard's own
+// sweepMu only serializes Sweep against Sweep and cannot see the sweepers at
+// all. Concurrently, two helper containers would run `du; find -delete; du`
+// over one volume — each measuring the other's deletions — and Docker's
+// daemon-side prune lock would reject the second caller ("a prune operation
+// is already running"), which the guard reads as "that tier freed nothing"
+// and escalates past. Measure is covered by the same lock as Reclaim
+// because interleaving them is what produces those bogus numbers.
+//
+// A second caller waits rather than returning zero-freed immediately. The
+// callers here are a periodic sweeper doing its scheduled retention work and
+// a guard measuring the result of each tier by re-running statfs: a caller
+// that returned "freed 0, no error" without doing anything is
+// indistinguishable from a tier that genuinely had nothing to give, so the
+// guard would escalate to a more destructive tier on the strength of work
+// that was merely skipped. Waiting is bounded — each store's own Reclaim
+// already carries a 10-minute cap (volumeHelperTimeout, dockerReclaimTimeout)
+// — and the wait itself honors ctx, so a caller on the job-start path is
+// still released the moment its own deadline expires (see the timeout
+// scaler.startRunner wraps its pre-job Sweep in) rather than inheriting the
+// holder's.
+type serialized struct {
+	CacheStore
+	sem chan struct{} // capacity 1: acquiring is a context-aware Lock
+}
+
+// serialize returns store guarded by its own semaphore. Wrapping at
+// construction (rather than at each call site) is what makes it impossible
+// for a future caller to reach an unguarded Reclaim.
+func serialize(store CacheStore) CacheStore {
+	return &serialized{CacheStore: store, sem: make(chan struct{}, 1)}
+}
+
+// acquire takes the store's semaphore, or gives up if ctx ends first.
+func (s *serialized) acquire(ctx context.Context) error {
+	select {
+	case s.sem <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (s *serialized) release() { <-s.sem }
+
+func (s *serialized) Measure(ctx context.Context) (uint64, error) {
+	if err := s.acquire(ctx); err != nil {
+		return 0, fmt.Errorf("measure %s: %w", s.Name(), err)
+	}
+	defer s.release()
+	return s.CacheStore.Measure(ctx)
+}
+
+func (s *serialized) Reclaim(ctx context.Context, tier Tier) (uint64, error) {
+	if err := s.acquire(ctx); err != nil {
+		return 0, fmt.Errorf("reclaim %s: %w", s.Name(), err)
+	}
+	defer s.release()
+	return s.CacheStore.Reclaim(ctx, tier)
 }

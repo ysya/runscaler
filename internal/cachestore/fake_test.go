@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"io"
+	"sync"
 
 	"github.com/moby/moby/api/pkg/stdcopy"
 	"github.com/moby/moby/api/types/container"
@@ -168,4 +169,67 @@ func (f *fakeDockerAPI) Info(_ context.Context, _ dockerclient.InfoOptions) (doc
 
 func (f *fakeDockerAPI) DiskUsage(_ context.Context, _ dockerclient.DiskUsageOptions) (dockerclient.DiskUsageResult, error) {
 	return f.diskUsage, nil
+}
+
+// blockingStore is a CacheStore double whose Measure and Reclaim block until
+// the test releases them, so serialize's mutual exclusion can be driven
+// deterministically through channels rather than raced against a sleep. It
+// is the same shape as internal/diskguard's own blockingStore (used there
+// for Guard.sweepMu); this one additionally blocks in Measure, since the
+// wrapper here must keep Measure and Reclaim from interleaving with each
+// other, not only with themselves.
+//
+// Every entry and exit is recorded under mu: maxActive is the high-water
+// mark of concurrently in-flight calls across the whole test, so an
+// assertion of "never more than one" needs no timing assumptions.
+type blockingStore struct {
+	entered chan struct{} // a call sends here right after it starts
+	release chan struct{} // a call blocks reading this until the test releases it
+
+	mu        sync.Mutex
+	active    int
+	maxActive int
+	completed int
+}
+
+func newBlockingStore() *blockingStore {
+	return &blockingStore{entered: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (b *blockingStore) Name() string             { return "blocking" }
+func (b *blockingStore) Kind() StoreKind          { return KindCache }
+func (b *blockingStore) Path() string             { return "/" }
+func (b *blockingStore) Enabled() bool            { return true }
+func (b *blockingStore) Budget() (uint64, string) { return 0, "" }
+
+func (b *blockingStore) block() {
+	b.mu.Lock()
+	b.active++
+	b.maxActive = max(b.maxActive, b.active)
+	b.mu.Unlock()
+
+	b.entered <- struct{}{}
+	<-b.release
+
+	b.mu.Lock()
+	b.active--
+	b.completed++
+	b.mu.Unlock()
+}
+
+func (b *blockingStore) Measure(context.Context) (uint64, error) {
+	b.block()
+	return 0, nil
+}
+
+func (b *blockingStore) Reclaim(context.Context, Tier) (uint64, error) {
+	b.block()
+	return 0, nil
+}
+
+// stats returns the recorded high-water mark and completion count.
+func (b *blockingStore) stats() (maxActive, completed int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.maxActive, b.completed
 }

@@ -3,6 +3,10 @@ package cachestore
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -331,6 +335,74 @@ func TestReclaimGuardsAgainstFreedUnderflow(t *testing.T) {
 	}
 	if freed != 0 {
 		t.Errorf("freed = %d, want 0 (after > before must not underflow)", freed)
+	}
+}
+
+// TestReclaimDeletesEvenWhenDuFails executes the script production actually
+// generates, through a real `sh`, against a real directory, with a `du` stub
+// that fails the way du does when a file vanishes mid-walk (exit 1, nothing
+// on stdout) — routine on a volume jobs are actively writing to, which is
+// exactly what the shared volume is for. The script used to begin with
+// `set -e`, so that transient measurement failure aborted it *before* the
+// delete ran: the sweep reclaimed nothing and returned an error.
+//
+// The witness at the end is not redundant. Without it, the assertion above
+// would also pass against the old, broken shape on any host whose real du
+// happened to succeed — a silently vacuous test.
+func TestReclaimDeletesEvenWhenDuFails(t *testing.T) {
+	// Recover the exact script production builds, then run it for real.
+	fake := &fakeDockerAPI{}
+	mount := t.TempDir()
+	s := NewCacheVolumeStore(fake, CacheVolumeConfig{
+		VolumeName: "ccache", MountPath: mount, HelperImage: "img",
+	})
+	freed, err := s.Reclaim(context.Background(), Tier4)
+	if err != nil {
+		t.Fatalf("Reclaim(Tier4) error: %v — an unreadable du must not fail the reclaim", err)
+	}
+	if freed != 0 {
+		t.Errorf("freed = %d, want 0 (unparseable du output is 'freed unknown', not an error)", freed)
+	}
+	if len(fake.helperScripts) != 1 {
+		t.Fatalf("expected 1 helper script, got %d", len(fake.helperScripts))
+	}
+	script := fake.helperScripts[0]
+
+	// A du that exits non-zero with no output, placed first on PATH.
+	stubBin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(stubBin, "du"), []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatalf("write du stub: %v", err)
+	}
+	env := append(os.Environ(), "PATH="+stubBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	runScript := func(sh string) {
+		cmd := exec.Command("/bin/sh", "-c", sh)
+		cmd.Env = env
+		// The exit status is deliberately ignored here: the script tolerates
+		// every failure it can hit, so only its effect on disk matters.
+		_ = cmd.Run()
+	}
+
+	if err := os.WriteFile(filepath.Join(mount, "cached.o"), []byte("x"), 0o644); err != nil {
+		t.Fatalf("seed file: %v", err)
+	}
+	runScript(script)
+	entries, err := os.ReadDir(mount)
+	if err != nil {
+		t.Fatalf("read mount: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("mount still holds %d entry/entries after the reclaim script — a failing du "+
+			"must not stop the delete from running; script was: %q", len(entries), script)
+	}
+
+	// Witness: under the pre-fix `set -e; <bare du>; …` shape, this same du
+	// stub must stop whatever follows from running at all.
+	marker := filepath.Join(mount, "delete-would-have-run")
+	runScript(fmt.Sprintf("set -e; %s; touch %s", duCommand(mount), shellQuote(marker)))
+	if _, err := os.Stat(marker); err == nil {
+		t.Errorf("witness failed: `set -e` did not abort after the du stub exited non-zero, "+
+			"so the assertion above cannot distinguish the fixed script from the broken one "+
+			"(marker %q exists)", marker)
 	}
 }
 

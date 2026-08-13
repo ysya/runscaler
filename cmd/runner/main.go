@@ -927,9 +927,9 @@ type sharedVolumeSweepTarget struct {
 // get (2026-08-14 Enabled() revision): those stores have a boolean routine-
 // cleanup switch plus separate TTL/MaxAge fields with sensible always-on
 // defaults, so a disabled switch still leaves a real, safe value to reclaim
-// by. A shared volume has no such separate default — SharedVolumeTTL *is*
-// the retention policy, and 0 means "no policy configured" with no
-// project-wide fallback (see DockerConfig.SharedVolumeTTL's doc comment).
+// by. A shared volume has no such separate default — SharedVolumeMaxAge
+// *is* the retention policy, and 0 means "no policy configured" with no
+// project-wide fallback (see DockerConfig.SharedVolumeMaxAge's doc comment).
 // Constructing a store here with MaxAge=0 would make Reclaim(Tier3)'s own
 // `days < 1 { days = 1 }` floor silently invent a 1-day TTL nobody
 // configured, deleting handoff files an operator never opted into a
@@ -944,7 +944,7 @@ func sharedVolumeSweepTargetsFor(sets []config.ScaleSetConfig, client *dockercli
 	picked := make(map[string]settings)
 	var order []string // insertion order — map iteration is not stable
 	for _, ss := range sets {
-		if ss.IsTart() || ss.Docker.SharedVolume == "" || ss.Docker.SharedVolumeTTL <= 0 {
+		if ss.IsTart() || ss.Docker.SharedVolume == "" || ss.Docker.SharedVolumeMaxAge <= 0 {
 			continue
 		}
 		interval := ss.Docker.SharedVolumeCleanupInterval
@@ -955,7 +955,7 @@ func sharedVolumeSweepTargetsFor(sets []config.ScaleSetConfig, client *dockercli
 			volumeName:  ss.SharedVolumeName(),
 			mountPath:   ss.Docker.SharedVolume,
 			helperImage: ss.RunnerImage,
-			ttl:         ss.Docker.SharedVolumeTTL,
+			ttl:         ss.Docker.SharedVolumeMaxAge,
 			interval:    interval,
 		}
 		if existing, ok := picked[s.volumeName]; ok {
@@ -1006,6 +1006,13 @@ func sharedVolumeSweepTargetsFor(sets []config.ScaleSetConfig, client *dockercli
 // given volume picks that path arbitrarily; ParseCacheVolumes errors are
 // ignored here the same way NewDockerBackend ignores them, since
 // ScaleSetConfig.Validate already surfaced them before startup.
+//
+// BudgetBytes/OnExceed pass straight through from the parsed mount
+// (m.BudgetBytes/m.OnExceed): 0/"" for a short-form (cache-volumes) entry or
+// a long-form ([[docker.cache]]) one with no budget set, matching
+// cachestore.CacheStore.Budget's "a store with no such policy returns
+// (0, \"\")" contract — the disk guard's enforceBudgets skips a zero budget
+// entirely, so no extra "is this configured" branch is needed here.
 func cacheVolumeStoresFor(sets []config.ScaleSetConfig, client *dockerclient.Client, rootDir string) []cachestore.CacheStore {
 	seen := make(map[string]bool)
 	var stores []cachestore.CacheStore
@@ -1027,6 +1034,8 @@ func cacheVolumeStoresFor(sets []config.ScaleSetConfig, client *dockerclient.Cli
 				MountPath:   m.Path,
 				HelperImage: ss.RunnerImage,
 				RootDir:     rootDir,
+				BudgetBytes: m.BudgetBytes,
+				OnExceed:    m.OnExceed,
 			}))
 		}
 	}
@@ -1100,7 +1109,7 @@ func tartCacheStoreFor(home string, sets []config.ScaleSetConfig, logger *slog.L
 		if interval <= 0 {
 			interval = config.DefaultTartCacheCleanupInterval
 		}
-		s := settings{maxAge: maxAge, interval: interval, budgetGB: ss.Tart.CacheSpaceBudgetGB}
+		s := settings{maxAge: maxAge, interval: interval, budgetGB: ss.Tart.CacheBudgetGB}
 		if chosen == nil {
 			chosen = &s
 			continue
@@ -1128,7 +1137,7 @@ func tartCacheStoreFor(home string, sets []config.ScaleSetConfig, logger *slog.L
 		if maxAge <= 0 {
 			maxAge = config.DefaultTartCacheMaxAge
 		}
-		chosen = &settings{maxAge: maxAge, budgetGB: sets[0].Tart.CacheSpaceBudgetGB}
+		chosen = &settings{maxAge: maxAge, budgetGB: sets[0].Tart.CacheBudgetGB}
 	}
 
 	store := cachestore.NewTartStore(execCommandRunner{}, cachestore.TartConfig{

@@ -121,13 +121,39 @@ type DockerConfig struct {
 	// e.g. "gradle-cache:/home/runner/.gradle". Cache volumes are persistent
 	// caches: they are deliberately never removed at exit and never swept by
 	// any TTL. Same name across scalesets = shared cache, different = isolated.
+	//
+	// This is the short form. See Cache for the long form, which adds an
+	// optional retention budget; ParseCacheVolumes merges the two.
 	CacheVolumes []string `mapstructure:"cache-volumes"`
 
-	// SharedVolumeTTL deletes files in shared-volume older than this duration.
-	// 0 (default) disables TTL cleanup. Accepts Go duration strings, e.g. "168h".
-	SharedVolumeTTL time.Duration `mapstructure:"shared-volume-ttl"`
-	// SharedVolumeCleanupInterval is how often the TTL sweep runs while
-	// runner is up. Ignored when SharedVolumeTTL is 0. Defaults to
+	// Cache is the long form of CacheVolumes — [[docker.cache]] tables
+	// instead of "name:/path" strings — for entries that need a retention
+	// budget. An entry here whose Name also appears in CacheVolumes replaces
+	// it entirely (see ParseCacheVolumes); the two are never merged field by
+	// field.
+	Cache []CacheVolumeSpec `mapstructure:"cache"`
+
+	// SharedVolumeMaxAge deletes files in shared-volume older than this
+	// duration. 0 (default) disables cleanup. Accepts Go duration strings,
+	// e.g. "168h".
+	SharedVolumeMaxAge time.Duration `mapstructure:"shared-volume-max-age"`
+	// SharedVolumeTTL is this field's pre-2026-08-14 name.
+	//
+	// Deprecated: superseded by SharedVolumeMaxAge; config loading never
+	// populates this field. Load's applyAliases step (load.go) always moves
+	// a configured shared-volume-ttl value onto shared-volume-max-age and
+	// deletes the old key from the settings map before any decode runs, so
+	// a live mapstructure tag here would never fire in the working case —
+	// and if applyAliases ever regressed, a live tag would silently swallow
+	// a legacy config's value into this field (which nothing reads) instead
+	// of surfacing the regression as the loud "unknown config key" warning
+	// it should. mapstructure:"-" makes that the only possible outcome.
+	// Kept only so Go code that still constructs
+	// DockerConfig{SharedVolumeTTL: …} directly (not through config
+	// loading) keeps compiling; read SharedVolumeMaxAge instead.
+	SharedVolumeTTL time.Duration `mapstructure:"-"`
+	// SharedVolumeCleanupInterval is how often the cleanup sweep runs while
+	// runner is up. Ignored when SharedVolumeMaxAge is 0. Defaults to
 	// DefaultSharedVolumeCleanupInterval when unset.
 	SharedVolumeCleanupInterval time.Duration `mapstructure:"shared-volume-cleanup-interval"`
 
@@ -168,42 +194,149 @@ type DockerConfig struct {
 	BuildCacheBudgetGB int `mapstructure:"build-cache-budget"`
 }
 
-// CacheVolumeMount is one parsed cache-volumes entry: a named Docker volume
-// and the absolute container path it is mounted at.
+// CacheVolumeSpec is one [[docker.cache]] long-form cache-volume entry: like
+// a CacheVolumes short-form "name:/path" string, plus an optional retention
+// budget. See ParseCacheVolumes for how it merges with the short form and
+// what each field validates to.
+type CacheVolumeSpec struct {
+	Name     string `mapstructure:"name"`
+	Path     string `mapstructure:"path"`
+	Budget   string `mapstructure:"budget"`
+	OnExceed string `mapstructure:"on-exceed"`
+}
+
+// CacheVolumeMount is one resolved cache-volumes entry — merged from the
+// short and long forms by ParseCacheVolumes — naming a Docker volume, the
+// absolute container path it mounts at, and its optional retention budget.
+// BudgetBytes 0 means no budget is configured (every short-form entry, and
+// a long-form entry whose Budget is ""); OnExceed only matters when
+// BudgetBytes != 0.
 type CacheVolumeMount struct {
-	Volume string
-	Path   string
+	Volume      string
+	Path        string
+	BudgetBytes uint64
+	OnExceed    string
 }
 
 // volumeNameRe matches Docker's volume-name pattern.
 var volumeNameRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
 
-// ParseCacheVolumes parses the "volume-name:/absolute/container/path" entries
-// in CacheVolumes. The entry is split on the first colon; an entry with an
-// empty volume name or path, a non-absolute path, or a volume name outside
-// Docker's volume-name pattern is an error.
-func (dc DockerConfig) ParseCacheVolumes() ([]CacheVolumeMount, error) {
-	if len(dc.CacheVolumes) == 0 {
-		return nil, nil
+// validateVolumeName reports whether name matches Docker's volume-name
+// pattern.
+func validateVolumeName(name string) error {
+	if !volumeNameRe.MatchString(name) {
+		return fmt.Errorf("invalid volume name %q", name)
 	}
-	mounts := make([]CacheVolumeMount, 0, len(dc.CacheVolumes))
-	paths := make(map[string]bool)
+	return nil
+}
+
+// validateContainerPath reports whether path is a clean absolute path other
+// than "/" — the shape every cache-volume mount target must have.
+func validateContainerPath(path string) error {
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path || path == "/" {
+		return fmt.Errorf("container path %q must be absolute", path)
+	}
+	return nil
+}
+
+// parseCacheVolumeBudget parses a [[docker.cache]] entry's Budget string
+// into bytes. "" means unconfigured (0, no error) — the short form's only
+// option. A percentage (e.g. "10%") is rejected: unlike [disk]'s
+// thresholds — which internal/diskguard resolves against a fresh statfs on
+// every sweep — there is no live filesystem to resolve a percentage against
+// at config-parse time, so letting bytesize.ParseThreshold's percentage
+// branch through would silently produce a permanently-zero budget (0% of an
+// unknown total).
+func parseCacheVolumeBudget(budget string) (uint64, error) {
+	if budget == "" {
+		return 0, nil
+	}
+	if strings.HasSuffix(budget, "%") {
+		return 0, fmt.Errorf("budget %q must be an absolute size like \"20GB\" (percentages are not supported for cache volumes)", budget)
+	}
+	th, err := bytesize.ParseThreshold(budget)
+	if err != nil {
+		return 0, fmt.Errorf("invalid budget %q: want a size like \"20GB\"", budget)
+	}
+	return th.Bytes, nil
+}
+
+// ParseCacheVolumes parses and merges CacheVolumes (short form) and Cache
+// (long form) into one list of mounts, ordered by first appearance across
+// both. An entry present in both forms is resolved entirely from its
+// long-form entry — path, budget, and on-exceed all come from there, and
+// the short-form entry of the same name is discarded rather than partially
+// merged — matching docker-compose's own short/long merge convention (see
+// section E of docs/superpowers/specs/2026-08-13-cache-architecture-design.md).
+//
+// Errors: an empty volume name or path, a non-absolute/non-clean container
+// path, a volume name outside Docker's volume-name pattern, two entries
+// (from either form) resolving to the same container path, a long-form
+// Budget that fails to parse or names a percentage (see
+// parseCacheVolumeBudget), or a long-form OnExceed other than "", "warn",
+// "wipe".
+func (dc DockerConfig) ParseCacheVolumes() ([]CacheVolumeMount, error) {
+	order := make([]string, 0, len(dc.CacheVolumes)+len(dc.Cache))
+	byName := make(map[string]CacheVolumeMount, len(dc.CacheVolumes)+len(dc.Cache))
+
 	for _, entry := range dc.CacheVolumes {
 		name, path, ok := strings.Cut(entry, ":")
 		if !ok || name == "" || path == "" {
 			return nil, fmt.Errorf("cache-volumes entry %q must be \"volume-name:/absolute/container/path\"", entry)
 		}
-		if !volumeNameRe.MatchString(name) {
-			return nil, fmt.Errorf("cache-volumes entry %q: invalid volume name %q", entry, name)
+		if err := validateVolumeName(name); err != nil {
+			return nil, fmt.Errorf("cache-volumes entry %q: %w", entry, err)
 		}
-		if !filepath.IsAbs(path) || filepath.Clean(path) != path || path == "/" {
-			return nil, fmt.Errorf("cache-volumes entry %q: container path %q must be absolute", entry, path)
+		if err := validateContainerPath(path); err != nil {
+			return nil, fmt.Errorf("cache-volumes entry %q: %w", entry, err)
 		}
-		if paths[path] {
-			return nil, fmt.Errorf("cache-volumes contains duplicate container path %q", path)
+		if _, exists := byName[name]; !exists {
+			order = append(order, name)
 		}
-		paths[path] = true
-		mounts = append(mounts, CacheVolumeMount{Volume: name, Path: path})
+		byName[name] = CacheVolumeMount{Volume: name, Path: path}
+	}
+
+	for _, spec := range dc.Cache {
+		if spec.Name == "" {
+			return nil, fmt.Errorf("[[docker.cache]] entry has an empty name")
+		}
+		if err := validateVolumeName(spec.Name); err != nil {
+			return nil, fmt.Errorf("[[docker.cache]] entry %q: %w", spec.Name, err)
+		}
+		if err := validateContainerPath(spec.Path); err != nil {
+			return nil, fmt.Errorf("[[docker.cache]] entry %q: %w", spec.Name, err)
+		}
+		budgetBytes, err := parseCacheVolumeBudget(spec.Budget)
+		if err != nil {
+			return nil, fmt.Errorf("[[docker.cache]] entry %q: %w", spec.Name, err)
+		}
+		switch spec.OnExceed {
+		case "", "warn", "wipe":
+		default:
+			return nil, fmt.Errorf("[[docker.cache]] entry %q: on-exceed must be \"warn\" or \"wipe\", got %q", spec.Name, spec.OnExceed)
+		}
+
+		if _, exists := byName[spec.Name]; !exists {
+			order = append(order, spec.Name)
+		}
+		byName[spec.Name] = CacheVolumeMount{
+			Volume: spec.Name, Path: spec.Path, BudgetBytes: budgetBytes, OnExceed: spec.OnExceed,
+		}
+	}
+
+	if len(order) == 0 {
+		return nil, nil
+	}
+
+	mounts := make([]CacheVolumeMount, 0, len(order))
+	pathOwner := make(map[string]string, len(order))
+	for _, name := range order {
+		m := byName[name]
+		if owner, dup := pathOwner[m.Path]; dup {
+			return nil, fmt.Errorf("cache volumes %q and %q both mount container path %q", owner, name, m.Path)
+		}
+		pathOwner[m.Path] = name
+		mounts = append(mounts, m)
 	}
 	return mounts, nil
 }
@@ -224,11 +357,19 @@ type TartConfig struct {
 	// `tart prune --older-than`. Defaults to DefaultTartCacheMaxAge when unset.
 	// Granularity is whole days; sub-day values floor to 1 day.
 	CacheMaxAge time.Duration `mapstructure:"cache-max-age"`
-	// CacheSpaceBudgetGB is an optional hard cap on the OCI/IPSW cache size
-	// (in GB), enforced via `tart prune --space-budget` on top of the age-based
+	// CacheBudgetGB is an optional hard cap on the OCI/IPSW cache size (in
+	// GB), enforced via `tart prune --space-budget` on top of the age-based
 	// sweep — least-recently-used entries are removed until the total fits.
 	// 0 (default) means no size cap (age-based cleanup still runs).
-	CacheSpaceBudgetGB int `mapstructure:"cache-space-budget"`
+	CacheBudgetGB int `mapstructure:"cache-budget"`
+	// CacheSpaceBudgetGB is this field's pre-2026-08-14 name.
+	//
+	// Deprecated: superseded by CacheBudgetGB, for the same reason and in
+	// the same way DockerConfig.SharedVolumeTTL is deprecated in favor of
+	// SharedVolumeMaxAge — see that field's doc comment. mapstructure:"-"
+	// because Load's applyAliases step (load.go) always moves a configured
+	// cache-space-budget value onto CacheBudgetGB before decoding.
+	CacheSpaceBudgetGB int `mapstructure:"-"`
 	// CacheCleanupInterval is how often the prune sweep runs while runner
 	// is up. Ignored when cache cleanup is disabled. Defaults to
 	// DefaultTartCacheCleanupInterval when unset.

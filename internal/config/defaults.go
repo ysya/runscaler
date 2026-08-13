@@ -24,7 +24,8 @@ const (
 	DefaultSharedVolumeName = "runner-shared"
 
 	// DefaultSharedVolumeCleanupInterval is the period between shared-volume
-	// TTL sweeps when SharedVolumeTTL > 0 and no explicit interval is set.
+	// cleanup sweeps when SharedVolumeMaxAge > 0 and no explicit interval is
+	// set.
 	DefaultSharedVolumeCleanupInterval = 6 * time.Hour
 
 	// DefaultTartCacheCleanup enables Tart OCI/IPSW cache cleanup by default.
@@ -83,9 +84,16 @@ const (
 	// DefaultBuildxCleanupInterval is the period between buildx cleanup sweeps.
 	DefaultBuildxCleanupInterval = 6 * time.Hour
 
-	// DefaultDiskGuard enables the disk guard by default. Unlike prune, the
-	// guard only acts under disk pressure and never overrides a store the
-	// operator disabled, so leaving it on is safe.
+	// DefaultDiskGuard enables the disk guard by default. Safe to leave on
+	// because it only ever acts under real disk pressure (a filesystem below
+	// min-free) — it is not a routine sweeper running on a timer regardless
+	// of need. It deliberately does NOT respect a store's own Enabled()
+	// (revised 2026-08-14: see docs/superpowers/specs/
+	// 2026-08-13-cache-architecture-design.md, "各 store 的啟用開關只約束例行清理" —
+	// prune/buildx-cleanup default off and max-tier defaults to 3, so a
+	// guard that honored Enabled() would ship unable to reclaim anything). A
+	// host whose disk runner does not own opts out with `[disk] guard =
+	// false`, not by disabling individual stores.
 	DefaultDiskGuard = true
 	// DefaultDiskMinFree is the free-space level that triggers reclamation.
 	DefaultDiskMinFree = "10%"

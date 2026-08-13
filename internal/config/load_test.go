@@ -210,7 +210,7 @@ func TestLoad_DurationInheritanceAndOverride(t *testing.T) {
 	sets := resolveTOML(t, `
 [docker]
 shared-volume = "/shared"
-shared-volume-ttl = "168h"
+shared-volume-max-age = "168h"
 shared-volume-cleanup-interval = "30m"
 
 [[scaleset]]
@@ -224,19 +224,19 @@ name = "runners-b"
 token = "token-b"
 
 [scaleset.docker]
-shared-volume-ttl = "24h"
+shared-volume-max-age = "24h"
 `)
 	// First inherits the whole docker table, durations included.
-	if got := sets[0].Docker.SharedVolumeTTL; got != 168*time.Hour {
-		t.Errorf("sets[0] TTL = %v, want 168h (inherited)", got)
+	if got := sets[0].Docker.SharedVolumeMaxAge; got != 168*time.Hour {
+		t.Errorf("sets[0] max-age = %v, want 168h (inherited)", got)
 	}
 	if got := sets[0].Docker.SharedVolumeCleanupInterval; got != 30*time.Minute {
 		t.Errorf("sets[0] interval = %v, want 30m (inherited)", got)
 	}
-	// Second overrides the TTL (duration string parsed inside the
+	// Second overrides the max-age (duration string parsed inside the
 	// scaleset docker table) and inherits the rest.
-	if got := sets[1].Docker.SharedVolumeTTL; got != 24*time.Hour {
-		t.Errorf("sets[1] TTL = %v, want 24h (override)", got)
+	if got := sets[1].Docker.SharedVolumeMaxAge; got != 24*time.Hour {
+		t.Errorf("sets[1] max-age = %v, want 24h (override)", got)
 	}
 	if got := sets[1].Docker.SharedVolumeCleanupInterval; got != 30*time.Minute {
 		t.Errorf("sets[1] interval = %v, want 30m (inherited)", got)
@@ -361,6 +361,208 @@ token = "token-b"
 		if sets[1].Docker.CacheVolumes[i] != want {
 			t.Errorf("sets[1] cache-volumes[%d] = %q, want %q (inherited)", i, sets[1].Docker.CacheVolumes[i], want)
 		}
+	}
+}
+
+// TestLoad_LegacyCacheKeysStillWork pins the hardest compatibility
+// requirement in the vocabulary-unification design: three production hosts
+// self-update their binary without their config files changing, so
+// shared-volume-ttl and cache-space-budget must keep loading with zero
+// warnings and their values must land on the new fields — not just decode
+// silently into a field nothing reads.
+func TestLoad_LegacyCacheKeysStillWork(t *testing.T) {
+	v := viper.New()
+	v.SetConfigType("toml")
+	if err := v.ReadConfig(strings.NewReader(`
+url = "https://github.com/org"
+name = "runners"
+token = "ghp_x"
+[docker]
+shared-volume = "/shared"
+shared-volume-ttl = "72h"
+[tart]
+cache-space-budget = 150
+`)); err != nil {
+		t.Fatalf("read config: %v", err)
+	}
+	cfg, err := Load(v)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.Warnings) != 0 {
+		t.Errorf("legacy keys must not warn, got %q", cfg.Warnings)
+	}
+	ss := cfg.ResolveScaleSets()[0]
+	if ss.Docker.SharedVolumeMaxAge != 72*time.Hour {
+		t.Errorf("shared-volume-ttl should map to shared-volume-max-age, got %v",
+			ss.Docker.SharedVolumeMaxAge)
+	}
+	if ss.Tart.CacheBudgetGB != 150 {
+		t.Errorf("cache-space-budget should map to cache-budget, got %d", ss.Tart.CacheBudgetGB)
+	}
+}
+
+func TestLoad_NewKeyWinsOverLegacyWithWarning(t *testing.T) {
+	v := viper.New()
+	v.SetConfigType("toml")
+	_ = v.ReadConfig(strings.NewReader(`
+url = "https://github.com/org"
+name = "runners"
+token = "ghp_x"
+[docker]
+shared-volume = "/shared"
+shared-volume-ttl = "24h"
+shared-volume-max-age = "72h"
+`))
+	cfg, err := Load(v)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	ss := cfg.ResolveScaleSets()[0]
+	if ss.Docker.SharedVolumeMaxAge != 72*time.Hour {
+		t.Errorf("new key must win, got %v", ss.Docker.SharedVolumeMaxAge)
+	}
+	if len(cfg.Warnings) == 0 {
+		t.Error("setting both the legacy and new key should warn")
+	}
+}
+
+// TestLoad_TopLevelAliasInheritedByScaleset pins the specific risk called
+// out for this alias design: a [[scaleset]] entry that sets neither the old
+// nor the new form of an aliased key must still inherit the top level's
+// value — under the new, canonical field — exactly as it would for any
+// other [docker]/[tart] key. This only holds if applyAliases runs on the
+// top-level settings map before scalesetDefaults clones it into the base
+// every entry merges onto; aliasing only the final per-scaleset decode
+// result would miss this case entirely.
+func TestLoad_TopLevelAliasInheritedByScaleset(t *testing.T) {
+	cfg := loadTOML(t, `
+[docker]
+shared-volume = "/shared"
+shared-volume-ttl = "72h"
+
+[tart]
+cache-space-budget = 150
+
+[[scaleset]]
+url = "https://github.com/org-a"
+name = "runners-a"
+token = "token-a"
+`)
+	if len(cfg.Warnings) != 0 {
+		t.Errorf("Warnings = %q, want none", cfg.Warnings)
+	}
+	sets := cfg.ResolveScaleSets()
+	if got := sets[0].Docker.SharedVolumeMaxAge; got != 72*time.Hour {
+		t.Errorf("SharedVolumeMaxAge = %v, want 72h inherited via the top-level alias", got)
+	}
+	if got := sets[0].Tart.CacheBudgetGB; got != 150 {
+		t.Errorf("CacheBudgetGB = %d, want 150 inherited via the top-level alias", got)
+	}
+}
+
+// TestLoad_ScalesetLevelAliasOverridesInherited pins the other direction: a
+// [[scaleset]] entry setting the deprecated key itself must override an
+// inherited (already-canonical) top-level value — not survive alongside it
+// as an unrelated second key, which is what would happen if entry were
+// merged onto base before being aliased instead of after.
+func TestLoad_ScalesetLevelAliasOverridesInherited(t *testing.T) {
+	cfg := loadTOML(t, `
+[docker]
+shared-volume = "/shared"
+shared-volume-max-age = "10h"
+
+[[scaleset]]
+url = "https://github.com/org-a"
+name = "runners-a"
+token = "token-a"
+
+[scaleset.docker]
+shared-volume-ttl = "5h"
+
+[[scaleset]]
+url = "https://github.com/org-b"
+name = "runners-b"
+token = "token-b"
+`)
+	if len(cfg.Warnings) != 0 {
+		t.Errorf("Warnings = %q, want none", cfg.Warnings)
+	}
+	sets := cfg.ResolveScaleSets()
+	if got := sets[0].Docker.SharedVolumeMaxAge; got != 5*time.Hour {
+		t.Errorf("sets[0] SharedVolumeMaxAge = %v, want 5h (scaleset's own deprecated-key override)", got)
+	}
+	if got := sets[1].Docker.SharedVolumeMaxAge; got != 10*time.Hour {
+		t.Errorf("sets[1] SharedVolumeMaxAge = %v, want 10h (inherited)", got)
+	}
+}
+
+// TestLoad_ScalesetLevelBothFormsWarns pins that a [[scaleset]] entry
+// setting both forms of an aliased key itself — not just at the top level —
+// is caught too, and the warning is scoped to that scaleset like every
+// other per-entry diagnostic in this package.
+func TestLoad_ScalesetLevelBothFormsWarns(t *testing.T) {
+	cfg := loadTOML(t, `
+[[scaleset]]
+url = "https://github.com/org-a"
+name = "runners-a"
+token = "token-a"
+
+[scaleset.docker]
+shared-volume-ttl = "5h"
+shared-volume-max-age = "9h"
+`)
+	if len(cfg.Warnings) != 1 {
+		t.Fatalf("Warnings = %q, want exactly one", cfg.Warnings)
+	}
+	if !strings.HasPrefix(cfg.Warnings[0], "scaleset[0]: ") {
+		t.Errorf("warning = %q, want it scoped to scaleset[0]", cfg.Warnings[0])
+	}
+	sets := cfg.ResolveScaleSets()
+	if got := sets[0].Docker.SharedVolumeMaxAge; got != 9*time.Hour {
+		t.Errorf("SharedVolumeMaxAge = %v, want 9h (new key wins)", got)
+	}
+}
+
+// TestLoad_DockerCacheLongForm covers the other half of this task: the
+// [[docker.cache]] long form decodes through the same map-merge pipeline as
+// every other [docker] key (inherited by a [[scaleset]] that does not
+// override it), and ParseCacheVolumes resolves its budget/on-exceed
+// end-to-end from TOML.
+func TestLoad_DockerCacheLongForm(t *testing.T) {
+	sets := resolveTOML(t, `
+[docker]
+cache-volumes = ["gradle-cache:/home/runner/.gradle"]
+
+[[docker.cache]]
+name = "ccache"
+path = "/home/runner/.ccache"
+budget = "20GB"
+on-exceed = "wipe"
+
+[[scaleset]]
+url = "https://github.com/org-a"
+name = "runners-a"
+token = "token-a"
+`)
+	mounts, err := sets[0].Docker.ParseCacheVolumes()
+	if err != nil {
+		t.Fatalf("ParseCacheVolumes: %v", err)
+	}
+	if len(mounts) != 2 {
+		t.Fatalf("mounts = %+v, want 2", mounts)
+	}
+	var ccache *CacheVolumeMount
+	for i := range mounts {
+		if mounts[i].Volume == "ccache" {
+			ccache = &mounts[i]
+		}
+	}
+	if ccache == nil {
+		t.Fatal("ccache mount not found")
+	}
+	if ccache.Path != "/home/runner/.ccache" || ccache.BudgetBytes != 20*1024*1024*1024 || ccache.OnExceed != "wipe" {
+		t.Errorf("ccache mount = %+v, want path/budget/on-exceed from the long form", ccache)
 	}
 }
 
@@ -570,7 +772,7 @@ pids-limit = 4096
 platform = "linux/amd64"
 network = "runners"
 cache-volumes = ["gradle-cache:/home/runner/.gradle", "pnpm-store:/home/runner/.local/share/pnpm/store"]
-shared-volume-ttl = "168h"
+shared-volume-max-age = "168h"
 shared-volume-cleanup-interval = "6h"
 buildx-cleanup = true
 buildx-cleanup-ttl = "24h"
@@ -581,6 +783,12 @@ prune-ttl = "24h"
 build-cache-max-age = "168h"
 build-cache-budget = 50
 
+[[docker.cache]]
+name = "ccache"
+path = "/home/runner/.ccache"
+budget = "20GB"
+on-exceed = "wipe"
+
 [tart]
 home = "/Volumes/tart"
 runner-dir = "/Users/admin/actions-runner"
@@ -589,7 +797,7 @@ memory = 8192
 pool-size = 1
 cache-cleanup = true
 cache-max-age = "168h"
-cache-space-budget = 80
+cache-budget = 80
 cache-cleanup-interval = "24h"
 
 [[scaleset]]
@@ -633,14 +841,14 @@ max-runners = 3
 
 [docker]
 shared-volume = "/shared"
-shared-volume-ttl = "168h"
+shared-volume-max-age = "168h"
 shared-volume-cleanup-interval = "30m"
 `)
 	if len(cfg.Warnings) != 0 {
 		t.Errorf("Warnings = %q, want none", cfg.Warnings)
 	}
-	if got := cfg.Defaults.Docker.SharedVolumeTTL; got != 168*time.Hour {
-		t.Errorf("SharedVolumeTTL = %v, want 168h", got)
+	if got := cfg.Defaults.Docker.SharedVolumeMaxAge; got != 168*time.Hour {
+		t.Errorf("SharedVolumeMaxAge = %v, want 168h", got)
 	}
 	if got := cfg.Defaults.Docker.SharedVolumeCleanupInterval; got != 30*time.Minute {
 		t.Errorf("SharedVolumeCleanupInterval = %v, want 30m", got)
@@ -671,7 +879,7 @@ func TestLoad_TartDecodingAndInheritance(t *testing.T) {
 home = "/Volumes/Data/tart"
 cache-cleanup = false
 cache-max-age = "168h"
-cache-space-budget = 80
+cache-budget = 80
 cache-cleanup-interval = "12h"
 `)
 		if len(cfg.Warnings) != 0 {
@@ -686,8 +894,8 @@ cache-cleanup-interval = "12h"
 		if got := cfg.Defaults.Tart.CacheMaxAge; got != 168*time.Hour {
 			t.Errorf("Tart.CacheMaxAge = %v, want 168h", got)
 		}
-		if got := cfg.Defaults.Tart.CacheSpaceBudgetGB; got != 80 {
-			t.Errorf("Tart.CacheSpaceBudgetGB = %d, want 80", got)
+		if got := cfg.Defaults.Tart.CacheBudgetGB; got != 80 {
+			t.Errorf("Tart.CacheBudgetGB = %d, want 80", got)
 		}
 		if got := cfg.Defaults.Tart.CacheCleanupInterval; got != 12*time.Hour {
 			t.Errorf("Tart.CacheCleanupInterval = %v, want 12h", got)
@@ -702,7 +910,7 @@ runner-image = "macos-base:latest"
 [tart]
 cache-cleanup = true
 cache-max-age = "168h"
-cache-space-budget = 50
+cache-budget = 50
 cache-cleanup-interval = "24h"
 
 [[scaleset]]
@@ -713,7 +921,7 @@ token = "token-a"
 [scaleset.tart]
 cache-cleanup = false
 cache-max-age = "48h"
-cache-space-budget = 100
+cache-budget = 100
 cache-cleanup-interval = "6h"
 
 [[scaleset]]
@@ -728,8 +936,8 @@ token = "token-b"
 		if sets[0].Tart.CacheMaxAge != 48*time.Hour {
 			t.Errorf("sets[0] max age = %v, want 48h", sets[0].Tart.CacheMaxAge)
 		}
-		if sets[0].Tart.CacheSpaceBudgetGB != 100 {
-			t.Errorf("sets[0] budget = %d, want 100", sets[0].Tart.CacheSpaceBudgetGB)
+		if sets[0].Tart.CacheBudgetGB != 100 {
+			t.Errorf("sets[0] budget = %d, want 100", sets[0].Tart.CacheBudgetGB)
 		}
 		if sets[0].Tart.CacheCleanupInterval != 6*time.Hour {
 			t.Errorf("sets[0] interval = %v, want 6h", sets[0].Tart.CacheCleanupInterval)
@@ -741,8 +949,8 @@ token = "token-b"
 		if sets[1].Tart.CacheMaxAge != 168*time.Hour {
 			t.Errorf("sets[1] max age = %v, want 168h", sets[1].Tart.CacheMaxAge)
 		}
-		if sets[1].Tart.CacheSpaceBudgetGB != 50 {
-			t.Errorf("sets[1] budget = %d, want 50", sets[1].Tart.CacheSpaceBudgetGB)
+		if sets[1].Tart.CacheBudgetGB != 50 {
+			t.Errorf("sets[1] budget = %d, want 50", sets[1].Tart.CacheBudgetGB)
 		}
 		if sets[1].Tart.CacheCleanupInterval != 24*time.Hour {
 			t.Errorf("sets[1] interval = %v, want 24h", sets[1].Tart.CacheCleanupInterval)

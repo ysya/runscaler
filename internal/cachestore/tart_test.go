@@ -44,17 +44,51 @@ func TestTartStore_PathFollowsTartHome(t *testing.T) {
 	}
 }
 
-// TestTartStore_PathFallsBackToDefaultTartHome pins the correctness point
-// specific to this task: an empty Home must resolve to tart's own default
-// ($HOME/.tart), never the system disk and never an empty string.
-func TestTartStore_PathFallsBackToDefaultTartHome(t *testing.T) {
-	tmp := t.TempDir()
-	t.Setenv("HOME", tmp)
+// TestTartStore_PathResolutionOrder pins the three-level TART_HOME
+// resolution Path() must share with internal/backend/tart.go's setVMMAC,
+// in the same order: cfg.Home, then the TART_HOME environment variable,
+// then tart's own default ($HOME/.tart). Dropping or reordering any level
+// makes this store report a path tart itself never reads or writes from,
+// which breaks the disk guard's per-filesystem grouping (see Path()'s doc
+// comment) — this is the correctness point specific to this task.
+func TestTartStore_PathResolutionOrder(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
 
-	s := NewTartStore(nil, TartConfig{Enabled: true})
-	want := filepath.Join(tmp, ".tart")
-	if got := s.Path(); got != want {
-		t.Errorf("Path() = %q, want %q", got, want)
+	tests := []struct {
+		name    string
+		cfgHome string
+		envHome string
+		want    string
+	}{
+		{
+			name:    "cfg.Home wins even when TART_HOME env is also set",
+			cfgHome: "/Volumes/FrankData/tart",
+			envHome: "/env/tart/home",
+			want:    "/Volumes/FrankData/tart",
+		},
+		{
+			name:    "TART_HOME env used when cfg.Home is empty",
+			cfgHome: "",
+			envHome: "/env/tart/home",
+			want:    "/env/tart/home",
+		},
+		{
+			name:    "falls through to $HOME/.tart when both are empty",
+			cfgHome: "",
+			envHome: "",
+			want:    filepath.Join(homeDir, ".tart"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("TART_HOME", tt.envHome)
+			s := NewTartStore(nil, TartConfig{Enabled: true, Home: tt.cfgHome})
+			if got := s.Path(); got != tt.want {
+				t.Errorf("Path() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -157,6 +191,7 @@ func TestTartStore_Measure(t *testing.T) {
 func TestTartStore_Measure_UsesDefaultHomeWhenUnset(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
+	t.Setenv("TART_HOME", "") // isolate from whatever the test host has exported
 	runner := &fakeCommandRunner{output: []byte("42\t/cache\n")}
 	s := NewTartStore(runner, TartConfig{Enabled: true})
 

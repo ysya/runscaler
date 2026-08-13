@@ -35,20 +35,35 @@ func NewTartStore(runner backend.CommandRunner, cfg TartConfig) CacheStore {
 func (s *tartStore) Name() string    { return "tart-cache" }
 func (s *tartStore) Kind() StoreKind { return KindCache }
 
-// Path returns the configured TART_HOME, falling back to tart's own default
-// ($HOME/.tart) when unset — never the system disk. On a host where
-// TART_HOME points at a dedicated volume (e.g. /Volumes/FrankData, 931 GB)
-// while Docker lives on the system disk, the disk guard groups stores by
-// filesystem; returning the wrong path here would make its thresholds
-// meaningless for this store. os.UserHomeDir() is a plain env-var read on
-// Unix, not a syscall, so — unlike the Docker stores' one-time Info()
-// resolution in docker.go — there is no need to cache this at construction
-// time; it is cheap enough for the disk guard's per-check Path() call on
-// every store.
+// Path returns the configured TART_HOME — never the system disk — resolved
+// in the same three levels and order as internal/backend/tart.go's
+// setVMMAC: cfg.Home, then the TART_HOME environment variable, then tart's
+// own default ($HOME/.tart). This must keep tracking setVMMAC's resolution
+// exactly: an operator can set TART_HOME via the environment instead of
+// [tart].home (execCommandRunner only injects TART_HOME into child
+// processes when cfg.Home is non-empty, otherwise the ambient environment —
+// including an operator-exported TART_HOME — passes through untouched), so
+// dropping the middle level would make this store report a path tart
+// itself never reads or writes from. On a host where TART_HOME points at a
+// dedicated volume (e.g. /Volumes/FrankData, 931 GB) while Docker lives on
+// the system disk, the disk guard groups stores by filesystem; naming the
+// wrong one here makes its thresholds meaningless for this store. Neither
+// the env read nor os.UserHomeDir() is a syscall, so — unlike the Docker
+// stores' one-time Info() resolution in docker.go — there is no need to
+// cache this at construction time; it is cheap enough for the disk guard's
+// per-check Path() call on every store.
 func (s *tartStore) Path() string {
 	if s.cfg.Home != "" {
 		return s.cfg.Home
 	}
+	if env := os.Getenv("TART_HOME"); env != "" {
+		return env
+	}
+	// A failed lookup degrades to "" rather than an error — Path() has no
+	// error return, and the disk guard already treats an unresolvable
+	// Path() as "skip this store, warn" (see resolveDockerRootDir in
+	// docker.go for the same precedent), so degrading quietly here is
+	// consistent with the rest of this package.
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""

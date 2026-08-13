@@ -292,12 +292,26 @@ type volumeAPI interface {
 	VolumeRemove(ctx context.Context, id string, options dockerclient.VolumeRemoveOptions) (dockerclient.VolumeRemoveResult, error)
 }
 
-// sharedVolumeNames lists shared volumes doctor treats as orphaned: the current
-// name plus legacy names from before the runscaler→runner rename.
+// sharedVolumeNames lists the shared volume names doctor looks for: the
+// current name plus legacy names from before the runscaler→runner rename.
 var sharedVolumeNames = []string{"runner-shared", "runscaler-shared"}
 
-// checkDockerVolume reports/cleans orphaned shared volumes. Returns the number
-// of unresolved issues.
+// checkDockerVolume reports, and with --fix removes, any shared volume whose
+// name matches. Returns the number of unresolved issues.
+//
+// The orphan test here is bare existence, which no longer matches the
+// design and needs revisiting (tracked as a follow-up; out of scope for the
+// cache-architecture branch). It was accurate while runner deleted the
+// shared volume at process exit, so a volume outliving the process really
+// did mean a crashed or killed run. runner now deliberately leaves that
+// volume in place — it holds handoff data a later job of an in-flight
+// workflow run still reads (see cachestore.NewSharedVolumeStore) — so a
+// volume outliving the process is the normal, expected state, and
+// `doctor --fix` run during an upgrade window will delete a live run's
+// handoff data. Reclamation belongs to shared-volume-max-age and the disk
+// guard's tier 3; a correct orphan test would need an in-flight check
+// (no runner containers on this daemon, nothing written within the
+// max-age window) rather than existence alone.
 func checkDockerVolume(ctx context.Context, client volumeAPI, fix bool) (int, error) {
 	found, issues := 0, 0
 	for _, name := range sharedVolumeNames {

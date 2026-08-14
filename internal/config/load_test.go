@@ -24,6 +24,41 @@ func loadTOML(t *testing.T, src string) Config {
 	return cfg
 }
 
+func TestLoad_DrainTimeoutUnsetDoesNotWarn(t *testing.T) {
+	cfg := loadTOML(t, `
+url = "https://github.com/org"
+name = "runners"
+token = "ghp_x"
+`)
+	if len(cfg.Warnings) != 0 {
+		t.Errorf("a config without drain-timeout must not warn, got %q", cfg.Warnings)
+	}
+	if cfg.DrainTimeout != nil {
+		t.Errorf("unset drain-timeout should decode to nil, got %v", *cfg.DrainTimeout)
+	}
+	if got := cfg.EffectiveDrainTimeout(); got != DefaultDrainTimeout {
+		t.Errorf("EffectiveDrainTimeout() = %v, want the default %v", got, DefaultDrainTimeout)
+	}
+}
+
+func TestLoad_DrainTimeoutExplicitZeroDisables(t *testing.T) {
+	cfg := loadTOML(t, `
+url = "https://github.com/org"
+name = "runners"
+token = "ghp_x"
+drain-timeout = "0s"
+`)
+	if cfg.DrainTimeout == nil || *cfg.DrainTimeout != 0 {
+		t.Fatalf("explicit 0s should decode to a non-nil zero, got %v", cfg.DrainTimeout)
+	}
+	if got := cfg.EffectiveDrainTimeout(); got != 0 {
+		t.Errorf("EffectiveDrainTimeout() = %v, want 0 (drain disabled)", got)
+	}
+	if len(cfg.Warnings) != 0 {
+		t.Errorf("explicit zero must not warn, got %q", cfg.Warnings)
+	}
+}
+
 // resolveTOML is loadTOML + ResolveScaleSets, with the token env fallbacks
 // neutralized so an ambient RUNNER_TOKEN cannot leak into assertions.
 func resolveTOML(t *testing.T, src string) []ScaleSetConfig {

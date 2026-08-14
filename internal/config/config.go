@@ -35,6 +35,9 @@ type Config struct {
 	HealthAddress string  `mapstructure:"health-address"`
 	DryRun        bool    `mapstructure:"dry-run"`
 	LogFile       *string `mapstructure:"log-file"`
+	// DrainTimeout is a pointer so an omitted value can inherit the two-hour
+	// default while an explicit "0s" can disable draining.
+	DrainTimeout *time.Duration `mapstructure:"drain-timeout"`
 
 	// Default values for scale sets + single-mode fields.
 	// Squashed so TOML keys (url, name, backend, etc.) stay at the top level.
@@ -610,6 +613,16 @@ func (c *Config) ValidateGlobal() error {
 		return fmt.Errorf("disk: %w", err)
 	}
 	return nil
+}
+
+// EffectiveDrainTimeout returns the configured process-wide drain budget.
+// Nil inherits DefaultDrainTimeout; zero or a negative duration explicitly
+// disables draining and preserves immediate-shutdown behavior.
+func (c *Config) EffectiveDrainTimeout() time.Duration {
+	if c.DrainTimeout != nil {
+		return *c.DrainTimeout
+	}
+	return DefaultDrainTimeout
 }
 
 // DiskConfig configures the periodic disk-pressure guard (internal/diskguard):

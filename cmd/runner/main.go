@@ -147,20 +147,58 @@ var startScaling = func(cmd *cobra.Command) error {
 	}
 	defer releaseLock()
 
-	ctx, cancel := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
+	runCtx, cancelRun := context.WithCancel(cmd.Context())
+	defer cancelRun()
 
-	// Force exit on second signal
-	go func() {
-		<-ctx.Done()
-		sig := make(chan os.Signal, 1)
-		signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
-		<-sig
+	drain := make(chan struct{})
+	sigCh := make(chan os.Signal, 3)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM, syscall.SIGQUIT)
+	defer signal.Stop(sigCh)
+
+	signalCtx, stopSignals := context.WithCancel(cmd.Context())
+	defer stopSignals()
+	go handleShutdownSignals(signalCtx, sigCh, func() { close(drain) }, cancelRun, func() {
 		fmt.Fprintln(os.Stderr, "\nForce exit")
 		os.Exit(1)
-	}()
+	})
 
-	return run(ctx, cfg)
+	return run(runCtx, cfg, drain)
+}
+
+// handleShutdownSignals implements the three-stage shutdown sequence.
+// SIGINT means stop now by terminal convention. SIGTERM and SIGQUIT request
+// a drain; a second signal cancels normal work immediately, and a third
+// bypasses cleanup entirely. forceExit is injected so the sequence is
+// testable without terminating the test process.
+func handleShutdownSignals(ctx context.Context, signals <-chan os.Signal, requestDrain, cancelRun, forceExit func()) {
+	next := func() (os.Signal, bool) {
+		select {
+		case <-ctx.Done():
+			return nil, false
+		case sig, ok := <-signals:
+			return sig, ok
+		}
+	}
+
+	first, ok := next()
+	if !ok {
+		return
+	}
+	if first == os.Interrupt {
+		cancelRun()
+	} else {
+		requestDrain()
+	}
+
+	if _, ok := next(); !ok {
+		return
+	}
+	cancelRun()
+
+	if _, ok := next(); !ok {
+		return
+	}
+	forceExit()
 }
 
 var cmd = &cobra.Command{
@@ -206,7 +244,7 @@ jobs — scaling runners up and down until interrupted.`,
 	},
 }
 
-func run(ctx context.Context, cfg config.Config) error {
+func run(ctx context.Context, cfg config.Config, drain <-chan struct{}) error {
 	if err := cfg.ValidateGlobal(); err != nil {
 		return fmt.Errorf("invalid global configuration: %w", err)
 	}
@@ -471,7 +509,7 @@ func run(ctx context.Context, cfg config.Config) error {
 		go func() {
 			defer wg.Done()
 			ssLogger := config.NewScaleSetLoggerWithWriter(cfg.LogLevel, cfg.LogFormat, ss.ScaleSetName, i, logFile)
-			if err := runScaleSet(runCtx, ss, dockerClients[ss.Docker.Socket], ssLogger, healthServer, tartCoordinator, guard); err != nil {
+			if err := runScaleSet(runCtx, drain, cfg.EffectiveDrainTimeout(), ss, dockerClients[ss.Docker.Socket], ssLogger, healthServer, tartCoordinator, guard); err != nil {
 				errs <- fmt.Errorf("scaleset %q: %w", ss.ScaleSetName, err)
 				cancelRun()
 			}
@@ -504,7 +542,7 @@ func run(ctx context.Context, cfg config.Config) error {
 // shared disk-pressure guard built once in run() (nil when the disk guard
 // is disabled); it is wired into this scale set's Scaler as its
 // pre-job-start check, see scaler.WithDiskChecker below.
-func runScaleSet(ctx context.Context, ss config.ScaleSetConfig, dockerClient *dockerclient.Client, logger *slog.Logger, h *health.HealthServer, tartCoordinator *backend.TartHostCoordinator, guard *diskguard.Guard) error {
+func runScaleSet(ctx context.Context, drain <-chan struct{}, drainTimeout time.Duration, ss config.ScaleSetConfig, dockerClient *dockerclient.Client, logger *slog.Logger, h *health.HealthServer, tartCoordinator *backend.TartHostCoordinator, guard *diskguard.Guard) error {
 	// Create scaleset client
 	scalesetClient, err := config.NewScalesetClient(ss.RegistrationURL, ss.Token, logger)
 	if err != nil {
@@ -592,6 +630,14 @@ func runScaleSet(ctx context.Context, ss config.ScaleSetConfig, dockerClient *do
 	s := scaler.NewScaler(scaleSet.ID, ss.MinRunners, ss.MaxRunners, b, scalesetClient, logger, scalerOpts...)
 	defer s.Shutdown(context.WithoutCancel(ctx))
 
+	// The listener must keep delivering JobCompleted messages while Drain
+	// waits. Only cancel its context after Drain returns (or immediately when
+	// draining is explicitly disabled); otherwise busy runners can never reach
+	// zero and every graceful stop degenerates into a timeout.
+	listenCtx, cancelListen := context.WithCancel(ctx)
+	defer cancelListen()
+	go watchScaleSetDrain(listenCtx, drain, drainTimeout, s, cancelListen, logger)
+
 	if ss.Docker.SharedVolume != "" {
 		logger.Info("Shared volume enabled",
 			slog.String("path", ss.Docker.SharedVolume),
@@ -630,12 +676,12 @@ func runScaleSet(ctx context.Context, ss config.ScaleSetConfig, dockerClient *do
 		if h != nil {
 			h.MarkDisconnected(ss.ScaleSetName, "connecting")
 		}
-		listenErr := listenOnce(ctx, scalesetClient, scaleSet.ID, sessionID, ss.MaxRunners, s, recorder, logger, func() {
+		listenErr := listenOnce(listenCtx, scalesetClient, scaleSet.ID, sessionID, ss.MaxRunners, s, recorder, logger, func() {
 			if h != nil {
 				h.MarkConnected(ss.ScaleSetName)
 			}
 		})
-		if ctx.Err() != nil || errors.Is(listenErr, context.Canceled) {
+		if listenCtx.Err() != nil || errors.Is(listenErr, context.Canceled) {
 			// Clean exit: the parent context was canceled (SIGTERM/SIGINT or
 			// another scale set encountered a permanent failure).
 			return nil
@@ -659,12 +705,47 @@ func runScaleSet(ctx context.Context, ss config.ScaleSetConfig, dockerClient *do
 		}
 
 		select {
-		case <-ctx.Done():
+		case <-listenCtx.Done():
 			return nil
 		case <-time.After(backoff):
 		}
 		backoff = min(backoff*2, maxBackoff)
 	}
+}
+
+type drainer interface {
+	Drain(context.Context) error
+}
+
+// watchScaleSetDrain bridges the process-wide drain broadcast to one scaler.
+// It deliberately leaves listenCtx alive during Drain so the listener can
+// report job completions. Once draining finishes or times out, cancelListen
+// ends the listener and runScaleSet's existing Shutdown defer removes any
+// resources that remain.
+func watchScaleSetDrain(listenCtx context.Context, drain <-chan struct{}, timeout time.Duration, d drainer, cancelListen context.CancelFunc, logger *slog.Logger) {
+	select {
+	case <-listenCtx.Done():
+		return
+	case <-drain:
+	}
+
+	if timeout <= 0 {
+		logger.Info("Runner drain disabled; stopping immediately")
+		cancelListen()
+		return
+	}
+
+	drainCtx, cancelDrain := context.WithTimeout(listenCtx, timeout)
+	err := d.Drain(drainCtx)
+	cancelDrain()
+	if errors.Is(err, context.DeadlineExceeded) {
+		logger.Warn("Runner drain timed out; forcing remaining runners to stop",
+			slog.Duration("timeout", timeout))
+	} else if err != nil && !errors.Is(err, context.Canceled) {
+		logger.Warn("Runner drain ended with an error; forcing remaining runners to stop",
+			slog.Any("error", err))
+	}
+	cancelListen()
 }
 
 func groupDockerScaleSets(scaleSets []config.ScaleSetConfig) map[string][]config.ScaleSetConfig {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/actions/scaleset"
@@ -42,6 +43,7 @@ type Scaler struct {
 	reconcileMu    sync.Mutex
 	desiredRunners int
 	diskChecker    DiskChecker
+	draining       atomic.Bool
 }
 
 // Compile-time check that Scaler implements listener.Scaler.
@@ -87,6 +89,9 @@ func NewScaler(scaleSetID, minRunners, maxRunners int, b backend.RunnerBackend, 
 func (s *Scaler) HandleDesiredRunnerCount(ctx context.Context, count int) (int, error) {
 	s.reconcileMu.Lock()
 	defer s.reconcileMu.Unlock()
+	if s.draining.Load() {
+		return s.runners.count(), nil
+	}
 	s.desiredRunners = count
 	currentCount := s.runners.count()
 	targetRunnerCount := min(s.maxRunners, s.minRunners+count)
@@ -125,7 +130,14 @@ func (s *Scaler) HandleJobStarted(ctx context.Context, jobInfo *scaleset.JobStar
 		slog.String("jobId", jobInfo.JobID),
 		slog.String("runnerName", jobInfo.RunnerName),
 	)
-	if !s.runners.markBusy(jobInfo.RunnerName) {
+	// Serialize the idle→busy transition with Drain's idle removal. If the
+	// job-start message wins the lock, Drain sees a busy runner and preserves
+	// it; if Drain wins, this runner was idle at the drain boundary and is
+	// removed before the callback can claim it.
+	s.reconcileMu.Lock()
+	marked := s.runners.markBusy(jobInfo.RunnerName)
+	s.reconcileMu.Unlock()
+	if !marked {
 		s.logger.Warn("Job started for unknown runner (already removed?)", slog.String("runnerName", jobInfo.RunnerName))
 	}
 	return nil
@@ -268,7 +280,7 @@ func (s *Scaler) watchRunner(ctx context.Context, watcher backend.RunnerWatcher,
 	// desired-count message, which may never arrive while a job remains queued.
 	s.reconcileMu.Lock()
 	defer s.reconcileMu.Unlock()
-	if ctx.Err() != nil {
+	if ctx.Err() != nil || s.draining.Load() {
 		return
 	}
 	target := min(s.maxRunners, s.minRunners+s.desiredRunners)
@@ -278,6 +290,74 @@ func (s *Scaler) watchRunner(ctx context.Context, watcher backend.RunnerWatcher,
 	if _, err := s.startRunner(ctx); err != nil {
 		s.logger.Error("Failed to replace exited runner", slog.Any("error", err))
 	}
+}
+
+// Drain stops taking new work and waits for in-flight jobs to finish. Idle
+// runners are removed immediately because they hold no work. It returns when
+// no busy runners remain or ctx expires, whichever comes first.
+//
+// The listener must remain running while this method waits: JobCompleted
+// messages delivered through the listener are what move busy runners to zero.
+// The caller should cancel the listener only after Drain returns, then invoke
+// Shutdown to force-remove anything left after a deadline or removal failure.
+func (s *Scaler) Drain(ctx context.Context) error {
+	s.draining.Store(true)
+	started := time.Now()
+
+	// Wait for any in-progress scale-up to finish, then keep job-start
+	// callbacks out while deciding which runners were idle at the drain
+	// boundary. Successful removals are deleted from state; failed removals
+	// stay tracked so the caller's final Shutdown can retry them.
+	s.reconcileMu.Lock()
+	for name, resourceID := range s.runners.idleSnapshot() {
+		if err := s.backend.RemoveRunner(ctx, resourceID); err != nil {
+			s.logger.Warn("Failed to remove idle runner during drain",
+				slog.String("name", name),
+				slog.Any("error", err))
+			continue
+		}
+		s.runners.removeIdle(name, resourceID)
+	}
+	s.reconcileMu.Unlock()
+
+	_, busy := s.runners.counts()
+	s.logger.Info("Draining runners", slog.Int("busy", busy))
+	if busy == 0 {
+		return nil
+	}
+
+	poll := time.NewTicker(time.Second)
+	defer poll.Stop()
+	progress := time.NewTicker(30 * time.Second)
+	defer progress.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			_, busy = s.runners.counts()
+			s.logger.Warn("Runner drain ended before all jobs completed",
+				slog.Int("busy", busy),
+				slog.Duration("waited", time.Since(started)),
+				slog.Any("error", ctx.Err()))
+			return ctx.Err()
+		case <-poll.C:
+			_, busy = s.runners.counts()
+			if busy == 0 {
+				s.logger.Info("Runner drain complete", slog.Duration("waited", time.Since(started)))
+				return nil
+			}
+		case <-progress.C:
+			_, busy = s.runners.counts()
+			s.logger.Info("Waiting for in-flight jobs to finish",
+				slog.Int("busy", busy),
+				slog.Duration("waited", time.Since(started)))
+		}
+	}
+}
+
+// IsDraining reports whether this scaler has stopped accepting new work.
+func (s *Scaler) IsDraining() bool {
+	return s.draining.Load()
 }
 
 // Shutdown force-removes all managed runners in parallel.
@@ -353,6 +433,26 @@ func (r *runnerState) addIdle(name, resourceID string) {
 	r.mu.Lock()
 	r.idle[name] = resourceID
 	r.mu.Unlock()
+}
+
+func (r *runnerState) idleSnapshot() map[string]string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	result := make(map[string]string, len(r.idle))
+	for name, resourceID := range r.idle {
+		result[name] = resourceID
+	}
+	return result
+}
+
+func (r *runnerState) removeIdle(name, resourceID string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if got, ok := r.idle[name]; ok && got == resourceID {
+		delete(r.idle, name)
+		return true
+	}
+	return false
 }
 
 func (r *runnerState) contains(name, resourceID string) bool {

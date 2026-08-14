@@ -433,6 +433,103 @@ func TestShutdown(t *testing.T) {
 	}
 }
 
+func TestDrain_RemovesIdleKeepsBusy(t *testing.T) {
+	mb := &mockBackend{}
+	s := NewScaler(1, 0, 5, mb, &mockScaleset{}, slog.New(slog.DiscardHandler))
+	s.runners.addIdle("runner-idle", "res-idle")
+	s.runners.addIdle("runner-busy", "res-busy")
+	s.runners.markBusy("runner-busy")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	_ = s.Drain(ctx)
+
+	if !containsString(mb.removed, "res-idle") {
+		t.Error("idle runner should be removed immediately — it holds no work")
+	}
+	if containsString(mb.removed, "res-busy") {
+		t.Error("busy runner was removed during drain; its job is still running")
+	}
+	if !s.IsDraining() {
+		t.Error("scaler should remain in draining state")
+	}
+}
+
+func TestDrain_ReturnsWhenBusyReachesZero(t *testing.T) {
+	mb := &mockBackend{}
+	s := NewScaler(1, 0, 5, mb, &mockScaleset{}, slog.New(slog.DiscardHandler))
+	s.runners.addIdle("runner-busy", "res-busy")
+	s.runners.markBusy("runner-busy")
+
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		s.runners.markDone("runner-busy")
+	}()
+
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := s.Drain(ctx); err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if time.Since(start) > 5*time.Second {
+		t.Error("Drain should return as soon as the last busy runner finishes")
+	}
+}
+
+func TestDrain_StopsScalingUp(t *testing.T) {
+	mb := &mockBackend{}
+	s := NewScaler(1, 0, 5, mb, &mockScaleset{}, slog.New(slog.DiscardHandler))
+
+	if err := s.Drain(context.Background()); err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	got, err := s.HandleDesiredRunnerCount(context.Background(), 3)
+	if err != nil {
+		t.Fatalf("HandleDesiredRunnerCount: %v", err)
+	}
+	if got != 0 || len(mb.started) != 0 {
+		t.Errorf("draining scaler started %d runners (count=%d); it must take no new work",
+			len(mb.started), got)
+	}
+}
+
+func TestExitedRunnerIsNotReplacedWhileDraining(t *testing.T) {
+	b := &watcherBackend{waits: make(map[string]chan struct{})}
+	s := NewScaler(1, 0, 2, b, &mockScaleset{}, slog.New(slog.DiscardHandler))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if _, err := s.HandleDesiredRunnerCount(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	s.draining.Store(true)
+	b.crashFirst()
+
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for {
+		if idle, busy := s.RunnerCounts(); idle == 0 && busy == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("crashed runner was not removed from state")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := b.startedCount(); got != 1 {
+		t.Fatalf("started runners = %d, want no replacement while draining", got)
+	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
 // --- startRunner disk-check tests ---
 
 func TestStartRunner_ReclaimsWhenDiskLow(t *testing.T) {

@@ -170,13 +170,33 @@ jobs:
 | `runner run`             | Start the auto-scaler                                  |
 | `runner init`            | Generate a config file interactively                   |
 | `runner validate`        | Validate configuration and connectivity                |
-| `runner status`          | Show current runner status via health endpoint         |
+| `runner status`          | Show capacity, connections, jobs, queues, and disk headroom |
 | `runner doctor`          | Diagnose and clean up orphaned containers/VMs          |
 | `runner cache`           | Show disk usage and retention policy for every cache store |
 | `runner logs`            | Show/follow runner's rotating log file                  |
 | `runner version`         | Show version, commit, build date, and runtime info     |
 | `runner update`          | Update runner to the latest release                    |
 | `runner update --check`  | Check for updates without installing                   |
+
+### Status dashboard
+
+`runner status` turns the local `/healthz` snapshot into an operator-friendly
+dashboard. The summary rolls up ready scale sets, idle/busy/desired runners,
+queue depth, and process-lifetime job counters. Each scale set then shows its
+connection state, last successful connection, and last error. The disk section
+shows cheap filesystem-level free-space readings; use `runner cache` when you
+need the slower per-store usage measurements.
+
+```bash
+# Human-readable dashboard; color is enabled automatically in a terminal
+runner status
+
+# Stable machine-readable health response
+runner status --json
+
+# Plain dashboard for logs or terminals where color is undesirable
+runner status --no-color
+```
 
 ### Updating
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"slices"
+	"strings"
 	"testing"
 
 	cerrdefs "github.com/containerd/errdefs"
@@ -169,5 +170,83 @@ func TestRemoveOrphanContainers_NeverTouchesVolumes(t *testing.T) {
 	if len(md.volumesRemoved) != 0 {
 		t.Errorf("reconciliation removed volumes %v — the shared volume carries "+
 			"handoff data between jobs of one workflow run", md.volumesRemoved)
+	}
+}
+
+type mockCommandRunner struct {
+	results map[string][]byte
+	errs    map[string]error
+	calls   []string
+}
+
+func (m *mockCommandRunner) setResult(key, out string) {
+	if m.results == nil {
+		m.results = make(map[string][]byte)
+	}
+	m.results[key] = []byte(out)
+}
+
+func (m *mockCommandRunner) Run(_ context.Context, name string, args ...string) ([]byte, error) {
+	key := strings.Join(append([]string{name}, args...), " ")
+	m.calls = append(m.calls, key)
+	if err := m.errs[key]; err != nil {
+		return nil, err
+	}
+	return m.results[key], nil
+}
+
+func (m *mockCommandRunner) RunStreaming(ctx context.Context, name string, args ...string) error {
+	_, err := m.Run(ctx, name, args...)
+	return err
+}
+
+func TestFindOrphanTartVMs_MatchesRunnerAndPoolNames(t *testing.T) {
+	mc := &mockCommandRunner{}
+	mc.setResult("tart list --format json", `[
+	  {"Name":"runner-deadbeef","Source":"local"},
+	  {"Name":"pool-0-1778066579017","Source":"local"},
+	  {"Name":"runner-nothex00","Source":"local"},
+	  {"Name":"pool-x-1778066579017","Source":"local"},
+	  {"Name":"macos-tahoe-base","Source":"local"},
+	  {"Name":"runner-0011aabb","Source":"OCI"},
+	  {"Name":"ghcr.io/cirruslabs/macos-tahoe-xcode:latest","Source":"OCI"}
+	]`)
+
+	got, err := findOrphanTartVMs(context.Background(), mc)
+	if err != nil {
+		t.Fatalf("findOrphanTartVMs: %v", err)
+	}
+	want := map[string]bool{"runner-deadbeef": true, "pool-0-1778066579017": true}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want exactly %v — base images and user VMs must not be claimed", got, want)
+	}
+	for _, name := range got {
+		if !want[name] {
+			t.Errorf("claimed %q, which runner did not create", name)
+		}
+	}
+}
+
+func TestRemoveOrphanTartVMs_ContinuesAfterDeleteFailure(t *testing.T) {
+	mc := &mockCommandRunner{errs: map[string]error{
+		"tart stop runner-deadbeef":   errors.New("already stopped"),
+		"tart delete runner-deadbeef": errors.New("simulated delete failure"),
+	}}
+
+	removed := removeOrphanTartVMs(context.Background(), mc,
+		[]string{"runner-deadbeef", "pool-0-1778066579017"}, slog.New(slog.DiscardHandler))
+
+	if removed != 1 {
+		t.Errorf("removed = %d, want 1", removed)
+	}
+	for _, want := range []string{
+		"tart stop runner-deadbeef",
+		"tart delete runner-deadbeef",
+		"tart stop pool-0-1778066579017",
+		"tart delete pool-0-1778066579017",
+	} {
+		if !slices.Contains(mc.calls, want) {
+			t.Errorf("missing command %q in %v", want, mc.calls)
+		}
 	}
 }

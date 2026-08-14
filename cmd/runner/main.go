@@ -364,6 +364,18 @@ func run(ctx context.Context, cfg config.Config) error {
 		return nil
 	}
 
+	// The machine-wide lock is acquired by startScaling before run is called,
+	// so resources created by runner but still present now belong to a dead
+	// previous process. Reconcile them before any new scale set can start.
+	// Dry-run returns above because it must not perform destructive cleanup.
+	var tartHomes []string
+	for _, ss := range scaleSets {
+		if ss.IsTart() {
+			tartHomes = append(tartHomes, ss.Tart.Home)
+		}
+	}
+	reconcileOrphans(ctx, dockerClients, tartHomes, logger)
+
 	// Start health check server
 	var healthServer *health.HealthServer
 	if cfg.HealthPort > 0 {

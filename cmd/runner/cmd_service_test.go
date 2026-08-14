@@ -1,30 +1,28 @@
 package main
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
-)
+	"time"
 
-// renderSystemdUnit renders the systemd unit template with the given data.
-func renderSystemdUnit(t *testing.T, data systemdData) string {
-	t.Helper()
-	var sb strings.Builder
-	if err := systemdTmpl.Execute(&sb, data); err != nil {
-		t.Fatalf("render systemd template: %v", err)
-	}
-	return sb.String()
-}
+	"github.com/ysya/runscaler/internal/config"
+)
 
 func TestSystemdUnitUserModeOmitsDockerDependency(t *testing.T) {
 	// User-level units cannot reference system units: systemd fails with
 	// "Unit docker.service not found" and the service never starts.
-	unit := renderSystemdUnit(t, systemdData{
-		Description: serviceDescription,
-		BinaryPath:  "/home/test/runner/runner",
-		ConfigPath:  "/home/test/runner/config.toml",
-		AfterDocker: true,
-		User:        true,
+	unit, err := renderSystemdUnit(installOpts{
+		binaryPath: "/home/test/runner/runner",
+		configPath: "/home/test/runner/config.toml",
+		backend:    "docker",
+		user:       true,
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if strings.Contains(unit, "docker.service") {
 		t.Errorf("user-level unit must not reference system unit docker.service:\n%s", unit)
@@ -35,14 +33,14 @@ func TestSystemdUnitUserModeOmitsDockerDependency(t *testing.T) {
 }
 
 func TestSystemdUnitSystemModeKeepsDockerDependency(t *testing.T) {
-	unit := renderSystemdUnit(t, systemdData{
-		Description:    serviceDescription,
-		BinaryPath:     "/usr/local/bin/runner",
-		ConfigPath:     "/etc/runner/config.toml",
-		AfterDocker:    true,
-		User:           false,
-		ReadWritePaths: "/etc/runner /var/run/docker.sock",
+	unit, err := renderSystemdUnit(installOpts{
+		binaryPath: "/usr/local/bin/runner",
+		configPath: "/etc/runner/config.toml",
+		backend:    "docker",
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	for _, want := range []string{
 		"After=docker.service",
@@ -59,26 +57,98 @@ func TestSystemdUnitSystemModeKeepsDockerDependency(t *testing.T) {
 	}
 }
 
-func renderLaunchdPlist(t *testing.T, data launchdData) string {
-	t.Helper()
-	var sb strings.Builder
-	if err := launchdTmpl.Execute(&sb, data); err != nil {
-		t.Fatalf("render launchd template: %v", err)
-	}
-	return sb.String()
-}
-
 func TestLaunchdPlistInvokesRunSubcommand(t *testing.T) {
-	plist := renderLaunchdPlist(t, launchdData{
-		Label:      launchdLabel,
-		BinaryPath: "/usr/local/bin/runner",
-		ConfigPath: "/etc/runner/config.toml",
-		LogPath:    "/var/log/runner.log",
+	plist, err := renderLaunchdPlist(installOpts{
+		binaryPath: "/usr/local/bin/runner",
+		configPath: "/etc/runner/config.toml",
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !strings.Contains(plist, "<string>run</string>") {
 		t.Errorf("ProgramArguments must include the `run` subcommand:\n%s", plist)
 	}
 	if !strings.Contains(plist, "io.github.ysya.runner") {
 		t.Errorf("launchd label should be io.github.ysya.runner:\n%s", plist)
+	}
+}
+
+func TestSystemdTemplateBoundsStopByDrainTimeout(t *testing.T) {
+	unit, err := renderSystemdUnit(installOpts{
+		user: true, configPath: "/etc/runner/config.toml", binaryPath: "/usr/local/bin/runner",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := int((config.DefaultDrainTimeout + time.Minute).Seconds())
+	if !strings.Contains(unit, fmt.Sprintf("TimeoutStopSec=%d", want)) {
+		t.Errorf("TimeoutStopSec must exceed the drain budget (%v), unit was:\n%s",
+			config.DefaultDrainTimeout, unit)
+	}
+}
+
+func TestLaunchdTemplateSetsExitTimeOut(t *testing.T) {
+	plist, err := renderLaunchdPlist(installOpts{
+		configPath: "/Users/admin/runner/config.toml", binaryPath: "/usr/local/bin/runner",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := int((config.DefaultDrainTimeout + time.Minute).Seconds())
+	for _, fragment := range []string{"<key>ExitTimeOut</key>", fmt.Sprintf("<integer>%d</integer>", want)} {
+		if !strings.Contains(plist, fragment) {
+			t.Errorf("launchd plist missing %q:\n%s", fragment, plist)
+		}
+	}
+}
+
+func TestServiceTemplatesHonorConfiguredDrainTimeout(t *testing.T) {
+	custom := 3 * time.Hour
+	unit, err := renderSystemdUnit(installOpts{configPath: "/etc/runner/config.toml", drainTimeout: &custom})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := int((custom + time.Minute).Seconds())
+	if !strings.Contains(unit, fmt.Sprintf("TimeoutStopSec=%d", want)) {
+		t.Errorf("custom drain timeout not reflected in unit:\n%s", unit)
+	}
+
+	disabled := time.Duration(0)
+	plist, err := renderLaunchdPlist(installOpts{configPath: "/etc/runner/config.toml", drainTimeout: &disabled})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(plist, "<integer>60</integer>") {
+		t.Errorf("disabled drain should leave one minute for immediate cleanup:\n%s", plist)
+	}
+}
+
+func TestDetectDrainTimeoutPreservesUnsetAndExplicitZero(t *testing.T) {
+	dir := t.TempDir()
+	writeConfig := func(name, body string) string {
+		t.Helper()
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+
+	unset, err := detectDrainTimeout(writeConfig("unset.toml", `name = "runner"`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unset != nil {
+		t.Fatalf("omitted drain-timeout = %v, want nil/default", *unset)
+	}
+
+	explicit, err := detectDrainTimeout(writeConfig("zero.toml", `drain-timeout = "0s"`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if explicit == nil || *explicit != 0 {
+		t.Fatalf("explicit zero = %v, want non-nil zero", explicit)
 	}
 }

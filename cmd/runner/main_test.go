@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/ysya/runscaler/internal/config"
 )
 
 func TestHandleShutdownSignals_DrainsThenCancelsThenForces(t *testing.T) {
@@ -118,6 +120,38 @@ func assertOpen(t *testing.T, ch <-chan struct{}, failure string) {
 	case <-ch:
 		t.Fatal(failure)
 	default:
+	}
+}
+
+func TestLogServiceDrainTimeoutReminder(t *testing.T) {
+	t.Setenv("INVOCATION_ID", "test-invocation")
+	t.Setenv("XPC_SERVICE_NAME", "")
+	var logs strings.Builder
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+
+	logServiceDrainTimeoutReminder(config.DefaultDrainTimeout, logger)
+	for _, want := range []string{"systemd", "runner service install", "drainTimeout"} {
+		if !strings.Contains(logs.String(), want) {
+			t.Errorf("service timeout reminder missing %q:\n%s", want, logs.String())
+		}
+	}
+}
+
+func TestLogServiceDrainTimeoutReminder_SkipsInteractiveOrDisabled(t *testing.T) {
+	t.Setenv("INVOCATION_ID", "")
+	t.Setenv("XPC_SERVICE_NAME", "")
+	var logs strings.Builder
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+
+	logServiceDrainTimeoutReminder(config.DefaultDrainTimeout, logger)
+	if logs.Len() != 0 {
+		t.Errorf("interactive run got a service reminder:\n%s", logs.String())
+	}
+
+	t.Setenv("INVOCATION_ID", "test-invocation")
+	logServiceDrainTimeoutReminder(0, logger)
+	if logs.Len() != 0 {
+		t.Errorf("disabled drain got a service reminder:\n%s", logs.String())
 	}
 }
 

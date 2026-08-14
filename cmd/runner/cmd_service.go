@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"text/template"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -49,6 +50,9 @@ type installOpts struct {
 	binaryPath string
 	noStart    bool
 	backend    string
+	// nil means the config omitted drain-timeout and therefore inherits the
+	// compiled-in default; a non-nil zero explicitly disables draining.
+	drainTimeout *time.Duration
 }
 
 func newServiceManager() (serviceManager, error) {
@@ -187,13 +191,18 @@ func runServiceInstall(cmd *cobra.Command, _ []string) error {
 	}
 
 	backend := detectBackend(configPath)
+	drainTimeout, err := detectDrainTimeout(configPath)
+	if err != nil {
+		return err
+	}
 
 	return mgr.install(installOpts{
-		user:       user,
-		configPath: configPath,
-		binaryPath: binaryPath,
-		noStart:    noStart,
-		backend:    backend,
+		user:         user,
+		configPath:   configPath,
+		binaryPath:   binaryPath,
+		noStart:      noStart,
+		backend:      backend,
+		drainTimeout: drainTimeout,
 	})
 }
 
@@ -283,6 +292,8 @@ Type=simple
 ExecStart={{.BinaryPath}} run --config {{.ConfigPath}}
 Restart=on-failure
 RestartSec=10s
+# Must exceed runner's drain budget so systemd does not SIGKILL an in-flight job.
+TimeoutStopSec={{.StopTimeoutSeconds}}
 {{- if not .User}}
 NoNewPrivileges=true
 ProtectSystem=strict
@@ -294,15 +305,41 @@ WantedBy={{- if .User}}default.target{{- else}}multi-user.target{{- end}}
 `))
 
 type systemdData struct {
-	Description    string
-	BinaryPath     string
-	ConfigPath     string
-	AfterDocker    bool
-	User           bool
-	ReadWritePaths string
+	Description        string
+	BinaryPath         string
+	ConfigPath         string
+	AfterDocker        bool
+	User               bool
+	ReadWritePaths     string
+	StopTimeoutSeconds int
 }
 
 type systemdManager struct{}
+
+// renderSystemdUnit renders the complete unit used by install. Keeping
+// rendering separate from filesystem writes makes the stop-timeout safety
+// property directly testable.
+func renderSystemdUnit(opts installOpts) (string, error) {
+	rwPaths := filepath.Dir(opts.configPath)
+	if opts.backend == "docker" {
+		rwPaths += " /var/run/docker.sock"
+	}
+
+	data := systemdData{
+		Description:        serviceDescription,
+		BinaryPath:         opts.binaryPath,
+		ConfigPath:         opts.configPath,
+		AfterDocker:        opts.backend == "docker",
+		User:               opts.user,
+		ReadWritePaths:     rwPaths,
+		StopTimeoutSeconds: int(serviceStopTimeout(opts.drainTimeout).Seconds()),
+	}
+	var out strings.Builder
+	if err := systemdTmpl.Execute(&out, data); err != nil {
+		return "", fmt.Errorf("render systemd unit: %w", err)
+	}
+	return out.String(), nil
+}
 
 func (m *systemdManager) install(opts installOpts) error {
 	unitDir := systemdSystemDir
@@ -321,28 +358,12 @@ func (m *systemdManager) install(opts installOpts) error {
 		return fmt.Errorf("service already installed at %s\n\n  Run 'runner service uninstall' first", unitPath)
 	}
 
-	rwPaths := filepath.Dir(opts.configPath)
-	if opts.backend == "docker" {
-		rwPaths += " /var/run/docker.sock"
-	}
-
-	data := systemdData{
-		Description:    serviceDescription,
-		BinaryPath:     opts.binaryPath,
-		ConfigPath:     opts.configPath,
-		AfterDocker:    opts.backend == "docker",
-		User:           opts.user,
-		ReadWritePaths: rwPaths,
-	}
-
-	f, err := os.Create(unitPath)
+	unit, err := renderSystemdUnit(opts)
 	if err != nil {
-		return fmt.Errorf("failed to write unit file: %w", err)
-	}
-	defer f.Close()
-
-	if err := systemdTmpl.Execute(f, data); err != nil {
 		return fmt.Errorf("failed to render unit template: %w", err)
+	}
+	if err := os.WriteFile(unitPath, []byte(unit), 0644); err != nil {
+		return fmt.Errorf("failed to write unit file: %w", err)
 	}
 	fmt.Printf("  ✓ Service file installed at %s\n", unitPath)
 
@@ -456,6 +477,9 @@ var launchdTmpl = template.Must(template.New("launchd").Parse(`<?xml version="1.
     </dict>
     <key>ThrottleInterval</key>
     <integer>10</integer>
+    <!-- Must exceed runner's drain budget so launchd does not SIGKILL an in-flight job. -->
+    <key>ExitTimeOut</key>
+    <integer>{{.StopTimeoutSeconds}}</integer>
     <key>StandardOutPath</key>
     <string>{{.LogPath}}</string>
     <key>StandardErrorPath</key>
@@ -465,13 +489,31 @@ var launchdTmpl = template.Must(template.New("launchd").Parse(`<?xml version="1.
 `))
 
 type launchdData struct {
-	Label      string
-	BinaryPath string
-	ConfigPath string
-	LogPath    string
+	Label              string
+	BinaryPath         string
+	ConfigPath         string
+	LogPath            string
+	StopTimeoutSeconds int
 }
 
 type launchdManager struct{}
+
+// renderLaunchdPlist renders the complete plist used by install.
+func renderLaunchdPlist(opts installOpts) (string, error) {
+	m := &launchdManager{}
+	data := launchdData{
+		Label:              launchdLabel,
+		BinaryPath:         opts.binaryPath,
+		ConfigPath:         opts.configPath,
+		LogPath:            m.logPath(opts.user),
+		StopTimeoutSeconds: int(serviceStopTimeout(opts.drainTimeout).Seconds()),
+	}
+	var out strings.Builder
+	if err := launchdTmpl.Execute(&out, data); err != nil {
+		return "", fmt.Errorf("render launchd plist: %w", err)
+	}
+	return out.String(), nil
+}
 
 func (m *launchdManager) plistPath(user bool) string {
 	if user {
@@ -504,21 +546,12 @@ func (m *launchdManager) install(opts installOpts) error {
 		return fmt.Errorf("service already installed at %s\n\n  Run 'runner service uninstall' first", plist)
 	}
 
-	data := launchdData{
-		Label:      launchdLabel,
-		BinaryPath: opts.binaryPath,
-		ConfigPath: opts.configPath,
-		LogPath:    m.logPath(opts.user),
-	}
-
-	f, err := os.Create(plist)
+	rendered, err := renderLaunchdPlist(opts)
 	if err != nil {
-		return fmt.Errorf("failed to write plist file: %w", err)
-	}
-	defer f.Close()
-
-	if err := launchdTmpl.Execute(f, data); err != nil {
 		return fmt.Errorf("failed to render plist template: %w", err)
+	}
+	if err := os.WriteFile(plist, []byte(rendered), 0644); err != nil {
+		return fmt.Errorf("failed to write plist file: %w", err)
 	}
 	fmt.Printf("  ✓ Service file installed at %s\n", plist)
 
@@ -646,6 +679,41 @@ func detectBackend(configPath string) string {
 		return config.DefaultBackend
 	}
 	return b
+}
+
+// detectDrainTimeout reads only enough configuration to preserve the
+// distinction between an omitted value (nil, inherit the default) and an
+// explicit zero (disable drain). Missing config keeps the existing install
+// behavior: runServiceInstall has already warned and the generated service
+// uses the compiled-in default.
+func detectDrainTimeout(configPath string) (*time.Duration, error) {
+	if configPath == "" {
+		return nil, nil
+	}
+	v := viper.New()
+	v.SetConfigFile(configPath)
+	if err := v.ReadInConfig(); err != nil {
+		return nil, nil
+	}
+	cfg, err := config.Load(v)
+	if err != nil {
+		return nil, fmt.Errorf("read drain-timeout from %s: %w", configPath, err)
+	}
+	return cfg.DrainTimeout, nil
+}
+
+// serviceStopTimeout gives the service manager one minute beyond runner's
+// own drain deadline. When drain is disabled, that minute still covers the
+// normal 30-second forced cleanup and scale-set deletion.
+func serviceStopTimeout(configured *time.Duration) time.Duration {
+	drainTimeout := config.DefaultDrainTimeout
+	if configured != nil {
+		drainTimeout = *configured
+	}
+	if drainTimeout < 0 {
+		drainTimeout = 0
+	}
+	return drainTimeout + time.Minute
 }
 
 func platformDefaultBackend() string {

@@ -266,6 +266,7 @@ func run(ctx context.Context, cfg config.Config, drain <-chan struct{}) error {
 	for _, w := range cfg.Warnings {
 		logger.Warn(w)
 	}
+	logServiceDrainTimeoutReminder(cfg.EffectiveDrainTimeout(), logger)
 
 	scaleSets := cfg.ResolveScaleSets()
 	for i := range scaleSets {
@@ -536,6 +537,31 @@ func run(ctx context.Context, cfg config.Config, drain <-chan struct{}) error {
 		return errors.Join(errsSlice...)
 	}
 	return nil
+}
+
+// logServiceDrainTimeoutReminder tells service-managed deployments about the
+// one manual upgrade step this release cannot perform itself: existing unit
+// files are not rewritten by a binary update, so an older supervisor timeout
+// can still cut a two-hour drain short. It intentionally does not inspect or
+// modify service-manager state; startup reconciliation handles any leftovers
+// if the reminder is ignored.
+func logServiceDrainTimeoutReminder(drainTimeout time.Duration, logger *slog.Logger) {
+	if drainTimeout <= 0 {
+		return
+	}
+	manager := ""
+	switch {
+	case os.Getenv("INVOCATION_ID") != "":
+		manager = "systemd"
+	case os.Getenv("XPC_SERVICE_NAME") != "":
+		manager = "launchd"
+	default:
+		return
+	}
+	logger.Info("Service stop timeout may predate drain support; reinstall the service so restarts can wait for in-flight jobs",
+		slog.String("serviceManager", manager),
+		slog.Duration("drainTimeout", drainTimeout),
+		slog.String("action", "runner service uninstall, then runner service install"))
 }
 
 // runScaleSet manages the lifecycle of a single scale set. guard is the

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -18,6 +19,7 @@ import (
 	dockerclient "github.com/moby/moby/client"
 	"github.com/spf13/cobra"
 
+	"github.com/ysya/runscaler/internal/backend"
 	"github.com/ysya/runscaler/internal/config"
 	runnerlock "github.com/ysya/runscaler/internal/lock"
 )
@@ -237,26 +239,13 @@ func containerDisplayName(c container.Summary) string {
 	return c.ID
 }
 
-// checkDockerContainers finds and optionally removes orphaned runner containers.
-func checkDockerContainers(ctx context.Context, client *dockerclient.Client, fix bool) (int, error) {
-	result, err := client.ContainerList(ctx, dockerclient.ContainerListOptions{All: true})
+// checkDockerContainers finds and optionally removes orphaned runner
+// containers, via findOrphanContainers and removeOrphanContainers.
+func checkDockerContainers(ctx context.Context, client backend.DockerAPI, fix bool) (int, error) {
+	orphans, err := findOrphanContainers(ctx, client)
 	if err != nil {
 		fmt.Printf("  ✗ Failed to list Docker containers: %s\n", err)
 		return 0, err
-	}
-
-	var orphans []container.Summary
-	for _, c := range result.Items {
-		if c.Labels["managed-by"] == "runner" {
-			orphans = append(orphans, c)
-			continue
-		}
-		for _, name := range c.Names {
-			if runnerNamePattern.MatchString(name) {
-				orphans = append(orphans, c)
-				break
-			}
-		}
 	}
 
 	if len(orphans) == 0 {
@@ -266,22 +255,16 @@ func checkDockerContainers(ctx context.Context, client *dockerclient.Client, fix
 
 	if !fix {
 		fmt.Printf("  ⚠ Found %d orphaned Docker container(s)\n", len(orphans))
-		for _, c := range orphans {
-			fmt.Printf("      %s (%s)\n", containerDisplayName(c), c.State)
+		for _, o := range orphans {
+			fmt.Printf("      %s (%s)\n", o.Name, o.Status)
 		}
 		return len(orphans), nil
 	}
 
-	// Fix: remove orphaned containers
-	removed := 0
-	for _, c := range orphans {
-		name := containerDisplayName(c)
-		if _, err := client.ContainerRemove(ctx, c.ID, dockerclient.ContainerRemoveOptions{Force: true}); err != nil {
-			fmt.Printf("  ✗ Failed to remove container %s: %s\n", name, err)
-		} else {
-			removed++
-		}
-	}
+	// Fix: remove orphaned containers. Per-container failures are logged
+	// (see removeOrphanContainers) rather than printed, since the same
+	// removal path also runs unattended during startup reconciliation.
+	removed := removeOrphanContainers(ctx, client, orphans, slog.Default())
 	fmt.Printf("  ✓ Removed %d orphaned Docker container(s)\n", removed)
 	return len(orphans) - removed, nil
 }

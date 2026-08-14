@@ -7,6 +7,7 @@ log-level = "info"
 log-format = "text"
 health-address = "127.0.0.1"              # set 0.0.0.0 explicitly for remote monitoring
 health-port = 8080
+# drain-timeout = "2h"                    # SIGTERM/SIGQUIT wait for busy jobs; "0s" disables drain
 # log-file = "/var/log/runner/runner.log" # default: runner.log beside this config; "" disables
 
 # --- Defaults (inherited by all scale sets unless overridden) ---

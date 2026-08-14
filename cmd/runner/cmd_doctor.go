@@ -27,8 +27,9 @@ import (
 var doctorCmd = &cobra.Command{
 	Use:   "doctor",
 	Short: "Diagnose and clean up orphaned runners",
-	Long: `Check for orphaned Docker containers, Tart VMs, and volumes
-left by runner after abnormal termination.
+	Long: `Check for orphaned Docker containers and Tart VMs left by runner after
+abnormal termination. Shared volumes are reported for visibility but never
+removed automatically because they may hold data for an in-flight workflow.
 
 By default, only reports what it finds. Use --fix to remove orphaned resources.`,
 	Example: `  runner doctor          # Diagnose only
@@ -37,7 +38,7 @@ By default, only reports what it finds. Use --fix to remove orphaned resources.`
 }
 
 func init() {
-	doctorCmd.Flags().Bool("fix", false, "Remove orphaned resources")
+	doctorCmd.Flags().Bool("fix", false, "Remove orphaned containers and VMs")
 	doctorCmd.Flags().Int("health-port", config.DefaultHealthPort, "Health check port to detect running instance")
 	doctorCmd.Flags().String("health-address", config.DefaultHealthAddress, "Health check address to detect older runner instances")
 }

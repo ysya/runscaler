@@ -10,6 +10,8 @@
 
 **Spec:** `docs/superpowers/specs/2026-08-14-graceful-drain-design.md`
 
+**Implementation status:** Complete. The checklists below are retained as the original task-by-task execution record.
+
 ## Global Constraints
 
 - **`SIGINT`(Ctrl-C)一律立即關閉,不進入 drain。** 互動式執行按下 Ctrl-C 後最長等兩小時是不可接受的意外;此行為與現況相同,不得改變。

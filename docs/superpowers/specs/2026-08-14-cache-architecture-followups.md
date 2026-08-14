@@ -5,7 +5,7 @@
 
 ## 行為類
 
-**`doctor --fix` 的孤兒判定已失效。** `cmd/runner/cmd_doctor.go` 以「shared volume 存在」判定它是孤兒。這在 runner 退出時會刪除該 volume 的年代是對的;現在它**本來就該長期存在**,於是 `runner doctor --fix` 會在升級停機的空檔刪掉進行中 workflow 的交接資料——正是本次設計在退出路徑上剛修掉的失敗模式,只是改由操作者觸發。註解已更正,行為未改。修法:檢查是否有進行中的 job,或確認內容全數超過 max-age 才視為可回收。
+**[已解決] `doctor --fix` 的 shared-volume 孤兒判定。** `1162110` 起不再以「volume 存在」判定為孤兒,介面也不再提供自動刪除能力。doctor 只報告名稱/大小並提供明確的人工移除指令;shared volume 的內容回收仍由 `shared-volume-max-age` 與 disk guard 負責。
 
 **守門員逾時後仍走完剩餘階層。** `internal/diskguard/guard.go` 的 `sweepFilesystem` 全程沒有 `ctx.Err()` 檢查。啟動 job 前的同步回收加上 2 分鐘上限後,逾時從「只在關機時發生」變成常態;逾時後迴圈仍會遍歷剩餘的 tier×store,每個立即失敗並各噴一則警告,最後再發一則誤導的「已達 max-tier 仍未達標」。不影響資料,純噪音。
 

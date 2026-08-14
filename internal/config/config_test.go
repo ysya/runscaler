@@ -2,7 +2,32 @@ package config
 
 import (
 	"testing"
+	"time"
 )
+
+func TestEffectiveDrainTimeout(t *testing.T) {
+	zero := time.Duration(0)
+	negative := -time.Second
+	tenMin := 10 * time.Minute
+	tests := []struct {
+		name string
+		set  *time.Duration
+		want time.Duration
+	}{
+		{"unset inherits default", nil, DefaultDrainTimeout},
+		{"explicit zero disables drain", &zero, 0},
+		{"negative disables drain", &negative, negative},
+		{"explicit value wins", &tenMin, tenMin},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := Config{DrainTimeout: tt.set}
+			if got := c.EffectiveDrainTimeout(); got != tt.want {
+				t.Errorf("EffectiveDrainTimeout() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
 
 func validScaleSetConfig() ScaleSetConfig {
 	return ScaleSetConfig{

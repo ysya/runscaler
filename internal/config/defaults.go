@@ -19,6 +19,11 @@ const (
 	DefaultHealthAddress = "127.0.0.1"
 	DefaultSystemName    = "dockerscaleset"
 
+	// DefaultDrainTimeout covers the longest jobs currently run on these
+	// hosts while matching GitLab Runner's documented two-hour graceful-stop
+	// budget. Service-manager stop timeouts add a separate one-minute margin.
+	DefaultDrainTimeout = 2 * time.Hour
+
 	// DefaultSharedVolumeName is the named Docker volume backing the
 	// shared-volume mount when docker.shared-volume-name is unset.
 	DefaultSharedVolumeName = "runner-shared"

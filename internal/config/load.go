@@ -13,7 +13,7 @@ import (
 
 // globalOnlyKeys are top-level keys that configure the process rather than a
 // scale set; they are never inherited by [[scaleset]] entries.
-var globalOnlyKeys = []string{"log-level", "log-format", "log-file", "health-port", "health-address", "dry-run"}
+var globalOnlyKeys = []string{"log-level", "log-format", "log-file", "health-port", "health-address", "dry-run", "drain-timeout"}
 
 // identityKeys identify a single scale set (or only make sense per scale
 // set, like min-runners where 0 is a valid explicit value); they are never

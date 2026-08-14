@@ -30,6 +30,7 @@ Runners are **ephemeral** — each container/VM handles exactly one job and is r
   - [Visibility](#visibility)
 - [Security & Isolation](#security--isolation)
 - [Deployment](#deployment)
+  - [Graceful Shutdown](#graceful-shutdown)
 - [Building](#building)
 - [Architecture](#architecture)
 - [Upgrading from runscaler](#upgrading-from-runscaler)
@@ -48,7 +49,7 @@ flowchart LR
 2. Long-polls for job assignments via the scaleset API
 3. Spins up Docker containers or macOS VMs with JIT (just-in-time) runner configs
 4. Removes containers/VMs automatically when jobs complete
-5. Cleans up all resources and the scale set on shutdown
+5. Drains in-flight jobs on a graceful stop and reconciles resources left by an abnormal stop at the next startup
 
 ## Features
 
@@ -61,6 +62,7 @@ flowchart LR
 - **Shared volumes** — cross-runner caching via named Docker volumes
 - **Multi-org support** — manage multiple scale sets from a single process, mix Docker and Tart backends
 - **Self-healing capacity** — replace containers/VMs that exit before GitHub reports job completion
+- **Safe restarts** — SIGTERM/SIGQUIT stop new work and wait for in-flight jobs; startup reclaims containers/VMs left by hard kills
 - **Operational safety** — one process per host, localhost-only health checks, and built-in rotating logs
 - **Single binary** — no runtime dependencies beyond Docker (or Tart for macOS)
 - **Config file or flags** — TOML config with CLI flag overrides
@@ -186,23 +188,39 @@ runner update
 runner update --check
 ```
 
-`runner update` downloads the archive for your platform, verifies its SHA-256 checksum against the release's `checksums.txt`, then atomically replaces the running binary. Restart runner after updating.
+`runner update` downloads the archive for your platform, verifies its SHA-256
+checksum against the release's `checksums.txt`, then atomically replaces the
+binary. If the local health endpoint shows that a service is still running the
+old version, the command names both versions and tells you to run:
+
+```bash
+runner service restart
+```
+
+That restart is safe by default: SIGTERM starts a drain and waits for active
+jobs instead of killing them.
 
 ### Troubleshooting with `doctor`
 
-If runner is killed unexpectedly (e.g. `kill -9`, crash, power loss), Docker containers or Tart VMs may be left behind. Use `doctor` to detect and clean them up:
+If runner is killed unexpectedly (e.g. `kill -9`, crash, power loss), Docker
+containers or Tart VMs may be left behind. The next `runner run` reconciles
+them automatically after acquiring the machine-wide lock. Use `doctor` for a
+manual check while runner is stopped:
 
 ```bash
 # Check for orphaned resources
 runner doctor
 
-# Auto-remove orphaned containers, VMs, and volumes
+# Auto-remove orphaned containers and VMs
 runner doctor --fix
 ```
 
 The `--fix` flag takes the same machine-wide lock as `runner run`, so it refuses
 to remove resources while any current runner instance is active. The health
-probe remains as a compatibility check for older runner versions.
+probe remains as a compatibility check for older runner versions. Shared and
+cache volumes are never removed by startup reconciliation or `doctor --fix`:
+they intentionally outlive the process and may still contain data needed by a
+later job in an in-flight workflow.
 
 ### Logs
 
@@ -248,6 +266,7 @@ log-format = "text"
 # log-file = "/var/log/runner/runner.log" # default: runner.log beside config
 health-address = "127.0.0.1"              # localhost-only by default
 health-port = 8080
+# drain-timeout = "2h"                    # 0s disables graceful drain
 
 [docker]
 socket = "/var/run/docker.sock"
@@ -404,7 +423,9 @@ pool-size = 2
 | `--health-address`  | `health-address`      | `127.0.0.1`                             | Health check listen address                       |
 | `--health-port`     | `health-port`        | `8080`                                  | Health check HTTP port (0 to disable)             |
 
-Advanced tuning keys (cleanup, cache volumes, isolation) are config-file only by design — see `config.example.toml` for the full list.
+Process-wide `drain-timeout` and advanced tuning keys (cleanup, cache volumes,
+isolation) are config-file only by design — see `config.example.toml` for the
+full list.
 
 ## Caching
 
@@ -528,6 +549,43 @@ The Tart backend isolates at the hypervisor boundary — each job gets a fresh m
 
 ## Deployment
 
+### Graceful Shutdown
+
+The default `drain-timeout` is `2h`. Shutdown signals have distinct meanings:
+
+| Signal | Behavior |
+| --- | --- |
+| `SIGTERM` or `SIGQUIT` | Stop scaling up, remove idle runners, and wait for busy jobs to finish |
+| Second signal during drain | Stop immediately and remove remaining runners |
+| Third signal | Exit without waiting for cleanup |
+| `SIGINT` / Ctrl-C | Stop immediately; never drain |
+
+Interactive Ctrl-C intentionally keeps its conventional "stop now" meaning.
+To drain a foreground process, send TERM explicitly:
+
+```bash
+kill -TERM <pid>
+```
+
+`runner service install` generates a systemd `TimeoutStopSec` or launchd
+`ExitTimeOut` one minute longer than the configured drain budget. A binary
+update cannot rewrite an already-installed service file, so services installed
+before drain support should be refreshed once:
+
+```bash
+sudo runner service uninstall
+sudo runner service install
+```
+
+For a user-level service, run both commands with `--user` instead of `sudo`.
+
+After that, the normal upgrade flow is:
+
+```bash
+runner update
+runner service restart     # waits for active jobs automatically
+```
+
 ### Systemd
 
 ```ini
@@ -541,6 +599,7 @@ Type=simple
 ExecStart=/usr/local/bin/runner run --config /etc/runner/config.toml
 Restart=on-failure
 RestartSec=10s
+TimeoutStopSec=7260
 
 [Install]
 WantedBy=multi-user.target

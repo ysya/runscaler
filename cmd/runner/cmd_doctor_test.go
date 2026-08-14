@@ -5,77 +5,70 @@ import (
 	"fmt"
 	"testing"
 
-	cerrdefs "github.com/containerd/errdefs"
+	"github.com/moby/moby/api/types/volume"
 	dockerclient "github.com/moby/moby/client"
 )
 
-type fakeVolumeAPI struct {
-	existing   map[string]bool
-	removed    []string
-	inspectErr error
-}
+// TestCheckDockerVolume_SharedVolumeIsNotOrphanedByExistence pins the core
+// behavior change: the shared volume carries handoff data between jobs of
+// one workflow run, so its mere existence must never be treated as a
+// reason to remove it — not even under --fix.
+func TestCheckDockerVolume_SharedVolumeIsNotOrphanedByExistence(t *testing.T) {
+	md := &orphanFake{volumes: []string{"runner-shared"}}
 
-func (f *fakeVolumeAPI) VolumeInspect(_ context.Context, id string, _ dockerclient.VolumeInspectOptions) (dockerclient.VolumeInspectResult, error) {
-	if f.existing[id] {
-		return dockerclient.VolumeInspectResult{}, nil
+	// fix=true must still not remove it: the volume is designed to outlive
+	// the process, so its mere existence says nothing about whether it is
+	// still needed.
+	if _, err := checkDockerVolume(context.Background(), md, true); err != nil {
+		t.Fatalf("checkDockerVolume: %v", err)
 	}
-	if f.inspectErr != nil {
-		return dockerclient.VolumeInspectResult{}, f.inspectErr
+	if len(md.volumesRemoved) != 0 {
+		t.Errorf("doctor --fix removed %v; the shared volume carries handoff "+
+			"data between jobs of one workflow run", md.volumesRemoved)
 	}
-	return dockerclient.VolumeInspectResult{}, cerrdefs.ErrNotFound
 }
 
-func (f *fakeVolumeAPI) VolumeRemove(_ context.Context, id string, _ dockerclient.VolumeRemoveOptions) (dockerclient.VolumeRemoveResult, error) {
-	f.removed = append(f.removed, id)
-	return dockerclient.VolumeRemoveResult{}, nil
-}
+// TestCheckDockerVolumeReportsCurrentAndLegacyNames covers both names
+// sharedVolumeNames looks for existing at once: both are reported, neither
+// is removed, and reporting an existing shared volume is never counted as
+// an unresolved issue — it is expected steady state, not a problem.
+func TestCheckDockerVolumeReportsCurrentAndLegacyNames(t *testing.T) {
+	md := &orphanFake{volumes: []string{"runner-shared", "runscaler-shared"}}
 
-func TestCheckDockerVolumeRemovesCurrentAndLegacy(t *testing.T) {
-	f := &fakeVolumeAPI{existing: map[string]bool{
-		"runner-shared":    true,
-		"runscaler-shared": true,
-	}}
-	issues, err := checkDockerVolume(context.Background(), f, true)
+	issues, err := checkDockerVolume(context.Background(), md, true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if issues != 0 {
-		t.Errorf("issues = %d, want 0 after fixing", issues)
+		t.Errorf("issues = %d, want 0: an existing shared volume is expected state, not a problem", issues)
 	}
-	if len(f.removed) != 2 {
-		t.Fatalf("expected both volumes removed, got %v", f.removed)
-	}
-	removed := map[string]bool{}
-	for _, v := range f.removed {
-		removed[v] = true
-	}
-	for _, want := range []string{"runner-shared", "runscaler-shared"} {
-		if !removed[want] {
-			t.Errorf("expected %q to be removed, got %v", want, f.removed)
-		}
+	if len(md.volumesRemoved) != 0 {
+		t.Errorf("expected no volumes removed, got %v", md.volumesRemoved)
 	}
 }
 
+// TestCheckDockerVolumeReportsWithoutFix asserts fix=false behaves
+// identically to fix=true (see TestCheckDockerVolumeReportsCurrentAndLegacyNames):
+// this check no longer branches on fix at all.
 func TestCheckDockerVolumeReportsWithoutFix(t *testing.T) {
-	f := &fakeVolumeAPI{existing: map[string]bool{
-		"runner-shared":    true,
-		"runscaler-shared": true,
-	}}
-	issues, err := checkDockerVolume(context.Background(), f, false)
+	md := &orphanFake{volumes: []string{"runner-shared", "runscaler-shared"}}
+
+	issues, err := checkDockerVolume(context.Background(), md, false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if issues != 2 {
-		t.Errorf("issues = %d, want 2 when reporting without fix", issues)
+	if issues != 0 {
+		t.Errorf("issues = %d, want 0", issues)
 	}
-	if len(f.removed) != 0 {
-		t.Errorf("VolumeRemove must not be called when fix=false, got %v", f.removed)
+	if len(md.volumesRemoved) != 0 {
+		t.Errorf("VolumeRemove must never be called by this check, got %v", md.volumesRemoved)
 	}
 }
 
 func TestCheckDockerVolumeNoneFound(t *testing.T) {
-	f := &fakeVolumeAPI{existing: map[string]bool{}}
-	issues, err := checkDockerVolume(context.Background(), f, false)
+	md := &orphanFake{}
+
+	issues, err := checkDockerVolume(context.Background(), md, false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -85,8 +78,34 @@ func TestCheckDockerVolumeNoneFound(t *testing.T) {
 }
 
 func TestCheckDockerVolumeSurfacesInspectFailure(t *testing.T) {
-	f := &fakeVolumeAPI{existing: map[string]bool{}, inspectErr: fmt.Errorf("permission denied")}
-	if _, err := checkDockerVolume(context.Background(), f, false); err == nil {
+	md := &orphanFake{volumeInspectErr: fmt.Errorf("permission denied")}
+
+	if _, err := checkDockerVolume(context.Background(), md, false); err == nil {
 		t.Fatal("expected volume inspection failure to be returned")
+	}
+}
+
+// TestVolumeSizeText pins "size not reported" for the cases doctor actually
+// sees from a plain VolumeInspect call (UsageData is only populated by the
+// disk-usage endpoint, so it is nil in practice) as well as the driver's
+// explicit "-1 means unavailable" sentinel, and confirms a real size is
+// formatted through backend.FormatBytes.
+func TestVolumeSizeText(t *testing.T) {
+	cases := []struct {
+		name  string
+		usage *volume.UsageData
+		want  string
+	}{
+		{"nil usage data (plain inspect never returns it)", nil, "size not reported"},
+		{"driver reports size unavailable (-1)", &volume.UsageData{Size: -1}, "size not reported"},
+		{"known size", &volume.UsageData{Size: 2 * 1024 * 1024}, "2.0 MiB"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := dockerclient.VolumeInspectResult{Volume: volume.Volume{UsageData: tc.usage}}
+			if got := volumeSizeText(result); got != tc.want {
+				t.Errorf("volumeSizeText() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

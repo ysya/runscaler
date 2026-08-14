@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"slices"
 	"testing"
 
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/moby/moby/api/types/container"
 	dockerclient "github.com/moby/moby/client"
 )
@@ -18,23 +20,30 @@ type fakeContainer struct {
 	labels map[string]string
 }
 
-// orphanFake implements backend.DockerAPI with just enough behavior to
-// exercise findOrphanContainers and removeOrphanContainers. ContainerList is
-// driven by containers; ContainerRemove records every ID it is called with
-// to removed, failing when the ID equals removeErrOn; VolumeRemove records
-// to volumesRemoved. Every other method returns its zero value — orphans.go
-// never calls them.
+// orphanFake implements backend.DockerAPI (for findOrphanContainers and
+// removeOrphanContainers) and also cmd_doctor.go's narrower volumeAPI (for
+// checkDockerVolume), with just enough behavior to exercise both.
+// ContainerList is driven by containers; ContainerRemove records every ID
+// it is called with to removed, failing when the ID equals removeErrOn.
+// VolumeInspect reports a volume as present when its name is in volumes;
+// otherwise it fails with volumeInspectErr if set, or a not-found error
+// (matching the real Docker client) if not. VolumeRemove records to
+// volumesRemoved — orphans.go never calls it, and checkDockerVolume no
+// longer even can (volumeAPI does not declare the method), so an empty
+// volumesRemoved after exercising either is itself part of what these
+// tests assert. Every other method returns its zero value — nothing under
+// test here calls them.
 //
-// Field names here are relied on by later tasks' tests (Tasks 2 and 3 build
-// on this double, and Task 2 additionally extends it to satisfy
-// cmd_doctor.go's volumeAPI interface) — see task-2-report.md and
-// task-3-report.md.
+// Field names here are relied on by later tasks' tests (Task 3 builds on
+// this double too) — see task-2-report.md and task-3-report.md.
 type orphanFake struct {
 	containers  []fakeContainer
 	removed     []string
 	removeErrOn string
 
-	volumesRemoved []string
+	volumes          []string
+	volumesRemoved   []string
+	volumeInspectErr error
 }
 
 func (f *orphanFake) ContainerList(_ context.Context, _ dockerclient.ContainerListOptions) (dockerclient.ContainerListResult, error) {
@@ -51,6 +60,16 @@ func (f *orphanFake) ContainerRemove(_ context.Context, containerID string, _ do
 		return dockerclient.ContainerRemoveResult{}, errors.New("simulated remove failure")
 	}
 	return dockerclient.ContainerRemoveResult{}, nil
+}
+
+func (f *orphanFake) VolumeInspect(_ context.Context, id string, _ dockerclient.VolumeInspectOptions) (dockerclient.VolumeInspectResult, error) {
+	if slices.Contains(f.volumes, id) {
+		return dockerclient.VolumeInspectResult{}, nil
+	}
+	if f.volumeInspectErr != nil {
+		return dockerclient.VolumeInspectResult{}, f.volumeInspectErr
+	}
+	return dockerclient.VolumeInspectResult{}, cerrdefs.ErrNotFound
 }
 
 func (f *orphanFake) VolumeRemove(_ context.Context, volumeID string, _ dockerclient.VolumeRemoveOptions) (dockerclient.VolumeRemoveResult, error) {
@@ -104,7 +123,7 @@ func (f *orphanFake) DiskUsage(_ context.Context, _ dockerclient.DiskUsageOption
 func TestFindOrphanContainers_MatchesLabelAndNamePattern(t *testing.T) {
 	md := &orphanFake{containers: []fakeContainer{
 		{id: "a1", names: []string{"/runner-deadbeef"}, labels: map[string]string{"managed-by": "runner"}},
-		{id: "b2", names: []string{"/runner-0011aabb"}, labels: nil}, // 名稱樣式
+		{id: "b2", names: []string{"/runner-0011aabb"}, labels: nil}, // matched by name pattern, not label
 		{id: "c3", names: []string{"/postgres"}, labels: map[string]string{"app": "db"}},
 		{id: "d4", names: []string{"/buildx_buildkit_x0"}, labels: nil},
 	}}

@@ -5,12 +5,33 @@ import (
 	"context"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/ysya/runscaler/internal/cachestore"
 	"github.com/ysya/runscaler/internal/config"
 )
+
+// synchronizedBuffer lets tests inspect logs written by cleanup goroutines
+// without racing slog's background write. bytes.Buffer alone is not safe for
+// a concurrent Write and String call.
+type synchronizedBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (b *synchronizedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.Write(p)
+}
+
+func (b *synchronizedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.String()
+}
 
 // These tests cover the pure, Docker/Tart-connection-independent selection
 // logic behind buildCacheStores: which scaleset's settings win when several
@@ -436,7 +457,7 @@ func TestStartSharedVolumeCleanup_WarnsWhenNoMaxAgeConfigured(t *testing.T) {
 // TestStartSharedVolumeCleanup_SweepsWhenMaxAgeConfigured is the positive
 // control: the warning path above must not have disabled the normal one.
 func TestStartSharedVolumeCleanup_SweepsWhenMaxAgeConfigured(t *testing.T) {
-	var logs bytes.Buffer
+	var logs synchronizedBuffer
 	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	store := &fakeCacheStore{name: "shared-volume:runner-shared", kind: cachestore.KindScratch, reclaimed: make(chan cachestore.Tier, 4)}

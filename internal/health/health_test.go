@@ -17,6 +17,15 @@ type stubController struct {
 
 func (s *stubController) InstanceCounts() (int, int) { return s.idle, s.busy }
 
+type stubLifecycleController struct {
+	provisioning, idle, busy, removing int
+}
+
+func (s *stubLifecycleController) InstanceCounts() (int, int) { return s.idle, s.busy }
+func (s *stubLifecycleController) InstanceLifecycleCounts() (int, int, int, int) {
+	return s.provisioning, s.idle, s.busy, s.removing
+}
+
 // stubMetrics implements MetricsProvider for testing.
 type stubMetrics struct {
 	snap metrics.Snapshot
@@ -75,6 +84,41 @@ func TestHealthzWithController(t *testing.T) {
 	}
 	if ss.Idle != 2 || ss.Busy != 3 {
 		t.Errorf("idle/busy = %d/%d, want 2/3", ss.Idle, ss.Busy)
+	}
+}
+
+func TestHealthzWithLifecycleController(t *testing.T) {
+	h := newTestServer()
+	h.RegisterController("test-set", &stubLifecycleController{provisioning: 1, idle: 2, busy: 3, removing: 4})
+
+	req := httptest.NewRequest("GET", "/healthz", nil)
+	w := httptest.NewRecorder()
+	h.handleHealthz(w, req)
+
+	var resp HealthResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	ss := resp.ScaleSets[0]
+	if ss.Provisioning != 1 || ss.Idle != 2 || ss.Busy != 3 || ss.Removing != 4 {
+		t.Fatalf("lifecycle = %d/%d/%d/%d, want 1/2/3/4", ss.Provisioning, ss.Idle, ss.Busy, ss.Removing)
+	}
+}
+
+func TestHealthzWithCapacity(t *testing.T) {
+	h := newTestServer()
+	h.SetCapacityProvider(func() CapacityStatus { return CapacityStatus{Limit: 10, InUse: 4} })
+
+	req := httptest.NewRequest("GET", "/healthz", nil)
+	w := httptest.NewRecorder()
+	h.handleHealthz(w, req)
+
+	var resp HealthResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Capacity == nil || resp.Capacity.Limit != 10 || resp.Capacity.InUse != 4 {
+		t.Fatalf("capacity = %+v, want limit 10 in_use 4", resp.Capacity)
 	}
 }
 

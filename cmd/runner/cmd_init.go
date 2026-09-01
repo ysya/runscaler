@@ -160,6 +160,7 @@ max-runners = %d
 min-runners = 0
 
 # --- Global ---
+concurrent = %d
 log-level = %q
 log-format = %q
 # log-file defaults to runner.log beside this config; set log-file = "" to disable
@@ -177,7 +178,7 @@ runner-image = %q
 [tart]
 # Path to the runner binary inside the VM
 runner-dir = %q
-`, url, name, token, maxRunners,
+`, url, name, token, maxRunners, maxRunners,
 			config.DefaultLogLevel, config.DefaultLogFormat,
 			config.DefaultHealthAddress, config.DefaultHealthPort,
 			runnerImage, config.DefaultTartRunnerDir,
@@ -238,6 +239,7 @@ max-runners = %d
 min-runners = 0
 
 # --- Global ---
+concurrent = %d
 log-level = %q
 log-format = %q
 # log-file defaults to runner.log beside this config; set log-file = "" to disable
@@ -290,7 +292,7 @@ shared-volume = %q
 # provider = "tart"
 # max-runners = 2
 # runner-image = "ghcr.io/cirruslabs/macos-sequoia-xcode:latest"
-`, url, name, token, maxRunners,
+`, url, name, token, maxRunners, maxRunners,
 			config.DefaultLogLevel, config.DefaultLogFormat,
 			config.DefaultHealthAddress, config.DefaultHealthPort,
 			runnerImage, config.DefaultProvider,

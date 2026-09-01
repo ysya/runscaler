@@ -18,6 +18,12 @@ type InstanceCounter interface {
 	InstanceCounts() (idle, busy int)
 }
 
+// InstanceLifecycleCounter optionally exposes transient controller phases.
+// Health integrations implementing only InstanceCounter remain compatible.
+type InstanceLifecycleCounter interface {
+	InstanceLifecycleCounts() (provisioning, idle, busy, removing int)
+}
+
 // MetricsProvider provides a snapshot of listener metrics for a scale set.
 type MetricsProvider interface {
 	Snapshot() metrics.Snapshot
@@ -34,6 +40,7 @@ type HealthServer struct {
 	metrics     map[string]MetricsProvider
 	states      map[string]connectionState
 	diskFn      func() []DiskStatus
+	capacityFn  func() CapacityStatus
 }
 
 type connectionState struct {
@@ -50,6 +57,8 @@ type ScaleSetStatus struct {
 	LastConnected string         `json:"last_connected,omitempty"`
 	Idle          int            `json:"idle"`
 	Busy          int            `json:"busy"`
+	Provisioning  int            `json:"provisioning,omitempty"`
+	Removing      int            `json:"removing,omitempty"`
 	Metrics       *MetricsStatus `json:"metrics,omitempty"`
 }
 
@@ -77,6 +86,13 @@ type DiskStatus struct {
 	TotalBytes  uint64  `json:"total_bytes"`
 }
 
+// CapacityStatus reports process-wide runner capacity leased across all scale
+// sets.
+type CapacityStatus struct {
+	Limit int `json:"limit"`
+	InUse int `json:"in_use"`
+}
+
 // HealthResponse is the JSON response for /healthz.
 type HealthResponse struct {
 	Status    string           `json:"status"`
@@ -84,6 +100,7 @@ type HealthResponse struct {
 	Uptime    string           `json:"uptime"`
 	ScaleSets []ScaleSetStatus `json:"scale_sets"`
 	Disk      []DiskStatus     `json:"disk,omitempty"`
+	Capacity  *CapacityStatus  `json:"capacity,omitempty"`
 }
 
 // NewHealthServer creates a new health check HTTP server.
@@ -177,6 +194,14 @@ func (h *HealthServer) SetDiskProvider(fn func() []DiskStatus) {
 	h.mu.Unlock()
 }
 
+// SetCapacityProvider registers the cheap process-wide capacity snapshot used
+// by /healthz. The callback must not block.
+func (h *HealthServer) SetCapacityProvider(fn func() CapacityStatus) {
+	h.mu.Lock()
+	h.capacityFn = fn
+	h.mu.Unlock()
+}
+
 func (h *HealthServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -197,6 +222,10 @@ func (h *HealthServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	if h.diskFn != nil {
 		resp.Disk = h.diskFn()
 	}
+	if h.capacityFn != nil {
+		capacity := h.capacityFn()
+		resp.Capacity = &capacity
+	}
 
 	names := make([]string, 0, len(h.controllers))
 	for name := range h.controllers {
@@ -210,6 +239,9 @@ func (h *HealthServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
 			Name: name,
 			Idle: idle,
 			Busy: busy,
+		}
+		if lifecycle, ok := controller.(InstanceLifecycleCounter); ok {
+			ss.Provisioning, ss.Idle, ss.Busy, ss.Removing = lifecycle.InstanceLifecycleCounts()
 		}
 		state := h.states[name]
 		ss.Ready = state.Ready

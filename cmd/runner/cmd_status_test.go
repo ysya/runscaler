@@ -159,3 +159,21 @@ func TestDiskBarClampsPercentage(t *testing.T) {
 		t.Errorf("overflow disk bar = %q", got)
 	}
 }
+
+func TestFormatRunnerCountsIncludesTransientLifecycle(t *testing.T) {
+	got := formatRunnerCounts(1, 2, 3, 4)
+	want := "2 idle · 3 busy · 1 provisioning · 4 removing · 10 total"
+	if got != want {
+		t.Fatalf("formatRunnerCounts() = %q, want %q", got, want)
+	}
+}
+
+func TestFormatStatusIncludesGlobalCapacity(t *testing.T) {
+	got := formatStatus(health.HealthResponse{
+		Status:   "ok",
+		Capacity: &health.CapacityStatus{Limit: 10, InUse: 4},
+	}, "endpoint", time.Time{}, false)
+	if !strings.Contains(got, "Capacity    4 / 10 in use") {
+		t.Fatalf("status output missing global capacity:\n%s", got)
+	}
+}

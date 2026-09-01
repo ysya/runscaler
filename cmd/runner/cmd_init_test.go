@@ -78,4 +78,7 @@ func assertGeneratedConfigValid(t *testing.T, output string) {
 	if len(sets) != 1 || sets[0].Validate() != nil {
 		t.Fatalf("generated scale set invalid: %+v", sets)
 	}
+	if cfg.Concurrent != sets[0].MaxRunners {
+		t.Fatalf("generated concurrent = %d, want single scale-set max %d", cfg.Concurrent, sets[0].MaxRunners)
+	}
 }

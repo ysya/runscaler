@@ -178,6 +178,9 @@ func (p *DockerProvider) StartInstance(ctx context.Context, name string, jitConf
 // RemoveInstance force-removes a Docker container by ID.
 func (p *DockerProvider) RemoveInstance(ctx context.Context, instanceID string) error {
 	if _, err := p.dockerClient.ContainerRemove(ctx, instanceID, dockerclient.ContainerRemoveOptions{Force: true}); err != nil {
+		if cerrdefs.IsNotFound(err) {
+			return nil
+		}
 		return fmt.Errorf("failed to remove runner container: %w", err)
 	}
 	return nil

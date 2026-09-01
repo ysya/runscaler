@@ -219,7 +219,7 @@ func TestRunSubcommandRegistered(t *testing.T) {
 }
 
 func TestRunOwnsStartFlags(t *testing.T) {
-	for _, name := range []string{"url", "name", "token", "max-runners", "provider", "backend", "health-port", "dry-run"} {
+	for _, name := range []string{"url", "name", "token", "max-runners", "concurrent", "provider", "backend", "health-port", "dry-run"} {
 		if runCommand.Flags().Lookup(name) == nil {
 			t.Errorf("`run` must own the --%s start flag", name)
 		}

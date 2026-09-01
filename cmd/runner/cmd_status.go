@@ -109,8 +109,10 @@ func runStatus(cmd *cobra.Command, _ []string) error {
 // "not reported yet", not a real collection of zero values.
 type statusTotals struct {
 	Ready           int
+	Provisioning    int
 	Idle            int
 	Busy            int
+	Removing        int
 	Desired         int
 	AvailableJobs   int
 	AssignedJobs    int
@@ -128,6 +130,8 @@ func aggregateStatus(scaleSets []health.ScaleSetStatus) statusTotals {
 		}
 		totals.Idle += ss.Idle
 		totals.Busy += ss.Busy
+		totals.Provisioning += ss.Provisioning
+		totals.Removing += ss.Removing
 		if ss.Metrics == nil {
 			continue
 		}
@@ -217,11 +221,14 @@ func formatStatus(h health.HealthResponse, endpoint string, now time.Time, color
 	fmt.Fprintf(&b, "  %s%s\n", styles.field("Endpoint"), endpoint)
 	fmt.Fprintf(&b, "  %s%d ready / %d total\n", styles.field("Scale sets"), totals.Ready, len(h.ScaleSets))
 
-	runnerSummary := fmt.Sprintf("%d idle · %d busy · %d total", totals.Idle, totals.Busy, totals.Idle+totals.Busy)
+	runnerSummary := formatRunnerCounts(totals.Provisioning, totals.Idle, totals.Busy, totals.Removing)
 	if totals.MetricsReported > 0 {
 		runnerSummary += fmt.Sprintf(" · %d desired%s", totals.Desired, metricsCoverage(totals.MetricsReported, len(h.ScaleSets)))
 	}
 	fmt.Fprintf(&b, "  %s%s\n", styles.field("Runners"), runnerSummary)
+	if h.Capacity != nil {
+		fmt.Fprintf(&b, "  %s%d / %d in use\n", styles.field("Capacity"), h.Capacity.InUse, h.Capacity.Limit)
+	}
 	if totals.MetricsReported > 0 {
 		coverage := metricsCoverage(totals.MetricsReported, len(h.ScaleSets))
 		fmt.Fprintf(&b, "  %s%d available · %d assigned · %d running%s\n",
@@ -240,7 +247,7 @@ func formatStatus(h health.HealthResponse, endpoint string, now time.Time, color
 				fmt.Fprintln(&b)
 			}
 			fmt.Fprintf(&b, "  %s  %s\n", styles.scaleSetState(ss), ss.Name)
-			fmt.Fprintf(&b, "    %s%d idle · %d busy · %d total", styles.field("Runners"), ss.Idle, ss.Busy, ss.Idle+ss.Busy)
+			fmt.Fprintf(&b, "    %s%s", styles.field("Runners"), formatRunnerCounts(ss.Provisioning, ss.Idle, ss.Busy, ss.Removing))
 			if ss.Metrics != nil {
 				fmt.Fprintf(&b, " · %d desired", ss.Metrics.DesiredRunners)
 			}
@@ -275,6 +282,18 @@ func formatStatus(h health.HealthResponse, endpoint string, now time.Time, color
 	}
 
 	return b.String()
+}
+
+func formatRunnerCounts(provisioning, idle, busy, removing int) string {
+	parts := []string{fmt.Sprintf("%d idle", idle), fmt.Sprintf("%d busy", busy)}
+	if provisioning > 0 {
+		parts = append(parts, fmt.Sprintf("%d provisioning", provisioning))
+	}
+	if removing > 0 {
+		parts = append(parts, fmt.Sprintf("%d removing", removing))
+	}
+	parts = append(parts, fmt.Sprintf("%d total", provisioning+idle+busy+removing))
+	return strings.Join(parts, " · ")
 }
 
 func metricsCoverage(reported, total int) string {

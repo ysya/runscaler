@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -19,6 +20,25 @@ type mockCommandRunner struct {
 	calls    []cmdCall
 	results  map[string]cmdResult // key: "command arg1 arg2..." -> result
 	fallback cmdResult
+}
+
+type blockingContextCommandRunner struct {
+	mu           sync.Mutex
+	hadDeadlines []bool
+}
+
+func (m *blockingContextCommandRunner) Run(ctx context.Context, _ string, _ ...string) ([]byte, error) {
+	_, hadDeadline := ctx.Deadline()
+	m.mu.Lock()
+	m.hadDeadlines = append(m.hadDeadlines, hadDeadline)
+	m.mu.Unlock()
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (m *blockingContextCommandRunner) RunStreaming(ctx context.Context, name string, args ...string) error {
+	_, err := m.Run(ctx, name, args...)
+	return err
 }
 
 type cmdCall struct {
@@ -205,6 +225,39 @@ func TestTartProvider_RemoveInstance_DeleteFails(t *testing.T) {
 	err := b.RemoveInstance(ctx, "runner-abc")
 	if err == nil {
 		t.Fatal("RemoveInstance() should fail when delete fails")
+	}
+}
+
+func TestTartProvider_RemoveInstanceAlreadyAbsent(t *testing.T) {
+	cmd := &mockCommandRunner{
+		results: map[string]cmdResult{
+			"tart stop":   {err: fmt.Errorf("virtual machine not found")},
+			"tart delete": {err: fmt.Errorf("virtual machine does not exist")},
+		},
+	}
+	b := newTestTartProvider(cmd)
+	if err := b.RemoveInstance(context.Background(), "missing"); err != nil {
+		t.Fatalf("RemoveInstance() error for absent VM: %v", err)
+	}
+}
+
+func TestTartProvider_RemoveInstanceHonorsDeadline(t *testing.T) {
+	cmd := &blockingContextCommandRunner{}
+	b := &TartProvider{logger: slog.New(slog.DiscardHandler), cmd: cmd}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	err := b.RemoveInstance(ctx, "runner-abc")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("RemoveInstance() error = %v, want context deadline exceeded", err)
+	}
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("RemoveInstance() ignored deadline; elapsed = %s", elapsed)
+	}
+	cmd.mu.Lock()
+	defer cmd.mu.Unlock()
+	if len(cmd.hadDeadlines) != 2 || !cmd.hadDeadlines[0] || !cmd.hadDeadlines[1] {
+		t.Fatalf("command deadline observations = %v, want [true true]", cmd.hadDeadlines)
 	}
 }
 

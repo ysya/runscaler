@@ -29,6 +29,29 @@ func TestEffectiveDrainTimeout(t *testing.T) {
 	}
 }
 
+func TestEffectiveConcurrent(t *testing.T) {
+	sets := []ScaleSetConfig{{MaxRunners: 3}, {MaxRunners: 7}}
+	if got := (&Config{}).EffectiveConcurrent(sets); got != 10 {
+		t.Fatalf("automatic EffectiveConcurrent() = %d, want 10", got)
+	}
+	if got := (&Config{Concurrent: 4}).EffectiveConcurrent(sets); got != 4 {
+		t.Fatalf("explicit EffectiveConcurrent() = %d, want 4", got)
+	}
+}
+
+func TestValidateConcurrent(t *testing.T) {
+	sets := []ScaleSetConfig{{MinRunners: 2}, {MinRunners: 1}}
+	if err := (&Config{Concurrent: 3}).ValidateConcurrent(sets); err != nil {
+		t.Fatalf("ValidateConcurrent() unexpected error: %v", err)
+	}
+	if err := (&Config{Concurrent: 2}).ValidateConcurrent(sets); err == nil {
+		t.Fatal("ValidateConcurrent() succeeded below the total min-runners floor")
+	}
+	if err := (&Config{}).ValidateConcurrent(sets); err != nil {
+		t.Fatalf("automatic concurrent should remain valid: %v", err)
+	}
+}
+
 func validScaleSetConfig() ScaleSetConfig {
 	return ScaleSetConfig{
 		RegistrationURL: "https://github.com/test-org",
@@ -144,6 +167,7 @@ func TestValidateGlobal(t *testing.T) {
 		{LogLevel: "verbose", LogFormat: "text", HealthPort: 8080},
 		{LogLevel: "info", LogFormat: "yaml", HealthPort: 8080},
 		{LogLevel: "info", LogFormat: "text", HealthPort: 70000},
+		{LogLevel: "info", LogFormat: "text", HealthPort: 8080, Concurrent: -1},
 	} {
 		if err := cfg.ValidateGlobal(); err == nil {
 			t.Fatalf("ValidateGlobal(%+v) succeeded, want error", cfg)

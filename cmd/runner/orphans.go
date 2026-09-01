@@ -6,7 +6,7 @@ import (
 
 	dockerclient "github.com/moby/moby/client"
 
-	"github.com/ysya/runscaler/internal/backend"
+	"github.com/ysya/runscaler/internal/provider"
 )
 
 // OrphanContainer is a container runner created that no live process is
@@ -27,7 +27,7 @@ type OrphanContainer struct {
 // single runner per host — without it, this would claim containers another
 // live runner is actively using. If that guarantee is ever relaxed, this
 // function and its callers must be revisited.
-func findOrphanContainers(ctx context.Context, client backend.DockerAPI) ([]OrphanContainer, error) {
+func findOrphanContainers(ctx context.Context, client provider.DockerAPI) ([]OrphanContainer, error) {
 	result, err := client.ContainerList(ctx, dockerclient.ContainerListOptions{All: true})
 	if err != nil {
 		return nil, err
@@ -61,7 +61,7 @@ func findOrphanContainers(ctx context.Context, client backend.DockerAPI) ([]Orph
 // a leftover container is a smaller problem than aborting the sweep, and
 // later this also runs during startup reconciliation, where refusing to
 // start would be worse still.
-func removeOrphanContainers(ctx context.Context, client backend.DockerAPI, orphans []OrphanContainer, logger *slog.Logger) (removed int) {
+func removeOrphanContainers(ctx context.Context, client provider.DockerAPI, orphans []OrphanContainer, logger *slog.Logger) (removed int) {
 	for _, o := range orphans {
 		if _, err := client.ContainerRemove(ctx, o.ID, dockerclient.ContainerRemoveOptions{Force: true}); err != nil {
 			logger.Warn("Failed to remove orphaned container",

@@ -19,7 +19,7 @@ import (
 // Service file paths and identifiers.
 const (
 	serviceName        = "runner"
-	serviceDescription = "GitHub Actions Runner Auto-Scaler"
+	serviceDescription = "GitHub Actions Runner Manager"
 
 	defaultConfigPath = "/etc/runner/config.toml"
 
@@ -49,7 +49,7 @@ type installOpts struct {
 	configPath string
 	binaryPath string
 	noStart    bool
-	backend    string
+	provider   string
 	// nil means the config omitted drain-timeout and therefore inherits the
 	// compiled-in default; a non-nil zero explicitly disables draining.
 	drainTimeout *time.Duration
@@ -190,7 +190,7 @@ func runServiceInstall(cmd *cobra.Command, _ []string) error {
 		fmt.Fprintf(os.Stderr, "    Run 'runner init' to generate one first.\n\n")
 	}
 
-	backend := detectBackend(configPath)
+	providerName := detectProvider(configPath)
 	drainTimeout, err := detectDrainTimeout(configPath)
 	if err != nil {
 		return err
@@ -201,7 +201,7 @@ func runServiceInstall(cmd *cobra.Command, _ []string) error {
 		configPath:   configPath,
 		binaryPath:   binaryPath,
 		noStart:      noStart,
-		backend:      backend,
+		provider:     providerName,
 		drainTimeout: drainTimeout,
 	})
 }
@@ -321,7 +321,7 @@ type systemdManager struct{}
 // property directly testable.
 func renderSystemdUnit(opts installOpts) (string, error) {
 	rwPaths := filepath.Dir(opts.configPath)
-	if opts.backend == "docker" {
+	if opts.provider == "docker" {
 		rwPaths += " /var/run/docker.sock"
 	}
 
@@ -329,7 +329,7 @@ func renderSystemdUnit(opts installOpts) (string, error) {
 		Description:        serviceDescription,
 		BinaryPath:         opts.binaryPath,
 		ConfigPath:         opts.configPath,
-		AfterDocker:        opts.backend == "docker",
+		AfterDocker:        opts.provider == "docker",
 		User:               opts.user,
 		ReadWritePaths:     rwPaths,
 		StopTimeoutSeconds: int(serviceStopTimeout(opts.drainTimeout).Seconds()),
@@ -665,20 +665,29 @@ func resolveConfigPath(cmd *cobra.Command) string {
 	return defaultConfigPath
 }
 
-func detectBackend(configPath string) string {
+func detectProvider(configPath string) string {
 	if configPath == "" {
-		return platformDefaultBackend()
+		return platformDefaultProvider()
 	}
 	v := viper.New()
 	v.SetConfigFile(configPath)
 	if err := v.ReadInConfig(); err != nil {
-		return platformDefaultBackend()
+		return platformDefaultProvider()
 	}
-	b := v.GetString("backend")
-	if b == "" {
-		return config.DefaultBackend
+	cfg, err := config.Load(v)
+	if err != nil {
+		return platformDefaultProvider()
 	}
-	return b
+	sets := cfg.ResolveScaleSets()
+	for _, ss := range sets {
+		if !ss.IsTart() {
+			return config.DefaultProvider
+		}
+	}
+	if len(sets) > 0 {
+		return "tart"
+	}
+	return platformDefaultProvider()
 }
 
 // detectDrainTimeout reads only enough configuration to preserve the
@@ -716,7 +725,7 @@ func serviceStopTimeout(configured *time.Duration) time.Duration {
 	return drainTimeout + time.Minute
 }
 
-func platformDefaultBackend() string {
+func platformDefaultProvider() string {
 	if runtime.GOOS == "darwin" {
 		return "tart"
 	}

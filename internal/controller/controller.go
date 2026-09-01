@@ -1,4 +1,4 @@
-package scaler
+package controller
 
 import (
 	"context"
@@ -13,15 +13,15 @@ import (
 	"github.com/actions/scaleset/listener"
 	"github.com/google/uuid"
 
-	"github.com/ysya/runscaler/internal/backend"
+	"github.com/ysya/runscaler/internal/provider"
 )
 
-// ScalesetAPI abstracts the scaleset client methods used by Scaler.
+// ScalesetAPI abstracts the scaleset client methods used by ScaleSetController.
 type ScalesetAPI interface {
 	GenerateJitRunnerConfig(ctx context.Context, setting *scaleset.RunnerScaleSetJitRunnerSetting, scaleSetID int) (*scaleset.RunnerScaleSetJitRunnerConfig, error)
 }
 
-// DiskChecker is the pre-job-start disk-pressure check startRunner consults
+// DiskChecker is the pre-job-start disk-pressure check startInstance consults
 // before generating a JIT config for a new runner. internal/diskguard.Guard
 // satisfies it: NeedsReclaim is a cheap per-filesystem statfs (no volume
 // walking, no Measure), Sweep does the actual reclaim work when needed.
@@ -30,12 +30,12 @@ type DiskChecker interface {
 	Sweep(ctx context.Context) error
 }
 
-// Scaler implements listener.Scaler to handle scaling decisions
-// and manage runner lifecycle via a pluggable RunnerBackend.
-type Scaler struct {
-	runners        runnerState
+// ScaleSetController implements listener.Scaler to handle scaling decisions
+// and manage runner lifecycle via a pluggable InstanceProvider.
+type ScaleSetController struct {
+	instances      instanceState
 	scaleSetID     int
-	backend        backend.RunnerBackend
+	provider       provider.InstanceProvider
 	scalesetClient ScalesetAPI
 	minRunners     int
 	maxRunners     int
@@ -46,34 +46,33 @@ type Scaler struct {
 	draining       atomic.Bool
 }
 
-// Compile-time check that Scaler implements listener.Scaler.
-var _ listener.Scaler = (*Scaler)(nil)
+// Compile-time check that ScaleSetController implements listener.Scaler.
+var _ listener.Scaler = (*ScaleSetController)(nil)
 
-// Option configures optional Scaler behavior at construction time.
-type Option func(*Scaler)
+// Option configures optional ScaleSetController behavior at construction time.
+type Option func(*ScaleSetController)
 
 // WithDiskChecker wires a pre-job-start disk-pressure check into the
-// Scaler: startRunner consults it before starting a new runner and
+// ScaleSetController: startInstance consults it before starting a new runner and
 // reclaims first if free space is low. Omitting this option (the default)
-// leaves diskChecker nil, so startRunner skips the check entirely.
+// leaves diskChecker nil, so startInstance skips the check entirely.
 func WithDiskChecker(c DiskChecker) Option {
-	return func(s *Scaler) {
+	return func(s *ScaleSetController) {
 		s.diskChecker = c
 	}
 }
 
-// NewScaler creates a new Scaler instance. opts is variadic so existing
-// call sites compile unchanged; see WithDiskChecker for the only option
-// defined so far.
-func NewScaler(scaleSetID, minRunners, maxRunners int, b backend.RunnerBackend, client ScalesetAPI, logger *slog.Logger, opts ...Option) *Scaler {
-	s := &Scaler{
+// NewScaleSetController creates a controller for one GitHub runner scale set.
+// See WithDiskChecker for the optional pre-start capacity check.
+func NewScaleSetController(scaleSetID, minRunners, maxRunners int, p provider.InstanceProvider, client ScalesetAPI, logger *slog.Logger, opts ...Option) *ScaleSetController {
+	s := &ScaleSetController{
 		scaleSetID:     scaleSetID,
-		backend:        b,
+		provider:       p,
 		scalesetClient: client,
 		minRunners:     minRunners,
 		maxRunners:     maxRunners,
 		logger:         logger,
-		runners: runnerState{
+		instances: instanceState{
 			idle: make(map[string]string),
 			busy: make(map[string]string),
 		},
@@ -86,14 +85,14 @@ func NewScaler(scaleSetID, minRunners, maxRunners int, b backend.RunnerBackend, 
 
 // HandleDesiredRunnerCount scales runners up to match demand.
 // Scale down is handled naturally via HandleJobCompleted.
-func (s *Scaler) HandleDesiredRunnerCount(ctx context.Context, count int) (int, error) {
+func (s *ScaleSetController) HandleDesiredRunnerCount(ctx context.Context, count int) (int, error) {
 	s.reconcileMu.Lock()
 	defer s.reconcileMu.Unlock()
 	if s.draining.Load() {
-		return s.runners.count(), nil
+		return s.instances.count(), nil
 	}
 	s.desiredRunners = count
-	currentCount := s.runners.count()
+	currentCount := s.instances.count()
 	targetRunnerCount := min(s.maxRunners, s.minRunners+count)
 
 	switch {
@@ -108,14 +107,14 @@ func (s *Scaler) HandleDesiredRunnerCount(ctx context.Context, count int) (int, 
 			slog.Int("scaleUp", scaleUp),
 		)
 		for range scaleUp {
-			if _, err := s.startRunner(ctx); err != nil {
+			if _, err := s.startInstance(ctx); err != nil {
 				s.logger.Error("Failed to start runner, continuing with available runners",
 					slog.Any("error", err),
 				)
 				break
 			}
 		}
-		return s.runners.count(), nil
+		return s.instances.count(), nil
 	default:
 		// Scale down is handled by HandleJobCompleted removing containers.
 		return currentCount, nil
@@ -123,7 +122,7 @@ func (s *Scaler) HandleDesiredRunnerCount(ctx context.Context, count int) (int, 
 }
 
 // HandleJobStarted marks a runner as busy when a job is assigned.
-func (s *Scaler) HandleJobStarted(ctx context.Context, jobInfo *scaleset.JobStarted) error {
+func (s *ScaleSetController) HandleJobStarted(ctx context.Context, jobInfo *scaleset.JobStarted) error {
 	s.logger.Debug(
 		"Job started",
 		slog.Int64("runnerRequestId", jobInfo.RunnerRequestID),
@@ -135,7 +134,7 @@ func (s *Scaler) HandleJobStarted(ctx context.Context, jobInfo *scaleset.JobStar
 	// it; if Drain wins, this runner was idle at the drain boundary and is
 	// removed before the callback can claim it.
 	s.reconcileMu.Lock()
-	marked := s.runners.markBusy(jobInfo.RunnerName)
+	marked := s.instances.markBusy(jobInfo.RunnerName)
 	s.reconcileMu.Unlock()
 	if !marked {
 		s.logger.Warn("Job started for unknown runner (already removed?)", slog.String("runnerName", jobInfo.RunnerName))
@@ -144,7 +143,7 @@ func (s *Scaler) HandleJobStarted(ctx context.Context, jobInfo *scaleset.JobStar
 }
 
 // HandleJobCompleted removes the runner after job finishes.
-func (s *Scaler) HandleJobCompleted(ctx context.Context, jobInfo *scaleset.JobCompleted) error {
+func (s *ScaleSetController) HandleJobCompleted(ctx context.Context, jobInfo *scaleset.JobCompleted) error {
 	s.logger.Debug(
 		"Job completed",
 		slog.Int64("runnerRequestId", jobInfo.RunnerRequestID),
@@ -152,20 +151,20 @@ func (s *Scaler) HandleJobCompleted(ctx context.Context, jobInfo *scaleset.JobCo
 		slog.String("runnerName", jobInfo.RunnerName),
 	)
 
-	resourceID, ok := s.runners.markDone(jobInfo.RunnerName)
+	instanceID, ok := s.instances.markDone(jobInfo.RunnerName)
 	if !ok {
 		s.logger.Warn("Job completed for unknown runner (already removed?)", slog.String("runnerName", jobInfo.RunnerName))
 		return nil
 	}
-	if err := s.backend.RemoveRunner(ctx, resourceID); err != nil {
+	if err := s.provider.RemoveInstance(ctx, instanceID); err != nil {
 		return fmt.Errorf("failed to remove runner: %w", err)
 	}
 
 	return nil
 }
 
-// startRunner creates and starts a new ephemeral runner.
-func (s *Scaler) startRunner(ctx context.Context) (string, error) {
+// startInstance creates and starts a new ephemeral runner.
+func (s *ScaleSetController) startInstance(ctx context.Context) (string, error) {
 	name := fmt.Sprintf("runner-%s", uuid.NewString()[:8])
 
 	// Cheap statfs before committing to a job: a runner that fills the disk
@@ -191,19 +190,19 @@ func (s *Scaler) startRunner(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("failed to generate JIT config: %w", err)
 	}
 
-	resourceID, err := s.backend.StartRunner(ctx, name, jit.EncodedJITConfig)
+	instanceID, err := s.provider.StartInstance(ctx, name, jit.EncodedJITConfig)
 	if err != nil {
 		return "", err
 	}
 
-	s.runners.addIdle(name, resourceID)
-	if watcher, ok := s.backend.(backend.RunnerWatcher); ok {
-		go s.watchRunner(ctx, watcher, name, resourceID)
+	s.instances.addIdle(name, instanceID)
+	if watcher, ok := s.provider.(provider.InstanceWatcher); ok {
+		go s.watchInstance(ctx, watcher, name, instanceID)
 	}
 	return name, nil
 }
 
-// preJobReclaimTimeout bounds the synchronous reclaim startRunner performs
+// preJobReclaimTimeout bounds the synchronous reclaim startInstance performs
 // when free space is low. This is how long a job start may be delayed, so
 // it is chosen against both edges rather than picked for roundness:
 //
@@ -213,7 +212,7 @@ func (s *Scaler) startRunner(ctx context.Context) (string, error) {
 //     minute on a real host, so anything at or under that would routinely
 //     be cut off mid-Tier1.
 //   - It must stay small next to the scale-up loop that multiplies it.
-//     startRunner runs once per runner inside HandleDesiredRunnerCount while
+//     startInstance runs once per runner inside HandleDesiredRunnerCount while
 //     reconcileMu is held, so scaling up five runners can serialize five
 //     bounded reclaims with this scale set's listener blocked throughout.
 //
@@ -228,14 +227,14 @@ const preJobReclaimTimeout = 2 * time.Minute
 // The individual stores carry their own 10-minute bounds, but nothing bounds
 // the aggregate: a sweep walks every store on every filesystem, so without
 // this the sum of those bounds is what a job start could wait for.
-func (s *Scaler) reclaimBeforeStart(ctx context.Context) {
+func (s *ScaleSetController) reclaimBeforeStart(ctx context.Context) {
 	s.reclaimBeforeStartWith(ctx, preJobReclaimTimeout)
 }
 
 // reclaimBeforeStartWith is the testable core: it sweeps under the supplied
 // timeout, so a test can drive the deadline path without waiting out
 // preJobReclaimTimeout for real.
-func (s *Scaler) reclaimBeforeStartWith(ctx context.Context, timeout time.Duration) {
+func (s *ScaleSetController) reclaimBeforeStartWith(ctx context.Context, timeout time.Duration) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -250,10 +249,10 @@ func (s *Scaler) reclaimBeforeStartWith(ctx context.Context, timeout time.Durati
 	}
 }
 
-func (s *Scaler) watchRunner(ctx context.Context, watcher backend.RunnerWatcher, name, resourceID string) {
+func (s *ScaleSetController) watchInstance(ctx context.Context, watcher provider.InstanceWatcher, name, instanceID string) {
 	for {
-		err := watcher.WaitRunner(ctx, resourceID)
-		if ctx.Err() != nil || !s.runners.contains(name, resourceID) {
+		err := watcher.WaitInstance(ctx, instanceID)
+		if ctx.Err() != nil || !s.instances.contains(name, instanceID) {
 			return
 		}
 		if err == nil {
@@ -266,12 +265,12 @@ func (s *Scaler) watchRunner(ctx context.Context, watcher backend.RunnerWatcher,
 		case <-time.After(5 * time.Second):
 		}
 	}
-	if !s.runners.markDead(name, resourceID) {
+	if !s.instances.markDead(name, instanceID) {
 		return // normal JobCompleted path already removed it from state
 	}
 	s.logger.Warn("Runner exited before job completion; removing stale capacity", slog.String("name", name))
 	cleanCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-	if err := s.backend.RemoveRunner(cleanCtx, resourceID); err != nil {
+	if err := s.provider.RemoveInstance(cleanCtx, instanceID); err != nil {
 		s.logger.Warn("Failed to clean up exited runner", slog.String("name", name), slog.Any("error", err))
 	}
 	cancel()
@@ -284,10 +283,10 @@ func (s *Scaler) watchRunner(ctx context.Context, watcher backend.RunnerWatcher,
 		return
 	}
 	target := min(s.maxRunners, s.minRunners+s.desiredRunners)
-	if s.runners.count() >= target {
+	if s.instances.count() >= target {
 		return
 	}
-	if _, err := s.startRunner(ctx); err != nil {
+	if _, err := s.startInstance(ctx); err != nil {
 		s.logger.Error("Failed to replace exited runner", slog.Any("error", err))
 	}
 }
@@ -300,7 +299,7 @@ func (s *Scaler) watchRunner(ctx context.Context, watcher backend.RunnerWatcher,
 // messages delivered through the listener are what move busy runners to zero.
 // The caller should cancel the listener only after Drain returns, then invoke
 // Shutdown to force-remove anything left after a deadline or removal failure.
-func (s *Scaler) Drain(ctx context.Context) error {
+func (s *ScaleSetController) Drain(ctx context.Context) error {
 	s.draining.Store(true)
 	started := time.Now()
 
@@ -309,18 +308,18 @@ func (s *Scaler) Drain(ctx context.Context) error {
 	// boundary. Successful removals are deleted from state; failed removals
 	// stay tracked so the caller's final Shutdown can retry them.
 	s.reconcileMu.Lock()
-	for name, resourceID := range s.runners.idleSnapshot() {
-		if err := s.backend.RemoveRunner(ctx, resourceID); err != nil {
+	for name, instanceID := range s.instances.idleSnapshot() {
+		if err := s.provider.RemoveInstance(ctx, instanceID); err != nil {
 			s.logger.Warn("Failed to remove idle runner during drain",
 				slog.String("name", name),
 				slog.Any("error", err))
 			continue
 		}
-		s.runners.removeIdle(name, resourceID)
+		s.instances.removeIdle(name, instanceID)
 	}
 	s.reconcileMu.Unlock()
 
-	_, busy := s.runners.counts()
+	_, busy := s.instances.counts()
 	s.logger.Info("Draining runners", slog.Int("busy", busy))
 	if busy == 0 {
 		return nil
@@ -334,20 +333,20 @@ func (s *Scaler) Drain(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
-			_, busy = s.runners.counts()
+			_, busy = s.instances.counts()
 			s.logger.Warn("Runner drain ended before all jobs completed",
 				slog.Int("busy", busy),
 				slog.Duration("waited", time.Since(started)),
 				slog.Any("error", ctx.Err()))
 			return ctx.Err()
 		case <-poll.C:
-			_, busy = s.runners.counts()
+			_, busy = s.instances.counts()
 			if busy == 0 {
 				s.logger.Info("Runner drain complete", slog.Duration("waited", time.Since(started)))
 				return nil
 			}
 		case <-progress.C:
-			_, busy = s.runners.counts()
+			_, busy = s.instances.counts()
 			s.logger.Info("Waiting for in-flight jobs to finish",
 				slog.Int("busy", busy),
 				slog.Duration("waited", time.Since(started)))
@@ -355,73 +354,73 @@ func (s *Scaler) Drain(ctx context.Context) error {
 	}
 }
 
-// IsDraining reports whether this scaler has stopped accepting new work.
-func (s *Scaler) IsDraining() bool {
+// IsDraining reports whether this controller has stopped accepting new work.
+func (s *ScaleSetController) IsDraining() bool {
 	return s.draining.Load()
 }
 
 // Shutdown force-removes all managed runners in parallel.
 // The provided context should already be detached from cancellation
 // (e.g. via context.WithoutCancel); this method adds a timeout to
-// prevent hanging if a backend operation is unresponsive.
-func (s *Scaler) Shutdown(ctx context.Context) {
+// prevent hanging if a provider operation is unresponsive.
+func (s *ScaleSetController) Shutdown(ctx context.Context) {
 	s.logger.Info("Shutting down runners")
 
 	shutdownCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	s.runners.mu.Lock()
+	s.instances.mu.Lock()
 
 	var wg sync.WaitGroup
-	removeRunner := func(label, name, resourceID string) {
+	removeRunner := func(label, name, instanceID string) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			s.logger.Debug("Removing "+label+" runner", slog.String("name", name))
-			if err := s.backend.RemoveRunner(shutdownCtx, resourceID); err != nil {
+			if err := s.provider.RemoveInstance(shutdownCtx, instanceID); err != nil {
 				s.logger.Error("Failed to remove "+label+" runner", slog.String("name", name), slog.Any("error", err))
 			}
 		}()
 	}
 
-	for name, resourceID := range s.runners.idle {
-		removeRunner("idle", name, resourceID)
+	for name, instanceID := range s.instances.idle {
+		removeRunner("idle", name, instanceID)
 	}
-	for name, resourceID := range s.runners.busy {
-		removeRunner("busy", name, resourceID)
+	for name, instanceID := range s.instances.busy {
+		removeRunner("busy", name, instanceID)
 	}
-	clear(s.runners.idle)
-	clear(s.runners.busy)
+	clear(s.instances.idle)
+	clear(s.instances.busy)
 
-	s.runners.mu.Unlock()
+	s.instances.mu.Unlock()
 
 	wg.Wait()
-	s.backend.Shutdown(shutdownCtx)
+	s.provider.Shutdown(shutdownCtx)
 }
 
-// RunnerCounts returns the number of idle and busy runners.
-func (s *Scaler) RunnerCounts() (idle, busy int) {
-	return s.runners.counts()
+// InstanceCounts returns the number of idle and busy runners.
+func (s *ScaleSetController) InstanceCounts() (idle, busy int) {
+	return s.instances.counts()
 }
 
-// --- Runner State ---
+// --- Instance State ---
 
-// runnerState tracks active runners with thread-safe access.
-// Keys are runner names, values are backend-specific resource IDs.
-type runnerState struct {
+// instanceState tracks active runners with thread-safe access.
+// Keys are runner names, values are provider-specific instance IDs.
+type instanceState struct {
 	mu   sync.Mutex
-	idle map[string]string // name -> resourceID
-	busy map[string]string // name -> resourceID
+	idle map[string]string // name -> instanceID
+	busy map[string]string // name -> instanceID
 }
 
-func (r *runnerState) count() int {
+func (r *instanceState) count() int {
 	r.mu.Lock()
 	count := len(r.idle) + len(r.busy)
 	r.mu.Unlock()
 	return count
 }
 
-func (r *runnerState) counts() (idle, busy int) {
+func (r *instanceState) counts() (idle, busy int) {
 	r.mu.Lock()
 	idle = len(r.idle)
 	busy = len(r.busy)
@@ -429,77 +428,77 @@ func (r *runnerState) counts() (idle, busy int) {
 	return
 }
 
-func (r *runnerState) addIdle(name, resourceID string) {
+func (r *instanceState) addIdle(name, instanceID string) {
 	r.mu.Lock()
-	r.idle[name] = resourceID
+	r.idle[name] = instanceID
 	r.mu.Unlock()
 }
 
-func (r *runnerState) idleSnapshot() map[string]string {
+func (r *instanceState) idleSnapshot() map[string]string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	result := make(map[string]string, len(r.idle))
-	for name, resourceID := range r.idle {
-		result[name] = resourceID
+	for name, instanceID := range r.idle {
+		result[name] = instanceID
 	}
 	return result
 }
 
-func (r *runnerState) removeIdle(name, resourceID string) bool {
+func (r *instanceState) removeIdle(name, instanceID string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if got, ok := r.idle[name]; ok && got == resourceID {
+	if got, ok := r.idle[name]; ok && got == instanceID {
 		delete(r.idle, name)
 		return true
 	}
 	return false
 }
 
-func (r *runnerState) contains(name, resourceID string) bool {
+func (r *instanceState) contains(name, instanceID string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if got, ok := r.idle[name]; ok && got == resourceID {
+	if got, ok := r.idle[name]; ok && got == instanceID {
 		return true
 	}
 	got, ok := r.busy[name]
-	return ok && got == resourceID
+	return ok && got == instanceID
 }
 
-func (r *runnerState) markBusy(name string) bool {
+func (r *instanceState) markBusy(name string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	resourceID, ok := r.idle[name]
+	instanceID, ok := r.idle[name]
 	if !ok {
 		return false
 	}
 	delete(r.idle, name)
-	r.busy[name] = resourceID
+	r.busy[name] = instanceID
 	return true
 }
 
-func (r *runnerState) markDone(name string) (string, bool) {
+func (r *instanceState) markDone(name string) (string, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if resourceID, ok := r.busy[name]; ok {
+	if instanceID, ok := r.busy[name]; ok {
 		delete(r.busy, name)
-		return resourceID, true
+		return instanceID, true
 	}
-	if resourceID, ok := r.idle[name]; ok {
+	if instanceID, ok := r.idle[name]; ok {
 		delete(r.idle, name)
-		return resourceID, true
+		return instanceID, true
 	}
 	return "", false
 }
 
-func (r *runnerState) markDead(name, resourceID string) bool {
+func (r *instanceState) markDead(name, instanceID string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if got, ok := r.idle[name]; ok && got == resourceID {
+	if got, ok := r.idle[name]; ok && got == instanceID {
 		delete(r.idle, name)
 		return true
 	}
-	if got, ok := r.busy[name]; ok && got == resourceID {
+	if got, ok := r.busy[name]; ok && got == instanceID {
 		delete(r.busy, name)
 		return true
 	}

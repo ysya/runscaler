@@ -13,7 +13,7 @@ import (
 	dockerclient "github.com/moby/moby/client"
 )
 
-// fakeDockerAPI implements backend.DockerAPI for cachestore's own tests.
+// fakeDockerAPI implements provider.DockerAPI for cachestore's own tests.
 // Field names are relied on by later cachestore tasks' tests (shared-volume
 // and cache-volume stores reuse this exact double) — see task-2-report.md
 // and task-3-report.md.
@@ -29,7 +29,7 @@ type fakeDockerAPI struct {
 	// that dockerGarbageStore/dockerBuildCacheStore's errors.Join behavior
 	// (one prune failing does not stop the others, and every failure
 	// surfaces in the returned error) actually holds — coverage that moved
-	// here from internal/backend's now-deleted PruneDockerRuntime tests.
+	// here from internal/provider's now-deleted PruneDockerRuntime tests.
 	containerPruneErr  error
 	imagePruneErr      error
 	buildCachePruneErr error
@@ -48,7 +48,7 @@ type fakeDockerAPI struct {
 	containersRemoved []string
 
 	// Optional overrides for ContainerWait, mirroring mockDocker's fields in
-	// internal/backend/docker_test.go. Unset (both zero), the wait succeeds
+	// internal/provider/docker_test.go. Unset (both zero), the wait succeeds
 	// immediately with status 0.
 	waitStatus int64
 	waitErr    error
@@ -74,7 +74,7 @@ func (f *fakeDockerAPI) ContainerCreate(_ context.Context, options dockerclient.
 	f.createCalls = append(f.createCalls, options)
 	// Helper containers (shared-volume/cache-volume stores, Task 3) run
 	// `sh -c <script>`, matching CleanupSharedVolumeStale's shape in
-	// internal/backend/docker.go. Capture the script when present so those
+	// internal/provider/docker.go. Capture the script when present so those
 	// tests can assert on it.
 	if options.Config != nil && len(options.Config.Cmd) == 3 &&
 		options.Config.Cmd[0] == "sh" && options.Config.Cmd[1] == "-c" {

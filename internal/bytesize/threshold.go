@@ -3,7 +3,7 @@
 // internal/diskguard (comparing them against live statfs results). It is a
 // leaf package — it imports nothing internal — specifically so both of
 // those packages can import it without an import cycle: internal/diskguard
-// transitively imports internal/config (diskguard -> cachestore -> backend
+// transitively imports internal/config (diskguard -> cachestore -> provider
 // -> config), so internal/config cannot import internal/diskguard itself.
 package bytesize
 

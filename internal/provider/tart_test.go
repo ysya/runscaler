@@ -1,4 +1,4 @@
-package backend
+package provider
 
 import (
 	"context"
@@ -77,8 +77,8 @@ func (m *mockCommandRunner) callCount(prefix string) int {
 	return count
 }
 
-func newTestTartBackend(cmd *mockCommandRunner) *TartBackend {
-	return &TartBackend{
+func newTestTartProvider(cmd *mockCommandRunner) *TartProvider {
+	return &TartProvider{
 		baseImage:   "macos-base:latest",
 		runnerDir:   "/Users/admin/actions-runner",
 		logger:      slog.New(slog.DiscardHandler),
@@ -87,7 +87,7 @@ func newTestTartBackend(cmd *mockCommandRunner) *TartBackend {
 	}
 }
 
-func TestTartBackend_StartRunner_Success(t *testing.T) {
+func TestTartProvider_StartInstance_Success(t *testing.T) {
 	cmd := &mockCommandRunner{
 		results: map[string]cmdResult{
 			"tart clone": {output: nil, err: nil},
@@ -95,15 +95,15 @@ func TestTartBackend_StartRunner_Success(t *testing.T) {
 			"tart exec":  {output: nil, err: nil},
 		},
 	}
-	b := newTestTartBackend(cmd)
+	b := newTestTartProvider(cmd)
 	ctx := context.Background()
 
-	resourceID, err := b.StartRunner(ctx, "runner-abc", "mock-jit-config")
+	instanceID, err := b.StartInstance(ctx, "runner-abc", "mock-jit-config")
 	if err != nil {
-		t.Fatalf("StartRunner() error: %v", err)
+		t.Fatalf("StartInstance() error: %v", err)
 	}
-	if resourceID != "runner-abc" {
-		t.Errorf("resourceID = %q, want %q", resourceID, "runner-abc")
+	if instanceID != "runner-abc" {
+		t.Errorf("instanceID = %q, want %q", instanceID, "runner-abc")
 	}
 
 	// Verify clone was called with correct args
@@ -134,37 +134,37 @@ func TestTartBackend_StartRunner_Success(t *testing.T) {
 	}
 }
 
-func TestTartBackend_StartRunner_CloneFails(t *testing.T) {
+func TestTartProvider_StartInstance_CloneFails(t *testing.T) {
 	cmd := &mockCommandRunner{
 		results: map[string]cmdResult{
 			"tart clone": {err: fmt.Errorf("tart clone: image not found")},
 		},
 	}
-	b := newTestTartBackend(cmd)
+	b := newTestTartProvider(cmd)
 	ctx := context.Background()
 
-	_, err := b.StartRunner(ctx, "runner-abc", "jit")
+	_, err := b.StartInstance(ctx, "runner-abc", "jit")
 	if err == nil {
-		t.Fatal("StartRunner() should fail when clone fails")
+		t.Fatal("StartInstance() should fail when clone fails")
 	}
 	if !strings.Contains(err.Error(), "clone") {
 		t.Errorf("error should mention clone, got: %v", err)
 	}
 }
 
-func TestTartBackend_RemoveRunner(t *testing.T) {
+func TestTartProvider_RemoveInstance(t *testing.T) {
 	cmd := &mockCommandRunner{
 		results: map[string]cmdResult{
 			"tart stop":   {output: nil, err: nil},
 			"tart delete": {output: nil, err: nil},
 		},
 	}
-	b := newTestTartBackend(cmd)
+	b := newTestTartProvider(cmd)
 	ctx := context.Background()
 
-	err := b.RemoveRunner(ctx, "runner-abc")
+	err := b.RemoveInstance(ctx, "runner-abc")
 	if err != nil {
-		t.Fatalf("RemoveRunner() error: %v", err)
+		t.Fatalf("RemoveInstance() error: %v", err)
 	}
 
 	if cmd.callCount("tart stop") != 1 {
@@ -175,36 +175,36 @@ func TestTartBackend_RemoveRunner(t *testing.T) {
 	}
 }
 
-func TestTartBackend_RemoveRunner_StopFails(t *testing.T) {
+func TestTartProvider_RemoveInstance_StopFails(t *testing.T) {
 	cmd := &mockCommandRunner{
 		results: map[string]cmdResult{
 			"tart stop":   {err: fmt.Errorf("VM already stopped")},
 			"tart delete": {output: nil, err: nil},
 		},
 	}
-	b := newTestTartBackend(cmd)
+	b := newTestTartProvider(cmd)
 	ctx := context.Background()
 
 	// Should succeed even if stop fails (VM may already be stopped)
-	err := b.RemoveRunner(ctx, "runner-abc")
+	err := b.RemoveInstance(ctx, "runner-abc")
 	if err != nil {
-		t.Fatalf("RemoveRunner() should succeed even if stop fails, got: %v", err)
+		t.Fatalf("RemoveInstance() should succeed even if stop fails, got: %v", err)
 	}
 }
 
-func TestTartBackend_RemoveRunner_DeleteFails(t *testing.T) {
+func TestTartProvider_RemoveInstance_DeleteFails(t *testing.T) {
 	cmd := &mockCommandRunner{
 		results: map[string]cmdResult{
 			"tart stop":   {output: nil, err: nil},
 			"tart delete": {err: fmt.Errorf("permission denied")},
 		},
 	}
-	b := newTestTartBackend(cmd)
+	b := newTestTartProvider(cmd)
 	ctx := context.Background()
 
-	err := b.RemoveRunner(ctx, "runner-abc")
+	err := b.RemoveInstance(ctx, "runner-abc")
 	if err == nil {
-		t.Fatal("RemoveRunner() should fail when delete fails")
+		t.Fatal("RemoveInstance() should fail when delete fails")
 	}
 }
 
@@ -322,9 +322,9 @@ func assertArgs(t *testing.T, got, want []string) {
 	}
 }
 
-func TestTartBackend_Shutdown_IsNoop(t *testing.T) {
+func TestTartProvider_Shutdown_IsNoop(t *testing.T) {
 	cmd := &mockCommandRunner{}
-	b := newTestTartBackend(cmd)
+	b := newTestTartProvider(cmd)
 	ctx := context.Background()
 
 	// Should not panic or call any commands

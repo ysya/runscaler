@@ -14,8 +14,8 @@ health-port = 8080
 # A key set in a [[scaleset]] always wins, even with a zero/empty value:
 # e.g. `memory = 0` (unlimited) or `shared-volume = ""` override the default.
 
-# Backend: "docker" (Linux containers) or "tart" (macOS VMs)
-backend = "docker"
+# Instance provider: "docker" (Linux containers) or "tart" (macOS VMs)
+provider = "docker"
 
 # Default runner image and group
 runner-image = "ghcr.io/actions/actions-runner:latest"
@@ -129,6 +129,6 @@ dind = true
 # url = "https://github.com/org-c"
 # name = "macos-runners"
 # token = "env:TOKEN_ORG_C"
-# backend = "tart"
+# provider = "tart"
 # max-runners = 2
 # runner-image = "ghcr.io/cirruslabs/macos-sequoia-xcode:latest"

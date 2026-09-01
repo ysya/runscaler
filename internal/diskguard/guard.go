@@ -114,8 +114,8 @@ func (g *Guard) statByFilesystem() map[string]filesystemGroup {
 //
 // Safe for concurrent callers, which is no longer hypothetical since Task
 // 9: the periodic ticker in cmd/runner and every scale set's pre-job-start
-// check (scaler.WithDiskChecker) now share one Guard instance and can each
-// call Sweep from their own goroutine (see startDiskGuard/runScaleSet in
+// check (controller.WithDiskChecker) now share one Guard instance and can each
+// call Sweep from their own goroutine (see startDiskGuard/runScaleSetController in
 // cmd/runner/main.go). The store-level work Sweep drives — daemon prunes,
 // helper containers walking and deleting volume contents — is not safe to
 // run twice at once: two `du; find -delete; du` passes over one volume each
@@ -136,7 +136,7 @@ func (g *Guard) statByFilesystem() map[string]filesystemGroup {
 // addressing whatever pressure triggered this call, so a second caller has
 // nothing to gain by waiting for it — only latency stacked onto the
 // job-start path this guard exists to keep unblocked (see
-// scaler.startRunner's own "never blocks a job" comment). A concurrent
+// controller.startInstance's own "never blocks a job" comment). A concurrent
 // caller that finds a sweep already in progress logs that and returns nil
 // immediately instead of queuing behind it.
 func (g *Guard) Sweep(ctx context.Context) error {

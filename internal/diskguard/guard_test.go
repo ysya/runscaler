@@ -298,7 +298,7 @@ func TestGuard_BudgetWipeRespectsTiersForGate(t *testing.T) {
 }
 
 // TestGuard_SweepDoesNotRunConcurrently is a fix-round addition (Task 9
-// review): since scaler.WithDiskChecker landed, this Guard's Sweep can be
+// review): since controller.WithDiskChecker landed, this Guard's Sweep can be
 // called from several goroutines at once (every scale set's
 // pre-job-start check, plus the periodic ticker, all sharing one
 // instance) — see Sweep's own doc comment. This test drives Sweep from

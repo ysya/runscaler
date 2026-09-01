@@ -36,7 +36,7 @@ func validScaleSetConfig() ScaleSetConfig {
 		Token:           "ghp_test",
 		MaxRunners:      10,
 		MinRunners:      0,
-		Backend:         DefaultBackend,
+		Provider:        DefaultProvider,
 		RunnerImage:     DefaultRunnerImage,
 	}
 }
@@ -217,14 +217,14 @@ func TestResolveScaleSets_Legacy(t *testing.T) {
 	if !sets[0].IsDinD() {
 		t.Error("IsDinD() = false, want true")
 	}
-	if sets[0].Backend != DefaultBackend {
-		t.Errorf("Backend = %q, want %q", sets[0].Backend, DefaultBackend)
+	if sets[0].Provider != DefaultProvider {
+		t.Errorf("Provider = %q, want %q", sets[0].Provider, DefaultProvider)
 	}
 }
 
-// --- Tart backend validation tests ---
+// --- Tart provider validation tests ---
 
-func TestScaleSetConfigValidate_TartBackend(t *testing.T) {
+func TestScaleSetConfigValidate_TartProvider(t *testing.T) {
 	tests := []struct {
 		name    string
 		modify  func(*ScaleSetConfig)
@@ -233,7 +233,7 @@ func TestScaleSetConfigValidate_TartBackend(t *testing.T) {
 		{
 			name: "valid tart config",
 			modify: func(c *ScaleSetConfig) {
-				c.Backend = "tart"
+				c.Provider = "tart"
 				c.RunnerImage = "macos-base:latest"
 				c.MaxRunners = 2
 			},
@@ -241,7 +241,7 @@ func TestScaleSetConfigValidate_TartBackend(t *testing.T) {
 		{
 			name: "tart exceeds host limit",
 			modify: func(c *ScaleSetConfig) {
-				c.Backend = "tart"
+				c.Provider = "tart"
 				c.RunnerImage = "macos-base:latest"
 			},
 			wantErr: "max-runners must be <= 2",
@@ -249,17 +249,17 @@ func TestScaleSetConfigValidate_TartBackend(t *testing.T) {
 		{
 			name: "tart missing image",
 			modify: func(c *ScaleSetConfig) {
-				c.Backend = "tart"
+				c.Provider = "tart"
 				c.RunnerImage = ""
 			},
 			wantErr: "runner-image is required",
 		},
 		{
-			name: "unsupported backend",
+			name: "unsupported provider",
 			modify: func(c *ScaleSetConfig) {
-				c.Backend = "podman"
+				c.Provider = "podman"
 			},
-			wantErr: "unsupported backend",
+			wantErr: "unsupported provider",
 		},
 	}
 
@@ -293,7 +293,7 @@ func TestTartDefaults(t *testing.T) {
 			ScaleSetName:    "macos-runners",
 			Token:           "ghp_test",
 			MaxRunners:      2,
-			Backend:         "tart",
+			Provider:        "tart",
 			RunnerImage:     "macos-base:latest",
 		},
 	}
@@ -503,7 +503,7 @@ func TestParseCacheVolumes(t *testing.T) {
 	// Fix round 1: a rewrite regression let a repeated volume name within
 	// one form silently keep only the last entry (cache-volumes =
 	// ["cache:/a", "cache:/b"] used to yield two mounts, then started
-	// yielding one) instead of erroring — and internal/backend/docker.go
+	// yielding one) instead of erroring — and internal/provider/docker.go
 	// mounts exactly what ParseCacheVolumes returns, so the dropped path
 	// never reached the runner container with no warning anywhere. These
 	// two pin that it is now a rejected config, not a silent drop, and the
@@ -573,11 +573,11 @@ func TestParseCacheVolumes(t *testing.T) {
 	})
 }
 
-func TestApplyDefaults_BackendDefault(t *testing.T) {
-	ss := ScaleSetConfig{} // Backend is ""
+func TestApplyDefaults_ProviderDefault(t *testing.T) {
+	ss := ScaleSetConfig{} // Provider is ""
 	ss.applyDefaults()
-	if ss.Backend != DefaultBackend {
-		t.Errorf("applyDefaults() Backend = %q, want %q", ss.Backend, DefaultBackend)
+	if ss.Provider != DefaultProvider {
+		t.Errorf("applyDefaults() Provider = %q, want %q", ss.Provider, DefaultProvider)
 	}
 }
 

@@ -19,9 +19,9 @@ import (
 	dockerclient "github.com/moby/moby/client"
 	"github.com/spf13/cobra"
 
-	"github.com/ysya/runscaler/internal/backend"
 	"github.com/ysya/runscaler/internal/config"
 	runnerlock "github.com/ysya/runscaler/internal/lock"
+	"github.com/ysya/runscaler/internal/provider"
 )
 
 var doctorCmd = &cobra.Command{
@@ -44,7 +44,7 @@ func init() {
 }
 
 // runnerNamePattern matches container/VM names created by runner.
-// scaler.go generates: runner-{uuid[:8]} where uuid[:8] is 8 hex chars.
+// controller.go generates: runner-{uuid[:8]} where uuid[:8] is 8 hex chars.
 var runnerNamePattern = regexp.MustCompile(`^/?runner-[0-9a-f]{8}$`)
 
 func runDoctor(cmd *cobra.Command, args []string) error {
@@ -52,7 +52,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	healthPort, _ := cmd.Flags().GetInt("health-port")
 	healthAddress, _ := cmd.Flags().GetString("health-address")
 
-	// Include both legacy/default and configured backend locations.
+	// Include both legacy/default and configured provider locations.
 	dockerSockets := map[string]bool{config.DefaultDockerSocket: true}
 	tartHomes := map[string]bool{"": true}
 	cfg, cfgErr := loadConfig(cmd)
@@ -242,7 +242,7 @@ func containerDisplayName(c container.Summary) string {
 
 // checkDockerContainers finds and optionally removes orphaned runner
 // containers, via findOrphanContainers and removeOrphanContainers.
-func checkDockerContainers(ctx context.Context, client backend.DockerAPI, fix bool) (int, error) {
+func checkDockerContainers(ctx context.Context, client provider.DockerAPI, fix bool) (int, error) {
 	orphans, err := findOrphanContainers(ctx, client)
 	if err != nil {
 		fmt.Printf("  ✗ Failed to list Docker containers: %s\n", err)
@@ -355,7 +355,7 @@ func volumeSizeText(result dockerclient.VolumeInspectResult) string {
 	if usage == nil || usage.Size < 0 {
 		return "size not reported"
 	}
-	return backend.FormatBytes(uint64(usage.Size))
+	return provider.FormatBytes(uint64(usage.Size))
 }
 
 // tartListEntry represents a VM from `tart list --format json`.

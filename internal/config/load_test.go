@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 )
 
@@ -399,6 +400,90 @@ token = "token-b"
 	}
 }
 
+func TestLoad_LegacyBackendKeyMapsToProvider(t *testing.T) {
+	cfg := loadTOML(t, `
+url = "https://github.com/org"
+name = "runners"
+token = "ghp_x"
+backend = "tart"
+runner-image = "macos:latest"
+max-runners = 2
+`)
+	if len(cfg.Warnings) != 0 {
+		t.Errorf("legacy backend key must remain compatible, got warnings %q", cfg.Warnings)
+	}
+	if got := cfg.ResolveScaleSets()[0].Provider; got != "tart" {
+		t.Errorf("Provider = %q, want tart from legacy backend key", got)
+	}
+}
+
+func TestLoad_UnchangedProviderFlagDoesNotOverrideLegacyBackendConfig(t *testing.T) {
+	flags := pflag.NewFlagSet("test", pflag.ContinueOnError)
+	flags.String("provider", "", "")
+	flags.String("backend", "", "")
+	v := viper.New()
+	if err := v.BindPFlag("provider", flags.Lookup("provider")); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.BindPFlag("backend", flags.Lookup("backend")); err != nil {
+		t.Fatal(err)
+	}
+	v.SetConfigType("toml")
+	if err := v.ReadConfig(strings.NewReader(`
+url = "https://github.com/org"
+name = "runners"
+token = "ghp_x"
+backend = "tart"
+runner-image = "macos:latest"
+max-runners = 2
+`)); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.ResolveScaleSets()[0].Provider; got != "tart" {
+		t.Errorf("Provider = %q, want tart; unchanged --provider must not override legacy config", got)
+	}
+}
+
+func TestLoad_LegacyBackendOverridesInheritedProvider(t *testing.T) {
+	cfg := loadTOML(t, `
+provider = "docker"
+
+[[scaleset]]
+url = "https://github.com/org"
+name = "macos-runners"
+token = "ghp_x"
+backend = "tart"
+runner-image = "macos:latest"
+max-runners = 2
+`)
+	if len(cfg.Warnings) != 0 {
+		t.Errorf("legacy per-scale-set backend key must remain compatible, got warnings %q", cfg.Warnings)
+	}
+	if got := cfg.ResolveScaleSets()[0].Provider; got != "tart" {
+		t.Errorf("Provider = %q, want tart from per-scale-set legacy backend key", got)
+	}
+}
+
+func TestLoad_ProviderWinsOverLegacyBackendWithWarning(t *testing.T) {
+	cfg := loadTOML(t, `
+url = "https://github.com/org"
+name = "runners"
+token = "ghp_x"
+backend = "tart"
+provider = "docker"
+`)
+	if got := cfg.ResolveScaleSets()[0].Provider; got != "docker" {
+		t.Errorf("Provider = %q, want canonical provider value", got)
+	}
+	if len(cfg.Warnings) != 1 || !strings.Contains(cfg.Warnings[0], "backend is deprecated in favor of provider") {
+		t.Errorf("Warnings = %q, want backend/provider conflict warning", cfg.Warnings)
+	}
+}
+
 // TestLoad_LegacyCacheKeysStillWork pins the hardest compatibility
 // requirement in the vocabulary-unification design: three production hosts
 // self-update their binary without their config files changing, so
@@ -784,7 +869,7 @@ log-format = "json"
 health-port = 9090
 dry-run = false
 
-backend = "docker"
+provider = "docker"
 runner-image = "ghcr.io/actions/actions-runner:latest"
 runner-group = "default"
 max-runners = 10
@@ -850,7 +935,7 @@ memory = 0
 url = "https://github.com/org-b"
 name = "macos-runners"
 token = "token-b"
-backend = "tart"
+provider = "tart"
 runner-image = "ghcr.io/cirruslabs/macos-sequoia-xcode:latest"
 
 [scaleset.tart]
@@ -902,8 +987,8 @@ shared-volume-cleanup-interval = "30m"
 	if sets[0].Token != "resolved-token" {
 		t.Errorf("token = %q, want env-resolved value", sets[0].Token)
 	}
-	if sets[0].Backend != DefaultBackend {
-		t.Errorf("backend = %q, want %q", sets[0].Backend, DefaultBackend)
+	if sets[0].Provider != DefaultProvider {
+		t.Errorf("provider = %q, want %q", sets[0].Provider, DefaultProvider)
 	}
 }
 
@@ -939,7 +1024,7 @@ cache-cleanup-interval = "12h"
 
 	t.Run("multi mode inheritance and override", func(t *testing.T) {
 		sets := resolveTOML(t, `
-backend = "tart"
+provider = "tart"
 runner-image = "macos-base:latest"
 
 [tart]
@@ -993,7 +1078,7 @@ token = "token-b"
 	})
 }
 
-func TestLoad_MixedBackends(t *testing.T) {
+func TestLoad_MixedProviders(t *testing.T) {
 	sets := resolveTOML(t, `
 max-runners = 5
 runner-image = "global-macos:latest"
@@ -1007,22 +1092,22 @@ token = "token-a"
 url = "https://github.com/org"
 name = "macos-runners"
 token = "token-b"
-backend = "tart"
+provider = "tart"
 runner-image = "custom-macos:latest"
 `)
 	if len(sets) != 2 {
 		t.Fatalf("expected 2 scale sets, got %d", len(sets))
 	}
 
-	// First: Docker (default backend from builtin defaults)
+	// First: Docker (default provider from builtin defaults)
 	if sets[0].IsTart() {
 		t.Error("sets[0] should not be tart")
 	}
-	if sets[0].Backend != DefaultBackend {
-		t.Errorf("sets[0].Backend = %q, want %q", sets[0].Backend, DefaultBackend)
+	if sets[0].Provider != DefaultProvider {
+		t.Errorf("sets[0].Provider = %q, want %q", sets[0].Provider, DefaultProvider)
 	}
 
-	// Second: Tart with custom image and backend-dependent defaults applied
+	// Second: Tart with custom image and provider-dependent defaults applied
 	if !sets[1].IsTart() {
 		t.Error("sets[1] should be tart")
 	}
@@ -1052,8 +1137,8 @@ token = "token-a"
 	if sets[0].MaxRunners != DefaultMaxRunners {
 		t.Errorf("MaxRunners = %d, want %d", sets[0].MaxRunners, DefaultMaxRunners)
 	}
-	if sets[0].Backend != DefaultBackend {
-		t.Errorf("Backend = %q, want %q", sets[0].Backend, DefaultBackend)
+	if sets[0].Provider != DefaultProvider {
+		t.Errorf("Provider = %q, want %q", sets[0].Provider, DefaultProvider)
 	}
 	if sets[0].Docker.Socket != DefaultDockerSocket {
 		t.Errorf("Docker.Socket = %q, want %q", sets[0].Docker.Socket, DefaultDockerSocket)

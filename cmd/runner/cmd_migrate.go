@@ -173,7 +173,7 @@ func migrateService(user bool) (bool, error) {
 			user:       user,
 			configPath: newConfigPath,
 			binaryPath: binaryPath,
-			backend:    detectBackend(newConfigPath),
+			provider:   detectProvider(newConfigPath),
 			noStart:    true,
 		}); err != nil {
 			return false, err

@@ -22,13 +22,11 @@ var identityKeys = []string{"url", "name", "token", "labels", "min-runners"}
 
 // aliasSpec is one deprecated-key → canonical-key mapping applied at the
 // map level, before any struct decode happens. table is the top-level
-// settings key the pair lives under ("docker" or "tart"); oldKey and newKey
-// are the bare keys within that table.
+// settings key the pair lives under ("docker" or "tart"); an empty table
+// means the pair lives at the top level. oldKey and newKey are bare keys.
 //
-// Only cache-space-budget and shared-volume-ttl need an entry: the design's
-// vocabulary-unification pass (docs/superpowers/specs/
-// 2026-08-13-cache-architecture-design.md, section D) found build-cache-budget
-// and build-cache-max-age already using the canonical names.
+// Top-level aliases are used for public compatibility too: backend remains
+// accepted while provider is the canonical runner-manager term.
 type aliasSpec struct {
 	table  string
 	oldKey string
@@ -36,6 +34,7 @@ type aliasSpec struct {
 }
 
 var configAliases = []aliasSpec{
+	{oldKey: "backend", newKey: "provider"},
 	{table: "docker", oldKey: "shared-volume-ttl", newKey: "shared-volume-max-age"},
 	{table: "tart", oldKey: "cache-space-budget", newKey: "cache-budget"},
 }
@@ -63,18 +62,32 @@ var configAliases = []aliasSpec{
 func applyAliases(settings map[string]any) []string {
 	var warnings []string
 	for _, a := range configAliases {
-		table, ok := settings[a.table].(map[string]any)
-		if !ok {
-			continue
+		table := settings
+		prefix := ""
+		if a.table != "" {
+			var ok bool
+			table, ok = settings[a.table].(map[string]any)
+			if !ok {
+				continue
+			}
+			prefix = a.table + "."
 		}
 		oldVal, hasOld := table[a.oldKey]
 		if !hasOld {
 			continue
 		}
-		if _, hasNew := table[a.newKey]; hasNew {
+		// Bound CLI flags appear in Viper's AllSettings even when unchanged.
+		// Treat their zero values as absent so an empty compatibility flag
+		// cannot override a real value from the config file.
+		if !isExplicitlySet(oldVal) {
+			delete(table, a.oldKey)
+			continue
+		}
+		newVal, hasNew := table[a.newKey]
+		if hasNew && isExplicitlySet(newVal) {
 			warnings = append(warnings, fmt.Sprintf(
-				"%[1]s.%[2]s is deprecated in favor of %[1]s.%[3]s — both are set, %[1]s.%[3]s wins (remove %[1]s.%[2]s)",
-				a.table, a.oldKey, a.newKey))
+				"%[1]s%[2]s is deprecated in favor of %[1]s%[3]s — both are set, %[1]s%[3]s wins (remove %[1]s%[2]s)",
+				prefix, a.oldKey, a.newKey))
 		} else {
 			table[a.newKey] = oldVal
 		}
@@ -213,7 +226,7 @@ func builtinDefaults() map[string]any {
 		"runner-image": DefaultRunnerImage,
 		"runner-group": DefaultRunnerGroup,
 		"max-runners":  DefaultMaxRunners,
-		"backend":      DefaultBackend,
+		"provider":     DefaultProvider,
 		"docker": map[string]any{
 			"socket": DefaultDockerSocket,
 			"dind":   DefaultDinD,

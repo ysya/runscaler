@@ -115,7 +115,7 @@ func TestDockerPruneSettingsFor(t *testing.T) {
 
 	t.Run("tart scalesets are skipped", func(t *testing.T) {
 		yes := true
-		sets := []config.ScaleSetConfig{{Backend: "tart", Docker: config.DockerConfig{Prune: &yes, PruneTTL: time.Hour}}}
+		sets := []config.ScaleSetConfig{{Provider: "tart", Docker: config.DockerConfig{Prune: &yes, PruneTTL: time.Hour}}}
 		garbage, _, _ := dockerPruneSettingsFor(sets)
 		if garbage.Enabled {
 			t.Error("a Tart scaleset must never enable the Docker garbage store")
@@ -161,7 +161,7 @@ func TestBuildxConfigFor(t *testing.T) {
 
 func TestSharedVolumeSweepTargetsFor(t *testing.T) {
 	t.Run("no configured shared volume yields no targets", func(t *testing.T) {
-		sets := []config.ScaleSetConfig{{}, {Backend: "tart", Docker: config.DockerConfig{SharedVolume: "/shared"}}}
+		sets := []config.ScaleSetConfig{{}, {Provider: "tart", Docker: config.DockerConfig{SharedVolume: "/shared"}}}
 		targets := sharedVolumeSweepTargetsFor(sets, nil, "/root", slog.New(slog.DiscardHandler))
 		if len(targets) != 0 {
 			t.Errorf("targets = %+v, want none (no Docker scaleset mounts a shared volume)", targets)
@@ -257,7 +257,7 @@ func TestTartCacheStores(t *testing.T) {
 	// tartCacheStores' doc comment.
 	t.Run("disabled scaleset still yields a target, marked not enabled, with defaulted settings", func(t *testing.T) {
 		no := false
-		sets := []config.ScaleSetConfig{{Backend: "tart", Tart: config.TartConfig{Home: "/Volumes/A", CacheCleanup: &no}}}
+		sets := []config.ScaleSetConfig{{Provider: "tart", Tart: config.TartConfig{Home: "/Volumes/A", CacheCleanup: &no}}}
 		targets := tartCacheStores(sets, slog.New(slog.DiscardHandler))
 		if len(targets) != 1 {
 			t.Fatalf("targets = %+v, want 1 (the disk guard must still see this home)", targets)
@@ -277,10 +277,10 @@ func TestTartCacheStores(t *testing.T) {
 	t.Run("first enabled scaleset per home wins, distinct homes each get a target", func(t *testing.T) {
 		no := false
 		sets := []config.ScaleSetConfig{
-			{Backend: "tart", Tart: config.TartConfig{Home: "/Volumes/A", CacheCleanup: &no}},                // skipped: disabled
-			{Backend: "tart", Tart: config.TartConfig{Home: "/Volumes/A", CacheMaxAge: 3 * 24 * time.Hour}},  // enabled by default, wins for /Volumes/A
-			{Backend: "tart", Tart: config.TartConfig{Home: "/Volumes/A", CacheMaxAge: 99 * 24 * time.Hour}}, // ignored
-			{Backend: "tart", Tart: config.TartConfig{Home: "/Volumes/B", CacheBudgetGB: 50}},
+			{Provider: "tart", Tart: config.TartConfig{Home: "/Volumes/A", CacheCleanup: &no}},                // skipped: disabled
+			{Provider: "tart", Tart: config.TartConfig{Home: "/Volumes/A", CacheMaxAge: 3 * 24 * time.Hour}},  // enabled by default, wins for /Volumes/A
+			{Provider: "tart", Tart: config.TartConfig{Home: "/Volumes/A", CacheMaxAge: 99 * 24 * time.Hour}}, // ignored
+			{Provider: "tart", Tart: config.TartConfig{Home: "/Volumes/B", CacheBudgetGB: 50}},
 		}
 		targets := tartCacheStores(sets, slog.New(slog.DiscardHandler))
 		if len(targets) != 2 {
@@ -298,7 +298,7 @@ func TestTartCacheStores(t *testing.T) {
 	})
 
 	t.Run("non-tart scaleset never contributes a target", func(t *testing.T) {
-		sets := []config.ScaleSetConfig{{Backend: "docker", Tart: config.TartConfig{Home: "/Volumes/A"}}}
+		sets := []config.ScaleSetConfig{{Provider: "docker", Tart: config.TartConfig{Home: "/Volumes/A"}}}
 		if targets := tartCacheStores(sets, slog.New(slog.DiscardHandler)); len(targets) != 0 {
 			t.Errorf("targets = %+v, want none for a Docker scaleset", targets)
 		}
@@ -325,7 +325,7 @@ func TestCacheVolumeStoresFor(t *testing.T) {
 	})
 
 	t.Run("tart scalesets never contribute a cache-volume store", func(t *testing.T) {
-		sets := []config.ScaleSetConfig{{Backend: "tart"}}
+		sets := []config.ScaleSetConfig{{Provider: "tart"}}
 		if stores := cacheVolumeStoresFor(sets, nil, "/root"); len(stores) != 0 {
 			t.Errorf("stores = %d, want 0 for a Tart scaleset", len(stores))
 		}

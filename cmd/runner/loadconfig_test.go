@@ -8,7 +8,40 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
+
+	"github.com/ysya/runscaler/internal/config"
 )
+
+func TestLoadConfigKeepsLegacyBackendWhenProviderFlagIsUnchanged(t *testing.T) {
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte(`
+url = "https://github.com/org"
+name = "runners"
+token = "ghp_x"
+backend = "tart"
+runner-image = "macos:latest"
+max-runners = 2
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	c := &cobra.Command{}
+	c.Flags().String("config", path, "")
+	c.Flags().String("provider", config.DefaultProvider, "")
+	c.Flags().String("backend", "", "")
+	c.Flags().Lookup("config").Changed = true
+
+	cfg, err := loadConfig(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.ResolveScaleSets()[0].Provider; got != "tart" {
+		t.Errorf("Provider = %q, want tart from legacy config", got)
+	}
+}
 
 func TestLoadConfigSurfacesParseError(t *testing.T) {
 	viper.Reset()

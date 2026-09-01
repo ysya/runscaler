@@ -50,8 +50,8 @@ func runValidate(cmd *cobra.Command, args []string) error {
 			fmt.Printf("  ✗ scaleset[%d] %q: %s\n", i, scaleSets[i].ScaleSetName, err)
 			return fmt.Errorf("validation failed")
 		}
-		fmt.Printf("  ✓ scaleset[%d] %q — backend=%s url=%s max=%d min=%d\n",
-			i, scaleSets[i].ScaleSetName, scaleSets[i].Backend, scaleSets[i].RegistrationURL,
+		fmt.Printf("  ✓ scaleset[%d] %q — provider=%s url=%s max=%d min=%d\n",
+			i, scaleSets[i].ScaleSetName, scaleSets[i].Provider, scaleSets[i].RegistrationURL,
 			scaleSets[i].MaxRunners, scaleSets[i].MinRunners,
 		)
 	}
@@ -60,7 +60,7 @@ func runValidate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("validation failed")
 	}
 
-	// Check which backends are needed
+	// Check which instance providers are needed.
 	needsDocker := false
 	needsTart := false
 	for _, ss := range scaleSets {

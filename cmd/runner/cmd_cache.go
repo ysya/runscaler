@@ -12,10 +12,10 @@ import (
 	dockerclient "github.com/moby/moby/client"
 	"github.com/spf13/cobra"
 
-	"github.com/ysya/runscaler/internal/backend"
 	"github.com/ysya/runscaler/internal/cachestore"
 	"github.com/ysya/runscaler/internal/config"
 	"github.com/ysya/runscaler/internal/diskguard"
+	"github.com/ysya/runscaler/internal/provider"
 )
 
 var cacheCmd = &cobra.Command{
@@ -122,7 +122,7 @@ func policyString(budgetBytes uint64, onExceed string) string {
 	if onExceed == "" {
 		onExceed = "warn"
 	}
-	return fmt.Sprintf("budget=%s on-exceed=%s", backend.FormatBytes(budgetBytes), onExceed)
+	return fmt.Sprintf("budget=%s on-exceed=%s", provider.FormatBytes(budgetBytes), onExceed)
 }
 
 // buildCacheRows measures every store and stats the filesystem it lives on,
@@ -182,7 +182,7 @@ func formatCacheTable(rows []cacheRow) string {
 	w := tabwriter.NewWriter(&buf, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(w, "STORE\tFILESYSTEM\tSIZE\tFS FREE\tPOLICY\tERROR")
 	for _, r := range rows {
-		size := backend.FormatBytes(r.SizeBytes)
+		size := provider.FormatBytes(r.SizeBytes)
 		if r.SizeUnknown {
 			size = "unknown"
 		}
@@ -207,8 +207,8 @@ func runCache(cmd *cobra.Command, args []string) error {
 	scaleSets := cfg.ResolveScaleSets()
 	logger := config.NewLogger(cfg.LogLevel, cfg.LogFormat)
 
-	// One best-effort client per distinct Docker socket, like run()'s own
-	// loop — but deliberately without run()/validate's Ping check: an
+	// One best-effort client per distinct Docker socket, like runManager()'s own
+	// loop — but deliberately without runManager()/validate's Ping check: an
 	// unreachable daemon must not make its stores vanish from the table, it
 	// must make them appear with their error (see cacheRow.MeasureError —
 	// the actual failure surfaces there, per-store, once Measure is

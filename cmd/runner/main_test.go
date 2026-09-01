@@ -157,9 +157,9 @@ func TestLogServiceDrainTimeoutReminder_SkipsInteractiveOrDisabled(t *testing.T)
 
 func TestRootBareInvocationDoesNotStart(t *testing.T) {
 	called := false
-	orig := startScaling
-	startScaling = func(c *cobra.Command) error { called = true; return nil }
-	defer func() { startScaling = orig }()
+	orig := startManager
+	startManager = func(c *cobra.Command) error { called = true; return nil }
+	defer func() { startManager = orig }()
 	defer func() {
 		if f := cmd.PersistentFlags().Lookup("config"); f != nil {
 			f.Changed = false
@@ -182,9 +182,9 @@ func TestRootBareInvocationDoesNotStart(t *testing.T) {
 
 func TestRootConfigInvocationStartsViaDropIn(t *testing.T) {
 	called := false
-	orig := startScaling
-	startScaling = func(c *cobra.Command) error { called = true; return nil }
-	defer func() { startScaling = orig }()
+	orig := startManager
+	startManager = func(c *cobra.Command) error { called = true; return nil }
+	defer func() { startManager = orig }()
 	defer func() {
 		if f := cmd.PersistentFlags().Lookup("config"); f != nil {
 			f.Changed = false
@@ -219,7 +219,7 @@ func TestRunSubcommandRegistered(t *testing.T) {
 }
 
 func TestRunOwnsStartFlags(t *testing.T) {
-	for _, name := range []string{"url", "name", "token", "max-runners", "backend", "health-port", "dry-run"} {
+	for _, name := range []string{"url", "name", "token", "max-runners", "provider", "backend", "health-port", "dry-run"} {
 		if runCommand.Flags().Lookup(name) == nil {
 			t.Errorf("`run` must own the --%s start flag", name)
 		}

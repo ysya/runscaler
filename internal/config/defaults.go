@@ -6,7 +6,7 @@ import "time"
 // All flag definitions, config templates, and fallback logic
 // should reference these constants instead of hardcoding values.
 const (
-	DefaultBackend       = "docker"
+	DefaultProvider      = "docker"
 	DefaultMaxRunners    = 10
 	DefaultRunnerImage   = "ghcr.io/actions/actions-runner:latest"
 	DefaultRunnerGroup   = "default"

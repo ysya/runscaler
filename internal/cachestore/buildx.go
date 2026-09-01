@@ -6,7 +6,7 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/ysya/runscaler/internal/backend"
+	"github.com/ysya/runscaler/internal/provider"
 )
 
 // BuildxConfig mirrors the [docker] buildx-cleanup settings.
@@ -17,7 +17,7 @@ type BuildxConfig struct {
 }
 
 type buildxStore struct {
-	client backend.DockerAPI
+	client provider.DockerAPI
 	cfg    BuildxConfig
 }
 
@@ -25,7 +25,7 @@ type buildxStore struct {
 // (named buildx_buildkit_*) and their `_state` volumes. It is KindGarbage —
 // an orphaned builder is already-abandoned data that nothing observes the
 // removal of — and so participates only in Tier1 (see TiersFor).
-func NewBuildxStore(client backend.DockerAPI, cfg BuildxConfig) CacheStore {
+func NewBuildxStore(client provider.DockerAPI, cfg BuildxConfig) CacheStore {
 	return serialize(&buildxStore{client: client, cfg: cfg})
 }
 
@@ -73,7 +73,7 @@ func (s *buildxStore) Reclaim(ctx context.Context, tier Tier) (uint64, error) {
 		return 0, nil
 	}
 
-	if err := backend.CleanupOrphanedBuildxBuilders(ctx, s.client, s.cfg.MaxAge, slog.Default()); err != nil {
+	if err := provider.CleanupOrphanedBuildxBuilders(ctx, s.client, s.cfg.MaxAge, slog.Default()); err != nil {
 		return 0, fmt.Errorf("cleanup orphaned buildx builders: %w", err)
 	}
 

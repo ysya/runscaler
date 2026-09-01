@@ -14,7 +14,7 @@ import (
 
 	dockerclient "github.com/moby/moby/client"
 
-	"github.com/ysya/runscaler/internal/backend"
+	"github.com/ysya/runscaler/internal/provider"
 )
 
 var poolNamePattern = regexp.MustCompile(`^pool-[0-9]+-[0-9]+$`)
@@ -27,7 +27,7 @@ var poolNamePattern = regexp.MustCompile(`^pool-[0-9]+-[0-9]+$`)
 // this process. That holds only because internal/lock guarantees a single
 // runner per host. If that guarantee is ever relaxed, this function and its
 // callers must be revisited.
-func findOrphanTartVMs(ctx context.Context, runner backend.CommandRunner) ([]string, error) {
+func findOrphanTartVMs(ctx context.Context, runner provider.CommandRunner) ([]string, error) {
 	out, err := runner.Run(ctx, "tart", "list", "--format", "json")
 	if err != nil {
 		return nil, err
@@ -54,7 +54,7 @@ func findOrphanTartVMs(ctx context.Context, runner backend.CommandRunner) ([]str
 // removeOrphanTartVMs stops and deletes each orphan. Stop errors are expected
 // for VMs that are already stopped; delete failures are logged and do not
 // prevent the remaining VMs from being reconciled.
-func removeOrphanTartVMs(ctx context.Context, runner backend.CommandRunner, orphans []string, logger *slog.Logger) (removed int) {
+func removeOrphanTartVMs(ctx context.Context, runner provider.CommandRunner, orphans []string, logger *slog.Logger) (removed int) {
 	for _, name := range orphans {
 		if _, err := runner.Run(ctx, "tart", "stop", name); err != nil {
 			logger.Debug("Could not stop orphaned Tart VM; it may already be stopped",
@@ -73,7 +73,7 @@ func removeOrphanTartVMs(ctx context.Context, runner backend.CommandRunner, orph
 }
 
 // reconcileOrphans removes resources left by a previous process before any
-// scale set starts. Its safety depends on startScaling acquiring the
+// scale set starts. Its safety depends on startManager acquiring the
 // machine-wide internal/lock before entering run; without that lock these
 // resources could belong to another live runner process.
 //
@@ -149,7 +149,7 @@ func uniqueSortedStrings(values []string) []string {
 
 // tartOrphanCommandRunner runs Tart commands against one configured
 // TART_HOME. It lives in cmd/runner because startup reconciliation is a
-// process-level concern rather than part of one Tart backend instance.
+// process-level concern rather than part of one Tart provider instance.
 type tartOrphanCommandRunner struct {
 	home string
 }

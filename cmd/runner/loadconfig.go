@@ -41,6 +41,24 @@ func loadConfig(cmd *cobra.Command) (config.Config, error) {
 		}
 	}
 
+	// Provider flags are copied only when explicitly set. Binding both the
+	// canonical and legacy names to Viper would make --provider's default
+	// "docker" look explicit and override an existing backend = "tart"
+	// config before the alias layer can preserve it.
+	providerFlag := cmd.Flags().Lookup("provider")
+	backendFlag := cmd.Flags().Lookup("backend")
+	providerChanged := providerFlag != nil && providerFlag.Changed
+	backendChanged := backendFlag != nil && backendFlag.Changed
+	if providerChanged && backendChanged {
+		return config.Config{}, fmt.Errorf("--provider and deprecated --backend cannot be used together")
+	}
+	if providerChanged {
+		viper.Set("provider", providerFlag.Value.String())
+	}
+	if backendChanged {
+		viper.Set("backend", backendFlag.Value.String())
+	}
+
 	cfg, err := config.Load(viper.GetViper())
 	if err != nil {
 		return config.Config{}, fmt.Errorf("failed to parse configuration: %w", err)

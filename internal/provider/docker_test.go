@@ -2,12 +2,15 @@ package provider
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"strings"
 	"testing"
 	"time"
 
+	cerrdefs "github.com/containerd/errdefs"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/mount"
 	"github.com/moby/moby/api/types/system"
@@ -36,6 +39,7 @@ type mockDocker struct {
 	// immediately with status 0.
 	waitStatus int64
 	waitErr    error
+	removeErr  error
 
 	// Optional fixtures for ContainerList / VolumeList.
 	containers []container.Summary
@@ -56,7 +60,7 @@ func (m *mockDocker) ContainerStart(_ context.Context, id string, _ dockerclient
 
 func (m *mockDocker) ContainerRemove(_ context.Context, id string, _ dockerclient.ContainerRemoveOptions) (dockerclient.ContainerRemoveResult, error) {
 	m.removed = append(m.removed, id)
-	return dockerclient.ContainerRemoveResult{}, nil
+	return dockerclient.ContainerRemoveResult{}, m.removeErr
 }
 
 // The three prune methods exist only to satisfy DockerAPI. Nothing in this
@@ -489,6 +493,17 @@ func TestDockerProvider_RemoveInstance(t *testing.T) {
 	}
 	if len(md.removed) != 1 || md.removed[0] != "sha256-runner-1" {
 		t.Errorf("removed = %v, want [sha256-runner-1]", md.removed)
+	}
+}
+
+func TestDockerProvider_RemoveInstanceAlreadyAbsent(t *testing.T) {
+	b, md := newTestDockerProvider("", false)
+	md.removeErr = fmt.Errorf("container gone: %w", cerrdefs.ErrNotFound)
+	if err := b.RemoveInstance(context.Background(), "missing"); err != nil {
+		t.Fatalf("RemoveInstance() error for absent container: %v", err)
+	}
+	if !errors.Is(md.removeErr, cerrdefs.ErrNotFound) {
+		t.Fatal("test fixture is not a containerd not-found error")
 	}
 }
 

@@ -470,14 +470,14 @@ func (p *TartProvider) StartInstance(ctx context.Context, name string, jitConfig
 
 // RemoveInstance stops and deletes a Tart VM, releasing its VM slot.
 func (p *TartProvider) RemoveInstance(ctx context.Context, instanceID string) error {
-	// Use background context for cleanup so it completes even if parent is cancelled
-	cleanCtx := context.WithoutCancel(ctx)
-
-	_, stopErr := p.cmd.Run(cleanCtx, "tart", "stop", instanceID)
+	_, stopErr := p.cmd.Run(ctx, "tart", "stop", instanceID)
 	if stopErr != nil {
 		p.logger.Warn("Failed to stop VM (may already be stopped)", slog.String("name", instanceID), slog.Any("error", stopErr))
 	}
-	_, deleteErr := p.cmd.Run(cleanCtx, "tart", "delete", instanceID)
+	_, deleteErr := p.cmd.Run(ctx, "tart", "delete", instanceID)
+	if tartInstanceAbsent(deleteErr) {
+		deleteErr = nil
+	}
 	value, tracked := p.activeVMs.Load(instanceID)
 	knownStopped := stopErr == nil || deleteErr == nil
 	if tracked {
@@ -494,6 +494,22 @@ func (p *TartProvider) RemoveInstance(ctx context.Context, instanceID string) er
 		return fmt.Errorf("failed to delete VM %s: %w", instanceID, deleteErr)
 	}
 	return nil
+}
+
+// tartInstanceAbsent recognizes the stable classes of "already gone" errors
+// emitted by Tart and its storage layer. CommandRunner preserves stderr in the
+// wrapped error, so matching here keeps RemoveInstance idempotent without
+// hiding permission, corruption, or cancellation failures.
+func tartInstanceAbsent(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "not found") ||
+		strings.Contains(message, "does not exist") ||
+		strings.Contains(message, "doesn't exist") ||
+		strings.Contains(message, "no such virtual machine") ||
+		strings.Contains(message, "could not find")
 }
 
 func (p *TartProvider) WaitInstance(ctx context.Context, instanceID string) error {

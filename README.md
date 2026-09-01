@@ -181,11 +181,13 @@ jobs:
 ### Status dashboard
 
 `runner status` turns the local `/healthz` snapshot into an operator-friendly
-dashboard. The summary rolls up ready scale sets, idle/busy/desired runners,
-queue depth, and process-lifetime job counters. Each scale set then shows its
-connection state, last successful connection, and last error. The disk section
-shows cheap filesystem-level free-space readings; use `runner cache` when you
-need the slower per-store usage measurements.
+dashboard. The summary rolls up ready scale sets, runner lifecycle
+(`provisioning`, `idle`, `busy`, `removing`), desired runners, queue depth, and
+process-lifetime job counters. It also shows host-wide `concurrent` capacity as
+`in_use / limit`. Each scale set then shows its connection state, last
+successful connection, and last error. The disk section shows cheap
+filesystem-level free-space readings; use `runner cache` when you need the
+slower per-store usage measurements.
 
 ```bash
 # Human-readable dashboard; color is enabled automatically in a terminal
@@ -283,6 +285,7 @@ runner-image = "ghcr.io/actions/actions-runner:latest"
 runner-group = "default"
 log-level = "info"
 log-format = "text"
+concurrent = 10                          # host-wide across all scale sets; 0 = automatic sum
 # log-file = "/var/log/runner/runner.log" # default: runner.log beside config
 health-address = "127.0.0.1"              # localhost-only by default
 health-port = 8080
@@ -426,6 +429,7 @@ pool-size = 2
 | `--token`           | `token`              | (required)                              | GitHub Personal Access Token                      |
 | `--provider`        | `provider`           | `docker`                                | Instance provider (`docker` or `tart`)             |
 | `--max-runners`     | `max-runners`        | `10`                                    | Maximum concurrent runners                        |
+| `--concurrent`      | `concurrent`         | `0` (sum of `max-runners`)              | Host-wide maximum across all scale sets           |
 | `--min-runners`     | `min-runners`        | `0`                                     | Minimum runners to keep warm                      |
 | `--labels`          | `labels`             | `<name>`                                | Runner labels (comma-separated)                   |
 | `--runner-group`    | `runner-group`       | `default`                               | Runner group name                                 |
@@ -446,6 +450,14 @@ pool-size = 2
 Process-wide `drain-timeout` and advanced tuning keys (cleanup, cache volumes,
 isolation) are config-file only by design — see `config.example.toml` for the
 full list.
+
+Like GitLab Runner, `concurrent` is the manager-wide ceiling while each scale
+set's `max-runners` is its local ceiling. The controller reserves global
+capacity before JIT/provider startup, so multiple organizations and mixed
+Docker/Tart scale sets cannot collectively oversubscribe the host. Capacity for
+every scale set's `min-runners` floor is reserved before FIFO surplus capacity
+is handed out. Leaving `concurrent` at `0` keeps backward-compatible behavior
+by using the sum of all configured `max-runners` values.
 
 The deprecated `backend` TOML key and `--backend` flag remain accepted for
 existing installations. New configuration and generated files use `provider`.
@@ -673,20 +685,45 @@ an `InstanceProvider` lifecycle:
 The `runscaler` binary is now `runner` (start is a subcommand: `runner run`).
 After installing the new binary, run:
 
-    sudo runner migrate          # system-level install
-    runner migrate --user        # user-level install
+    sudo runner migrate --dry-run          # inspect system-level changes
+    sudo runner migrate                    # perform system-level migration
+    runner migrate --user --dry-run        # inspect user-level changes
+    runner migrate --user                  # no sudo; uses ~/.config/runner
 
-`migrate` moves your config (`/etc/runscaler` → `/etc/runner`), reinstalls the
-service under the new name, and removes the old docker volume. It is idempotent.
+`migrate` creates a `0600` backup before changing config. Backup filenames
+include the runner version, a UTC timestamp, the config SHA-256 prefix, and an
+original-path fingerprint; an adjacent JSON manifest records provenance and a
+restore command without copying config values or tokens into the manifest.
+System backups live under `/etc/runner/backups`; `--user` backups live under
+`~/.config/runner/backups`.
+
+The migrated copy preserves comments, ordering, whitespace, and values while
+canonicalizing deprecated keys (`backend` → `provider`,
+`docker.shared-volume-ttl` → `docker.shared-volume-max-age`, and
+`tart.cache-space-budget` → `tart.cache-budget`). It is validated offline
+before being written. The service cutover stops but retains `runscaler`, starts
+and verifies `runner`, and only then removes the old service. A failed start
+restores the config and restarts the legacy service. Re-running migration
+reuses an identical content-addressed backup.
+
+User migration reads `~/.config/runscaler/config.toml` and writes
+`~/.config/runner/config.toml`. It discovers a custom config path from a known
+legacy service when possible; otherwise pass it explicitly with
+`runner migrate --user --config /path/to/config.toml`. Explicit source files
+are never removed. Use `--backup-dir` to override the backup location.
+
+The legacy Docker volume is intentionally left untouched by default. Remove it
+only after reviewing the migration with `runner migrate --cleanup` (or add
+`--cleanup` to the initial migration). Migration is otherwise idempotent.
 
 During the transition the old binary's `runscaler update` can still fetch this
 release (compat assets are published), a legacy `/etc/runscaler/config.toml` is
 still read (with a warning), and an old `runscaler --config` service invocation
 still starts (with a warning) — so nothing breaks before you migrate.
 
-Manual alternative: uninstall the old service with the old binary, move the
-config, run `sudo runner service install`, and `runner doctor --fix` to clean
-the old volume.
+Manual alternative: stop the old service, back up and move the config, run
+`runner validate --config <path>`, install the new service, verify it, and only
+then uninstall the old service.
 
 ## License
 

@@ -13,7 +13,7 @@ import (
 
 // globalOnlyKeys are top-level keys that configure the process rather than a
 // scale set; they are never inherited by [[scaleset]] entries.
-var globalOnlyKeys = []string{"log-level", "log-format", "log-file", "health-port", "health-address", "dry-run", "drain-timeout"}
+var globalOnlyKeys = []string{"log-level", "log-format", "log-file", "health-port", "health-address", "dry-run", "drain-timeout", "concurrent"}
 
 // identityKeys identify a single scale set (or only make sense per scale
 // set, like min-runners where 0 is a valid explicit value); they are never
@@ -37,6 +37,28 @@ var configAliases = []aliasSpec{
 	{oldKey: "backend", newKey: "provider"},
 	{table: "docker", oldKey: "shared-volume-ttl", newKey: "shared-volume-max-age"},
 	{table: "tart", oldKey: "cache-space-budget", newKey: "cache-budget"},
+}
+
+// DeprecatedKeyAlias describes one public config spelling retained for
+// backwards compatibility. Migration tooling consumes this read-only view so
+// canonicalization cannot drift from the aliases accepted by Load.
+type DeprecatedKeyAlias struct {
+	Table  string
+	OldKey string
+	NewKey string
+}
+
+// DeprecatedKeyAliases returns a copy of the deprecated config-key mappings.
+func DeprecatedKeyAliases() []DeprecatedKeyAlias {
+	aliases := make([]DeprecatedKeyAlias, len(configAliases))
+	for i, alias := range configAliases {
+		aliases[i] = DeprecatedKeyAlias{
+			Table:  alias.table,
+			OldKey: alias.oldKey,
+			NewKey: alias.newKey,
+		}
+	}
+	return aliases
 }
 
 // applyAliases moves each deprecated key in configAliases onto its

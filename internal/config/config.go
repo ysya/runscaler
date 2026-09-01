@@ -35,6 +35,9 @@ type Config struct {
 	HealthAddress string  `mapstructure:"health-address"`
 	DryRun        bool    `mapstructure:"dry-run"`
 	LogFile       *string `mapstructure:"log-file"`
+	// Concurrent is the GitLab Runner-style process-wide instance limit. Zero
+	// automatically uses the sum of resolved scale-set max-runners values.
+	Concurrent int `mapstructure:"concurrent"`
 	// DrainTimeout is a pointer so an omitted value can inherit the two-hour
 	// default while an explicit "0s" can disable draining.
 	DrainTimeout *time.Duration `mapstructure:"drain-timeout"`
@@ -609,8 +612,42 @@ func (c *Config) ValidateGlobal() error {
 	if c.HealthPort < 0 || c.HealthPort > 65535 {
 		return fmt.Errorf("health-port must be between 0 and 65535")
 	}
+	if c.Concurrent < 0 {
+		return fmt.Errorf("concurrent must be >= 0")
+	}
 	if err := c.Disk.Validate(); err != nil {
 		return fmt.Errorf("disk: %w", err)
+	}
+	return nil
+}
+
+// EffectiveConcurrent returns the process-wide instance limit. An omitted or
+// zero value preserves historical behavior by allowing the sum of every scale
+// set's own maximum.
+func (c *Config) EffectiveConcurrent(scaleSets []ScaleSetConfig) int {
+	if c.Concurrent > 0 {
+		return c.Concurrent
+	}
+	total := 0
+	for _, ss := range scaleSets {
+		total += ss.MaxRunners
+	}
+	return total
+}
+
+// ValidateConcurrent ensures an explicit host-wide limit can satisfy every
+// scale set's promised warm floor. Local max-runners values may sum above the
+// global limit; the broker arbitrates that normal oversubscription case.
+func (c *Config) ValidateConcurrent(scaleSets []ScaleSetConfig) error {
+	if c.Concurrent == 0 {
+		return nil
+	}
+	totalMin := 0
+	for _, ss := range scaleSets {
+		totalMin += ss.MinRunners
+	}
+	if c.Concurrent < totalMin {
+		return fmt.Errorf("concurrent (%d) must be >= the sum of min-runners (%d)", c.Concurrent, totalMin)
 	}
 	return nil
 }

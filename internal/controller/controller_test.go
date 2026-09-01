@@ -5,11 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/actions/scaleset"
+
+	"github.com/ysya/runscaler/internal/capacity"
 )
 
 // --- Mocks ---
@@ -27,6 +30,86 @@ type watcherProvider struct {
 	removed []string
 	waits   map[string]chan struct{}
 }
+
+type blockingProvider struct {
+	started chan string
+	release chan struct{}
+}
+
+func (p *blockingProvider) StartInstance(ctx context.Context, name, _ string) (string, error) {
+	p.started <- name
+	select {
+	case <-p.release:
+		return "instance-" + name, nil
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+}
+
+func (p *blockingProvider) RemoveInstance(context.Context, string) error { return nil }
+func (p *blockingProvider) Shutdown(context.Context)                     {}
+
+type blockingCleanupProvider struct {
+	removeStarted chan string
+	release       chan struct{}
+}
+
+type selectiveCleanupProvider struct {
+	mu        sync.Mutex
+	started   []string
+	attempted []string
+	removed   []string
+	failID    string
+}
+
+func (p *selectiveCleanupProvider) StartInstance(_ context.Context, name, _ string) (string, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	id := "instance-" + name
+	p.started = append(p.started, id)
+	return id, nil
+}
+
+func (p *selectiveCleanupProvider) RemoveInstance(_ context.Context, instanceID string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.attempted = append(p.attempted, instanceID)
+	if instanceID == p.failID {
+		return errors.New("permanent cleanup failure")
+	}
+	p.removed = append(p.removed, instanceID)
+	return nil
+}
+
+func (p *selectiveCleanupProvider) Shutdown(context.Context) {}
+
+func (p *selectiveCleanupProvider) snapshot() (started, attempted, removed []string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.started...), append([]string(nil), p.attempted...), append([]string(nil), p.removed...)
+}
+
+func (p *selectiveCleanupProvider) setFailure(instanceID string) {
+	p.mu.Lock()
+	p.failID = instanceID
+	p.mu.Unlock()
+}
+
+func (p *blockingCleanupProvider) StartInstance(_ context.Context, name, _ string) (string, error) {
+	return "instance-" + name, nil
+}
+
+func (p *blockingCleanupProvider) RemoveInstance(ctx context.Context, instanceID string) error {
+	p.removeStarted <- instanceID
+	select {
+	case <-p.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (p *blockingCleanupProvider) Shutdown(context.Context) {}
 
 func (m *watcherProvider) StartInstance(_ context.Context, name, _ string) (string, error) {
 	m.mu.Lock()
@@ -70,6 +153,18 @@ func (m *watcherProvider) startedCount() int {
 	return len(m.started)
 }
 
+func (m *watcherProvider) removedCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.removed)
+}
+
+func (m *watcherProvider) firstStarted() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.started[0]
+}
+
 func (m *mockProvider) StartInstance(_ context.Context, name string, _ string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -90,6 +185,18 @@ func (m *mockProvider) Shutdown(_ context.Context) {
 	m.shutdown = true
 }
 
+func (m *mockProvider) startedCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.started)
+}
+
+func (m *mockProvider) removedCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.removed)
+}
+
 type mockScaleset struct {
 	generated int
 }
@@ -99,6 +206,12 @@ func (m *mockScaleset) GenerateJitRunnerConfig(_ context.Context, _ *scaleset.Ru
 	return &scaleset.RunnerScaleSetJitRunnerConfig{
 		EncodedJITConfig: "mock-jit-config",
 	}, nil
+}
+
+type errorScaleset struct{ err error }
+
+func (s *errorScaleset) GenerateJitRunnerConfig(context.Context, *scaleset.RunnerScaleSetJitRunnerSetting, int) (*scaleset.RunnerScaleSetJitRunnerConfig, error) {
+	return nil, s.err
 }
 
 // fakeChecker is a DiskChecker double for the pre-job-start disk-pressure
@@ -131,20 +244,30 @@ func (f *fakeChecker) Sweep(ctx context.Context) error {
 	return f.sweepErr
 }
 
-func newTestController(minRunners, maxRunners int) (*ScaleSetController, *mockProvider, *mockScaleset) {
+func newTestController(t *testing.T, minRunners, maxRunners int) (*ScaleSetController, *mockProvider, *mockScaleset) {
+	t.Helper()
 	mb := &mockProvider{}
 	ms := &mockScaleset{}
 	s := NewScaleSetController(1, minRunners, maxRunners, mb, ms, slog.New(slog.DiscardHandler))
+	t.Cleanup(func() { s.Shutdown(context.Background()) })
 	return s, mb, ms
+}
+
+func waitFor(t *testing.T, condition func() bool, message string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for !condition() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if !condition() {
+		t.Fatal(message)
+	}
 }
 
 // --- instanceState tests ---
 
 func TestRunnerStateLifecycle(t *testing.T) {
-	rs := instanceState{
-		idle: make(map[string]string),
-		busy: make(map[string]string),
-	}
+	rs := newInstanceState()
 
 	if rs.count() != 0 {
 		t.Fatalf("initial count = %d, want 0", rs.count())
@@ -160,16 +283,16 @@ func TestRunnerStateLifecycle(t *testing.T) {
 	if rs.count() != 2 {
 		t.Fatalf("count after markBusy = %d, want 2", rs.count())
 	}
-	if _, ok := rs.idle["runner-1"]; ok {
-		t.Error("runner-1 should not be in idle after markBusy")
-	}
-	if _, ok := rs.busy["runner-1"]; !ok {
-		t.Error("runner-1 should be in busy after markBusy")
+	if phase, ok := rs.phase("runner-1"); !ok || phase != instanceBusy {
+		t.Errorf("runner-1 phase = %v, %v; want busy", phase, ok)
 	}
 
-	instanceID, ok := rs.markDone("runner-1")
+	instanceID, ready, ok := rs.markDone("runner-1")
 	if !ok {
 		t.Fatal("markDone should return ok=true for busy runner")
+	}
+	if !ready {
+		t.Fatal("markDone should report an existing instance ID as ready")
 	}
 	if instanceID != "instance-1" {
 		t.Errorf("markDone returned %q, want %q", instanceID, "instance-1")
@@ -179,9 +302,12 @@ func TestRunnerStateLifecycle(t *testing.T) {
 	}
 
 	// markDone on idle runner (no job started)
-	instanceID, ok = rs.markDone("runner-2")
+	instanceID, ready, ok = rs.markDone("runner-2")
 	if !ok {
 		t.Fatal("markDone should return ok=true for idle runner")
+	}
+	if !ready {
+		t.Fatal("markDone should report an existing instance ID as ready")
 	}
 	if instanceID != "instance-2" {
 		t.Errorf("markDone(idle) returned %q, want %q", instanceID, "instance-2")
@@ -192,10 +318,7 @@ func TestRunnerStateLifecycle(t *testing.T) {
 }
 
 func TestRunnerStateMarkBusyReturnsFalse(t *testing.T) {
-	rs := instanceState{
-		idle: make(map[string]string),
-		busy: make(map[string]string),
-	}
+	rs := newInstanceState()
 
 	if rs.markBusy("nonexistent") {
 		t.Error("markBusy on non-existent runner should return false")
@@ -203,21 +326,15 @@ func TestRunnerStateMarkBusyReturnsFalse(t *testing.T) {
 }
 
 func TestRunnerStateMarkDoneReturnsFalse(t *testing.T) {
-	rs := instanceState{
-		idle: make(map[string]string),
-		busy: make(map[string]string),
-	}
+	rs := newInstanceState()
 
-	if _, ok := rs.markDone("nonexistent"); ok {
+	if _, _, ok := rs.markDone("nonexistent"); ok {
 		t.Error("markDone on non-existent runner should return ok=false")
 	}
 }
 
 func TestRunnerStateConcurrency(t *testing.T) {
-	rs := instanceState{
-		idle: make(map[string]string),
-		busy: make(map[string]string),
-	}
+	rs := newInstanceState()
 
 	var wg sync.WaitGroup
 	for i := range 100 {
@@ -235,19 +352,57 @@ func TestRunnerStateConcurrency(t *testing.T) {
 	}
 }
 
+func TestRunnerStateTracksProvisioningToRemoving(t *testing.T) {
+	b := capacity.NewBroker(1)
+	a := b.Register("test", 0)
+	lease, err := a.Acquire(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rs := newInstanceState()
+	if !rs.reserve("runner-1", lease) {
+		t.Fatal("reserve returned false")
+	}
+	if phase, _ := rs.phase("runner-1"); phase != instanceProvisioning {
+		t.Fatalf("phase = %v, want provisioning", phase)
+	}
+	if !rs.markBusy("runner-1") {
+		t.Fatal("job start should be recorded while provider startup is in flight")
+	}
+	if remove, tracked := rs.markReady("runner-1", "instance-1"); remove || !tracked {
+		t.Fatalf("markReady() = remove %v tracked %v, want false/true", remove, tracked)
+	}
+	if phase, _ := rs.phase("runner-1"); phase != instanceBusy {
+		t.Fatalf("phase = %v after markReady, want busy", phase)
+	}
+	instanceID, ready, ok := rs.markDone("runner-1")
+	if !ok || !ready || instanceID != "instance-1" {
+		t.Fatalf("markDone() = %q/%v/%v, want instance-1/true/true", instanceID, ready, ok)
+	}
+	released, ok := rs.finishRemoval("runner-1", "instance-1")
+	if !ok {
+		t.Fatal("finishRemoval returned false")
+	}
+	released.Release()
+	if got := b.InUse(); got != 0 {
+		t.Fatalf("capacity in use = %d, want 0", got)
+	}
+}
+
 // --- ScaleSetController tests ---
 
 func TestHandleDesiredRunnerCount_ScaleUp(t *testing.T) {
-	s, mb, ms := newTestController(0, 10)
+	s, mb, ms := newTestController(t, 0, 10)
 	ctx := context.Background()
 
 	got, err := s.HandleDesiredRunnerCount(ctx, 3)
 	if err != nil {
 		t.Fatalf("HandleDesiredRunnerCount() error: %v", err)
 	}
-	if got != 3 {
-		t.Errorf("returned count = %d, want 3", got)
+	if got < 0 || got > 3 {
+		t.Errorf("returned in-progress count = %d, want between 0 and 3", got)
 	}
+	waitFor(t, func() bool { return mb.startedCount() == 3 }, "background reconcile did not start 3 runners")
 	if len(mb.started) != 3 {
 		t.Errorf("runners started = %d, want 3", len(mb.started))
 	}
@@ -256,16 +411,257 @@ func TestHandleDesiredRunnerCount_ScaleUp(t *testing.T) {
 	}
 }
 
+func TestHandleDesiredRunnerCountDoesNotBlockOnProvider(t *testing.T) {
+	p := &blockingProvider{started: make(chan string, 2), release: make(chan struct{})}
+	b := capacity.NewBroker(1)
+	a := b.Register("test", 0)
+	s := NewScaleSetController(1, 0, 2, p, &mockScaleset{}, slog.New(slog.DiscardHandler), WithCapacityAllocator(a))
+	defer s.Shutdown(context.Background())
+
+	returned := make(chan error, 1)
+	go func() {
+		_, err := s.HandleDesiredRunnerCount(context.Background(), 2)
+		returned <- err
+	}()
+	select {
+	case err := <-returned:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("desired-count callback blocked on provider startup")
+	}
+
+	select {
+	case <-p.started:
+	case <-time.After(time.Second):
+		t.Fatal("background reconciler did not start provider work")
+	}
+	provisioning, idle, busy, removing := s.InstanceLifecycleCounts()
+	if provisioning != 1 || idle != 0 || busy != 0 || removing != 0 {
+		t.Fatalf("lifecycle counts = %d/%d/%d/%d, want 1/0/0/0", provisioning, idle, busy, removing)
+	}
+
+	// A repeat desired-count message must observe the provisioning reservation
+	// instead of launching duplicate work.
+	if _, err := s.HandleDesiredRunnerCount(context.Background(), 2); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-p.started:
+		t.Fatal("duplicate provider start launched while the first was provisioning")
+	case <-time.After(25 * time.Millisecond):
+	}
+	close(p.release)
+}
+
+func TestSharedCapacityBrokerLimitsScaleSetsHostWide(t *testing.T) {
+	b := capacity.NewBroker(1)
+	a1 := b.Register("one", 0)
+	a2 := b.Register("two", 0)
+	p1 := &mockProvider{}
+	p2 := &mockProvider{}
+	s1 := NewScaleSetController(1, 0, 2, p1, &mockScaleset{}, slog.New(slog.DiscardHandler), WithCapacityAllocator(a1))
+	s2 := NewScaleSetController(2, 0, 2, p2, &mockScaleset{}, slog.New(slog.DiscardHandler), WithCapacityAllocator(a2))
+	defer s1.Shutdown(context.Background())
+	defer s2.Shutdown(context.Background())
+
+	if _, err := s1.HandleDesiredRunnerCount(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s2.HandleDesiredRunnerCount(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return p1.startedCount()+p2.startedCount() == 1 }, "neither scale set acquired global capacity")
+	time.Sleep(25 * time.Millisecond)
+	if got := p1.startedCount() + p2.startedCount(); got != 1 {
+		t.Fatalf("provider starts across scale sets = %d, want host-wide limit 1", got)
+	}
+	if got := b.InUse(); got != 1 {
+		t.Fatalf("capacity in use = %d, want 1", got)
+	}
+}
+
+func TestStartInstanceReleasesCapacityWhenJITFails(t *testing.T) {
+	b := capacity.NewBroker(1)
+	a := b.Register("test", 0)
+	s := NewScaleSetController(1, 0, 1, &mockProvider{}, &errorScaleset{err: errors.New("jit unavailable")}, slog.New(slog.DiscardHandler), WithCapacityAllocator(a))
+	defer s.Shutdown(context.Background())
+
+	if _, err := s.startInstance(context.Background()); err == nil {
+		t.Fatal("startInstance succeeded, want JIT error")
+	}
+	if got := b.InUse(); got != 0 {
+		t.Fatalf("capacity in use after failed startup = %d, want 0", got)
+	}
+	if got := s.instances.count(); got != 0 {
+		t.Fatalf("active instances after failed startup = %d, want 0", got)
+	}
+}
+
+func TestHandleJobCompletedDoesNotBlockOnProviderCleanup(t *testing.T) {
+	p := &blockingCleanupProvider{removeStarted: make(chan string, 1), release: make(chan struct{})}
+	b := capacity.NewBroker(1)
+	a := b.Register("test", 0)
+	s := NewScaleSetController(1, 0, 1, p, &mockScaleset{}, slog.New(slog.DiscardHandler), WithCapacityAllocator(a))
+	defer s.Shutdown(context.Background())
+
+	name, err := s.startInstance(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.HandleJobStarted(context.Background(), &scaleset.JobStarted{RunnerName: name}); err != nil {
+		t.Fatal(err)
+	}
+
+	returned := make(chan error, 1)
+	go func() {
+		returned <- s.HandleJobCompleted(context.Background(), &scaleset.JobCompleted{RunnerName: name})
+	}()
+	select {
+	case err := <-returned:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("job-completed callback blocked on provider cleanup")
+	}
+	select {
+	case <-p.removeStarted:
+	case <-time.After(time.Second):
+		t.Fatal("background reconciler did not begin provider cleanup")
+	}
+	if got := b.InUse(); got != 1 {
+		t.Fatalf("capacity released before provider cleanup finished: in use = %d", got)
+	}
+	_, _, _, removing := s.InstanceLifecycleCounts()
+	if removing != 1 {
+		t.Fatalf("removing count = %d, want 1", removing)
+	}
+	close(p.release)
+	waitFor(t, func() bool { return b.InUse() == 0 }, "provider cleanup did not release capacity")
+}
+
+func TestCleanupFailureDoesNotBlockOtherInstances(t *testing.T) {
+	b := capacity.NewBroker(2)
+	a := b.Register("test", 0)
+	p := &selectiveCleanupProvider{}
+	s := NewScaleSetController(1, 0, 2, p, &mockScaleset{}, slog.New(slog.DiscardHandler), WithCapacityAllocator(a))
+	defer s.Shutdown(context.Background())
+
+	if _, err := s.HandleDesiredRunnerCount(context.Background(), 2); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool {
+		started, _, _ := p.snapshot()
+		return len(started) == 2
+	}, "initial runners did not start")
+	started, _, _ := p.snapshot()
+	p.setFailure(started[0])
+	for _, instanceID := range started {
+		name := strings.TrimPrefix(instanceID, "instance-")
+		if err := s.HandleJobCompleted(context.Background(), &scaleset.JobCompleted{RunnerName: name}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	waitFor(t, func() bool {
+		_, attempted, removed := p.snapshot()
+		return len(attempted) >= 2 && len(removed) == 1
+	}, "a permanent removal failure blocked unrelated cleanup")
+	if got := b.InUse(); got != 1 {
+		t.Fatalf("capacity in use = %d, want only the failed cleanup lease", got)
+	}
+	_, _, _, removing := s.InstanceLifecycleCounts()
+	if removing != 1 {
+		t.Fatalf("removing runners = %d, want 1 failed cleanup", removing)
+	}
+}
+
+func TestCleanupFailureDoesNotBlockReplacementWhenCapacityRemains(t *testing.T) {
+	b := capacity.NewBroker(2)
+	a := b.Register("test", 0)
+	p := &selectiveCleanupProvider{}
+	s := NewScaleSetController(1, 0, 2, p, &mockScaleset{}, slog.New(slog.DiscardHandler), WithCapacityAllocator(a))
+	defer s.Shutdown(context.Background())
+
+	if _, err := s.HandleDesiredRunnerCount(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool {
+		started, _, _ := p.snapshot()
+		return len(started) == 1
+	}, "initial runner did not start")
+	started, _, _ := p.snapshot()
+	p.setFailure(started[0])
+	name := strings.TrimPrefix(started[0], "instance-")
+	if err := s.HandleJobCompleted(context.Background(), &scaleset.JobCompleted{RunnerName: name}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.HandleDesiredRunnerCount(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+
+	waitFor(t, func() bool {
+		started, _, _ := p.snapshot()
+		return len(started) == 2
+	}, "failed cleanup blocked a replacement despite spare global capacity")
+	if got := b.InUse(); got != 2 {
+		t.Fatalf("capacity in use = %d, want failed cleanup plus replacement", got)
+	}
+}
+
+func TestJobCompletionWaitsForFreshDesiredBeforeReplacement(t *testing.T) {
+	b := capacity.NewBroker(1)
+	a := b.Register("test", 0)
+	p := &mockProvider{}
+	s := NewScaleSetController(1, 0, 1, p, &mockScaleset{}, slog.New(slog.DiscardHandler), WithCapacityAllocator(a))
+	defer s.Shutdown(context.Background())
+
+	name, err := s.startInstance(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.HandleDesiredRunnerCount(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.HandleJobStarted(context.Background(), &scaleset.JobStarted{RunnerName: name}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.HandleJobCompleted(context.Background(), &scaleset.JobCompleted{RunnerName: name}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return p.removedCount() == 1 }, "completed runner was not cleaned up")
+	time.Sleep(25 * time.Millisecond)
+	if got := p.startedCount(); got != 1 {
+		t.Fatalf("stale desired count started %d runners, want only the completed runner", got)
+	}
+
+	// This mirrors the callback that follows JobCompleted in listener.handleMessage.
+	if _, err := s.HandleDesiredRunnerCount(context.Background(), 0); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(25 * time.Millisecond)
+	if got := p.startedCount(); got != 1 {
+		t.Fatalf("fresh zero desired count started a replacement; starts = %d", got)
+	}
+}
+
 func TestExitedRunnerIsRemovedAndReplaced(t *testing.T) {
 	b := &watcherProvider{waits: make(map[string]chan struct{})}
 	s := NewScaleSetController(1, 0, 2, b, &mockScaleset{}, slog.New(slog.DiscardHandler))
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	defer s.Shutdown(context.Background())
+	ctx := context.Background()
 
 	if _, err := s.HandleDesiredRunnerCount(ctx, 1); err != nil {
 		t.Fatal(err)
 	}
+	waitFor(t, func() bool { return b.startedCount() == 1 }, "initial runner did not start")
 	b.crashFirst()
+	waitFor(t, func() bool { return b.removedCount() == 1 }, "crashed runner was not cleaned up")
+	if _, err := s.HandleDesiredRunnerCount(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
 
 	deadline := time.Now().Add(2 * time.Second)
 	for b.startedCount() < 2 && time.Now().Before(deadline) {
@@ -279,24 +675,85 @@ func TestExitedRunnerIsRemovedAndReplaced(t *testing.T) {
 	}
 }
 
+func TestCrashMarksDemandStaleBeforeCapacityWaiterWakes(t *testing.T) {
+	b := capacity.NewBroker(1)
+	a := b.Register("test", 0)
+	p := &watcherProvider{waits: make(map[string]chan struct{})}
+	s := NewScaleSetController(1, 0, 2, p, &mockScaleset{}, slog.New(slog.DiscardHandler), WithCapacityAllocator(a))
+	defer s.Shutdown(context.Background())
+
+	// The second desired runner blocks in Allocator.Acquire while the first
+	// runner owns the only global slot.
+	if _, err := s.HandleDesiredRunnerCount(context.Background(), 2); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return p.startedCount() == 1 }, "initial runner did not start")
+	p.crashFirst()
+	waitFor(t, func() bool { return p.removedCount() == 1 }, "crashed runner was not cleaned up")
+	time.Sleep(25 * time.Millisecond)
+	if got := p.startedCount(); got != 1 {
+		t.Fatalf("capacity waiter used stale demand after crash; starts = %d", got)
+	}
+
+	if _, err := s.HandleDesiredRunnerCount(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return p.startedCount() == 2 }, "fresh demand did not replace crashed runner")
+}
+
+func TestExitedRunnerReplacementConvergesAfterDelayedCompletion(t *testing.T) {
+	b := capacity.NewBroker(2)
+	a := b.Register("test", 0)
+	p := &watcherProvider{waits: make(map[string]chan struct{})}
+	s := NewScaleSetController(1, 0, 2, p, &mockScaleset{}, slog.New(slog.DiscardHandler), WithCapacityAllocator(a))
+	defer s.Shutdown(context.Background())
+
+	if _, err := s.HandleDesiredRunnerCount(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return p.startedCount() == 1 }, "initial runner did not start")
+	oldRunner := strings.TrimPrefix(p.firstStarted(), "instance-")
+	p.crashFirst()
+	waitFor(t, func() bool { return p.removedCount() == 1 }, "crashed runner was not cleaned up")
+
+	// A fresh poll can still report the old job before GitHub delivers its
+	// delayed completion, so a speculative replacement is valid here.
+	if _, err := s.HandleDesiredRunnerCount(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return p.startedCount() == 2 }, "crashed runner was not replaced")
+	if err := s.HandleJobCompleted(context.Background(), &scaleset.JobCompleted{RunnerName: oldRunner}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.HandleDesiredRunnerCount(context.Background(), 0); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return p.removedCount() == 2 }, "surplus replacement was not removed")
+	waitFor(t, func() bool { return b.InUse() == 0 }, "surplus replacement retained global capacity")
+	if idle, busy := s.InstanceCounts(); idle != 0 || busy != 0 {
+		t.Fatalf("counts = idle %d busy %d, want 0/0", idle, busy)
+	}
+}
+
 func TestHandleDesiredRunnerCount_RespectsMax(t *testing.T) {
-	s, mb, _ := newTestController(0, 5)
+	s, mb, _ := newTestController(t, 0, 5)
 	ctx := context.Background()
 
 	got, err := s.HandleDesiredRunnerCount(ctx, 100)
 	if err != nil {
 		t.Fatalf("HandleDesiredRunnerCount() error: %v", err)
 	}
-	if got != 5 {
-		t.Errorf("returned count = %d, want 5 (maxRunners)", got)
+	if got < 0 || got > 5 {
+		t.Errorf("returned in-progress count = %d, want between 0 and 5", got)
 	}
+	waitFor(t, func() bool { return mb.startedCount() == 5 }, "background reconcile did not respect maxRunners")
 	if len(mb.started) != 5 {
 		t.Errorf("runners started = %d, want 5", len(mb.started))
 	}
 }
 
 func TestHandleDesiredRunnerCount_WithMinRunners(t *testing.T) {
-	s, mb, _ := newTestController(2, 10)
+	s, mb, _ := newTestController(t, 2, 10)
 	ctx := context.Background()
 
 	// With 0 assigned jobs, target = min(10, 2+0) = 2
@@ -304,16 +761,17 @@ func TestHandleDesiredRunnerCount_WithMinRunners(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HandleDesiredRunnerCount(0) error: %v", err)
 	}
-	if got != 2 {
-		t.Errorf("returned count = %d, want 2 (minRunners)", got)
+	if got < 0 || got > 2 {
+		t.Errorf("returned in-progress count = %d, want between 0 and 2", got)
 	}
+	waitFor(t, func() bool { return mb.startedCount() == 2 }, "background reconcile did not satisfy minRunners")
 	if len(mb.started) != 2 {
 		t.Errorf("runners started = %d, want 2", len(mb.started))
 	}
 }
 
 func TestHandleDesiredRunnerCount_NoScaleWhenEqual(t *testing.T) {
-	s, mb, _ := newTestController(0, 10)
+	s, mb, _ := newTestController(t, 0, 10)
 	ctx := context.Background()
 
 	// Pre-populate 3 idle runners
@@ -333,8 +791,8 @@ func TestHandleDesiredRunnerCount_NoScaleWhenEqual(t *testing.T) {
 	}
 }
 
-func TestHandleDesiredRunnerCount_NoScaleDown(t *testing.T) {
-	s, mb, _ := newTestController(0, 10)
+func TestHandleDesiredRunnerCount_ScalesDownSurplusIdle(t *testing.T) {
+	s, mb, _ := newTestController(t, 0, 10)
 	ctx := context.Background()
 
 	// Pre-populate 5 runners
@@ -342,24 +800,25 @@ func TestHandleDesiredRunnerCount_NoScaleDown(t *testing.T) {
 		s.instances.addIdle(fmt.Sprintf("runner-%d", i), fmt.Sprintf("r%d", i))
 	}
 
-	// Desired is 2, but we don't scale down (ephemeral runners removed via HandleJobCompleted)
+	// A fresh lower desired count removes only the surplus idle runners.
 	got, err := s.HandleDesiredRunnerCount(ctx, 2)
 	if err != nil {
 		t.Fatalf("HandleDesiredRunnerCount() error: %v", err)
 	}
-	if got != 5 {
-		t.Errorf("returned count = %d, want 5 (no scale down)", got)
+	if got != 2 {
+		t.Errorf("returned desired count = %d, want 2", got)
 	}
-	if len(mb.started) != 0 {
-		t.Errorf("should not start runners, started = %d", len(mb.started))
+	if got := mb.startedCount(); got != 0 {
+		t.Errorf("should not start runners, started = %d", got)
 	}
-	if len(mb.removed) != 0 {
-		t.Errorf("should not remove runners, removed = %d", len(mb.removed))
+	waitFor(t, func() bool { return mb.removedCount() == 3 }, "surplus idle runners were not removed")
+	if idle, busy := s.InstanceCounts(); idle != 2 || busy != 0 {
+		t.Fatalf("counts = idle %d busy %d, want 2/0", idle, busy)
 	}
 }
 
 func TestHandleJobStarted(t *testing.T) {
-	s, _, _ := newTestController(0, 10)
+	s, _, _ := newTestController(t, 0, 10)
 	ctx := context.Background()
 
 	s.instances.addIdle("runner-abc", "instance-abc")
@@ -375,16 +834,13 @@ func TestHandleJobStarted(t *testing.T) {
 		t.Fatalf("HandleJobStarted() error: %v", err)
 	}
 
-	if _, ok := s.instances.idle["runner-abc"]; ok {
-		t.Error("runner should not be idle after job started")
-	}
-	if _, ok := s.instances.busy["runner-abc"]; !ok {
-		t.Error("runner should be busy after job started")
+	if phase, ok := s.instances.phase("runner-abc"); !ok || phase != instanceBusy {
+		t.Errorf("runner phase = %v, %v; want busy", phase, ok)
 	}
 }
 
 func TestHandleJobCompleted(t *testing.T) {
-	s, mb, _ := newTestController(0, 10)
+	s, mb, _ := newTestController(t, 0, 10)
 	ctx := context.Background()
 
 	s.instances.addIdle("runner-abc", "instance-abc")
@@ -404,6 +860,7 @@ func TestHandleJobCompleted(t *testing.T) {
 	if s.instances.count() != 0 {
 		t.Errorf("runner count = %d, want 0 after job completed", s.instances.count())
 	}
+	waitFor(t, func() bool { return mb.removedCount() == 1 }, "background reconcile did not remove completed runner")
 	if len(mb.removed) != 1 {
 		t.Errorf("runners removed = %d, want 1", len(mb.removed))
 	}
@@ -413,7 +870,7 @@ func TestHandleJobCompleted(t *testing.T) {
 }
 
 func TestShutdown(t *testing.T) {
-	s, mb, _ := newTestController(0, 10)
+	s, mb, _ := newTestController(t, 0, 10)
 	ctx := context.Background()
 
 	s.instances.addIdle("idle-1", "r-idle-1")
@@ -463,7 +920,7 @@ func TestDrain_ReturnsWhenBusyReachesZero(t *testing.T) {
 
 	go func() {
 		time.Sleep(50 * time.Millisecond)
-		s.instances.markDone("runner-busy")
+		_, _, _ = s.instances.markDone("runner-busy")
 	}()
 
 	start := time.Now()
@@ -503,6 +960,7 @@ func TestExitedRunnerIsNotReplacedWhileDraining(t *testing.T) {
 	if _, err := s.HandleDesiredRunnerCount(ctx, 1); err != nil {
 		t.Fatal(err)
 	}
+	waitFor(t, func() bool { return b.startedCount() == 1 }, "initial runner did not start")
 	s.draining.Store(true)
 	b.crashFirst()
 
@@ -586,8 +1044,8 @@ func TestStartInstance_ProceedsWhenNeedsReclaimErrors(t *testing.T) {
 // error-handling table requires around the pre-job sweep. Each store
 // carries its own 10-minute bound, but a sweep walks all of them, so an
 // unbounded aggregate lets one job start wait for their sum — and
-// startInstance is called once per runner inside HandleDesiredRunnerCount's
-// scale-up loop, with reconcileMu held throughout.
+// startInstance may be called once per runner during a background reconcile
+// burst, so each individual reclaim still needs an aggregate bound.
 func TestStartInstance_ReclaimIsBounded(t *testing.T) {
 	chk := &fakeChecker{needs: true}
 	s := NewScaleSetController(1, 0, 1, &mockProvider{}, &mockScaleset{}, slog.New(slog.DiscardHandler), WithDiskChecker(chk))

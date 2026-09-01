@@ -29,6 +29,7 @@ import (
 
 	"github.com/ysya/runscaler/internal/bytesize"
 	"github.com/ysya/runscaler/internal/cachestore"
+	"github.com/ysya/runscaler/internal/capacity"
 	"github.com/ysya/runscaler/internal/config"
 	"github.com/ysya/runscaler/internal/controller"
 	"github.com/ysya/runscaler/internal/diskguard"
@@ -81,6 +82,7 @@ func init() {
 	// Global
 	flags.String("log-level", config.DefaultLogLevel, "Log level (debug, info, warn, error)")
 	flags.String("log-format", config.DefaultLogFormat, "Log format (text, json)")
+	flags.Int("concurrent", 0, "Maximum runner instances across all scale sets (0 = sum of max-runners)")
 
 	// Operational
 	flags.Bool("dry-run", false, "Validate everything without starting listeners")
@@ -99,6 +101,7 @@ func init() {
 	viper.BindPFlag("runner-image", flags.Lookup("runner-image"))
 	viper.BindPFlag("log-level", flags.Lookup("log-level"))
 	viper.BindPFlag("log-format", flags.Lookup("log-format"))
+	viper.BindPFlag("concurrent", flags.Lookup("concurrent"))
 	viper.BindPFlag("dry-run", flags.Lookup("dry-run"))
 	viper.BindPFlag("health-port", flags.Lookup("health-port"))
 	viper.BindPFlag("health-address", flags.Lookup("health-address"))
@@ -274,6 +277,9 @@ func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) e
 		if err := scaleSets[i].Validate(); err != nil {
 			return fmt.Errorf("scaleset[%d] %q: %w", i, scaleSets[i].ScaleSetName, err)
 		}
+	}
+	if err := cfg.ValidateConcurrent(scaleSets); err != nil {
+		return fmt.Errorf("invalid global capacity: %w", err)
 	}
 
 	// Check which instance providers are needed.
@@ -483,8 +489,24 @@ func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) e
 	// its pre-job-start check (see runScaleSetController, controller.WithDiskChecker)
 	// instead of constructing a second one.
 	guard := startDiskGuard(ctx, cacheStores, cfg, logger)
+	capacityLimit := cfg.EffectiveConcurrent(scaleSets)
+	capacityBroker := capacity.NewBroker(capacityLimit)
+	capacityAllocators := make([]*capacity.Allocator, len(scaleSets))
+	for i, ss := range scaleSets {
+		// Include the config index because scale-set names are only guaranteed
+		// unique within GitHub registration scope, not necessarily process-wide.
+		capacityAllocators[i] = capacityBroker.Register(fmt.Sprintf("%d:%s", i, ss.ScaleSetName), ss.MinRunners)
+	}
+	if healthServer != nil {
+		healthServer.SetCapacityProvider(func() health.CapacityStatus {
+			return health.CapacityStatus{Limit: capacityBroker.Limit(), InUse: capacityBroker.InUse()}
+		})
+	}
 
-	logger.Info("Starting scale sets", slog.Int("count", len(scaleSets)))
+	logger.Info("Starting scale sets",
+		slog.Int("count", len(scaleSets)),
+		slog.Int("concurrent", capacityLimit),
+	)
 
 	// Non-blocking version check at startup
 	go func() {
@@ -511,7 +533,7 @@ func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) e
 		go func() {
 			defer wg.Done()
 			ssLogger := config.NewScaleSetLoggerWithWriter(cfg.LogLevel, cfg.LogFormat, ss.ScaleSetName, i, logFile)
-			if err := runScaleSetController(runCtx, drain, cfg.EffectiveDrainTimeout(), ss, dockerClients[ss.Docker.Socket], ssLogger, healthServer, tartCoordinator, guard); err != nil {
+			if err := runScaleSetController(runCtx, drain, cfg.EffectiveDrainTimeout(), ss, dockerClients[ss.Docker.Socket], ssLogger, healthServer, tartCoordinator, guard, capacityAllocators[i]); err != nil {
 				errs <- fmt.Errorf("scaleset %q: %w", ss.ScaleSetName, err)
 				cancelRun()
 			}
@@ -569,7 +591,7 @@ func logServiceDrainTimeoutReminder(drainTimeout time.Duration, logger *slog.Log
 // shared disk-pressure guard built once in runManager() (nil when the disk guard
 // is disabled); it is wired into this ScaleSetController as its
 // pre-job-start check, see controller.WithDiskChecker below.
-func runScaleSetController(ctx context.Context, drain <-chan struct{}, drainTimeout time.Duration, ss config.ScaleSetConfig, dockerClient *dockerclient.Client, logger *slog.Logger, h *health.HealthServer, tartCoordinator *provider.TartHostCoordinator, guard *diskguard.Guard) error {
+func runScaleSetController(ctx context.Context, drain <-chan struct{}, drainTimeout time.Duration, ss config.ScaleSetConfig, dockerClient *dockerclient.Client, logger *slog.Logger, h *health.HealthServer, tartCoordinator *provider.TartHostCoordinator, guard *diskguard.Guard, capacityAllocator *capacity.Allocator) error {
 	// Create scaleset client
 	scalesetClient, err := config.NewScalesetClient(ss.RegistrationURL, ss.Token, logger)
 	if err != nil {
@@ -654,6 +676,7 @@ func runScaleSetController(ctx context.Context, drain <-chan struct{}, drainTime
 	if guard != nil {
 		controllerOpts = append(controllerOpts, controller.WithDiskChecker(guard))
 	}
+	controllerOpts = append(controllerOpts, controller.WithCapacityAllocator(capacityAllocator))
 	s := controller.NewScaleSetController(scaleSet.ID, ss.MinRunners, ss.MaxRunners, instanceProvider, scalesetClient, logger, controllerOpts...)
 	defer s.Shutdown(context.WithoutCancel(ctx))
 

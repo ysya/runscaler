@@ -60,6 +60,33 @@ drain-timeout = "0s"
 	}
 }
 
+func TestLoad_ConcurrentIsGlobalOnly(t *testing.T) {
+	cfg := loadTOML(t, `
+concurrent = 3
+max-runners = 5
+
+[[scaleset]]
+url = "https://github.com/org-a"
+name = "runners-a"
+token = "token-a"
+
+[[scaleset]]
+url = "https://github.com/org-b"
+name = "runners-b"
+token = "token-b"
+`)
+	if cfg.Concurrent != 3 {
+		t.Fatalf("Concurrent = %d, want 3", cfg.Concurrent)
+	}
+	sets := cfg.ResolveScaleSets()
+	if got := cfg.EffectiveConcurrent(sets); got != 3 {
+		t.Fatalf("EffectiveConcurrent() = %d, want 3", got)
+	}
+	if len(cfg.Warnings) != 0 {
+		t.Fatalf("concurrent should be recognized without inheritance warnings: %q", cfg.Warnings)
+	}
+}
+
 // resolveTOML is loadTOML + ResolveScaleSets, with the token env fallbacks
 // neutralized so an ambient RUNNER_TOKEN cannot leak into assertions.
 func resolveTOML(t *testing.T, src string) []ScaleSetConfig {

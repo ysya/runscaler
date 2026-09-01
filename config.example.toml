@@ -5,6 +5,7 @@
 
 log-level = "info"
 log-format = "text"
+concurrent = 0                          # host-wide limit; 0 = sum of all max-runners
 health-address = "127.0.0.1"              # set 0.0.0.0 explicitly for remote monitoring
 health-port = 8080
 # drain-timeout = "2h"                    # SIGTERM/SIGQUIT wait for busy jobs; "0s" disables drain

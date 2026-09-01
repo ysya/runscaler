@@ -9,7 +9,9 @@ type InstanceProvider interface {
 	// name and JIT configuration. Returns an instance ID used for cleanup.
 	StartInstance(ctx context.Context, name string, jitConfig string) (instanceID string, err error)
 
-	// RemoveInstance stops and removes a runner by its instance ID.
+	// RemoveInstance stops and removes a runner by its instance ID. It must be
+	// idempotent (an already-absent instance is success) and must honor ctx so
+	// controller drain and shutdown deadlines remain bounded.
 	RemoveInstance(ctx context.Context, instanceID string) error
 
 	// Shutdown performs provider-specific cleanup.

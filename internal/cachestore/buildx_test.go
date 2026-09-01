@@ -24,7 +24,7 @@ func TestBuildxStore_OnlyTier1(t *testing.T) {
 }
 
 // TestBuildxStore_Tier1RemovesOrphanedBuildersAndStateVolumes verifies the
-// store is actually wired to backend.CleanupOrphanedBuildxBuilders — not
+// store is actually wired to provider.CleanupOrphanedBuildxBuilders — not
 // just that other tiers no-op: an old buildx builder container and its
 // `_state` volume both get removed, and young ones are left alone.
 func TestBuildxStore_Tier1RemovesOrphanedBuildersAndStateVolumes(t *testing.T) {

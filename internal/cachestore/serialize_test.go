@@ -113,7 +113,7 @@ func TestSerialize_MeasureAndReclaimDoNotInterleave(t *testing.T) {
 
 // TestSerialize_WaitingHonorsContext pins that waiting is bounded by the
 // caller's own deadline rather than by the holder's. This is what keeps the
-// job-start path's timeout (see scaler.startRunner's pre-job Sweep)
+// job-start path's timeout (see controller.startInstance's pre-job Sweep)
 // meaningful: without it, a caller could inherit a 10-minute store-level
 // timeout it never agreed to.
 func TestSerialize_WaitingHonorsContext(t *testing.T) {

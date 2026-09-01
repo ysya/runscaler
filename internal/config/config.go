@@ -40,7 +40,7 @@ type Config struct {
 	DrainTimeout *time.Duration `mapstructure:"drain-timeout"`
 
 	// Default values for scale sets + single-mode fields.
-	// Squashed so TOML keys (url, name, backend, etc.) stay at the top level.
+	// Squashed so TOML keys (url, name, provider, etc.) stay at the top level.
 	Defaults ScaleSetConfig `mapstructure:",squash"`
 
 	// Disk configures the periodic disk-pressure guard (see DiskConfig).
@@ -71,7 +71,7 @@ type ScaleSetConfig struct {
 	Labels          []string `mapstructure:"labels"`
 	RunnerGroup     string   `mapstructure:"runner-group"`
 	RunnerImage     string   `mapstructure:"runner-image"`
-	Backend         string   `mapstructure:"backend"`
+	Provider        string   `mapstructure:"provider"`
 
 	// DisableUpdate stops GitHub from updating the runner binary inside the
 	// container or VM. Pointer: nil = inherit default (true), matching the
@@ -87,14 +87,14 @@ type ScaleSetConfig struct {
 	// self-healing across retirements.
 	DisableUpdate *bool `mapstructure:"disable-update"`
 
-	// Docker backend settings
+	// Docker provider settings
 	Docker DockerConfig `mapstructure:"docker"`
 
-	// Tart VM backend settings
+	// Tart VM provider settings
 	Tart TartConfig `mapstructure:"tart"`
 }
 
-// DockerConfig holds Docker-specific backend settings.
+// DockerConfig holds Docker-specific provider settings.
 type DockerConfig struct {
 	Socket       string `mapstructure:"socket"`
 	DinD         *bool  `mapstructure:"dind"` // pointer: nil = inherit default (true)
@@ -370,7 +370,7 @@ func (dc DockerConfig) ParseCacheVolumes() ([]CacheVolumeMount, error) {
 	return mounts, nil
 }
 
-// TartConfig holds Tart VM-specific backend settings.
+// TartConfig holds Tart VM-specific provider settings.
 type TartConfig struct {
 	Home      string `mapstructure:"home"`       // TART_HOME for tart CLI ("" = default ~/.tart)
 	RunnerDir string `mapstructure:"runner-dir"` // Runner binary path in VM
@@ -408,7 +408,7 @@ type TartConfig struct {
 // ResolveScaleSets returns the resolved list of scale set configs.
 // [[scaleset]] entries arrive from Load with inheritance already applied at
 // the map level (a key present in an entry wins, even when zero), so multi
-// mode only applies backend-dependent defaults and token resolution here.
+// mode only applies provider-dependent defaults and token resolution here.
 // Without [[scaleset]] entries, Defaults itself is the single scale set.
 func (c *Config) ResolveScaleSets() []ScaleSetConfig {
 	if len(c.ScaleSets) > 0 {
@@ -426,16 +426,16 @@ func (c *Config) ResolveScaleSets() []ScaleSetConfig {
 	return []ScaleSetConfig{ss}
 }
 
-// applyDefaults fills in backend-specific defaults that depend on
-// the backend selection (e.g. TartRunnerDir when backend is "tart").
+// applyDefaults fills in provider-specific defaults that depend on
+// the provider selection (e.g. TartRunnerDir when provider is "tart").
 func (ss *ScaleSetConfig) applyDefaults() {
-	if ss.Backend == "" {
-		ss.Backend = DefaultBackend
+	if ss.Provider == "" {
+		ss.Provider = DefaultProvider
 	}
-	if ss.Backend == DefaultBackend && ss.Docker.Socket == "" {
+	if ss.Provider == DefaultProvider && ss.Docker.Socket == "" {
 		ss.Docker.Socket = DefaultDockerSocket
 	}
-	if ss.Backend == "tart" && ss.Tart.RunnerDir == "" {
+	if ss.Provider == "tart" && ss.Tart.RunnerDir == "" {
 		ss.Tart.RunnerDir = DefaultTartRunnerDir
 	}
 }
@@ -457,9 +457,9 @@ func (ss *ScaleSetConfig) SharedVolumeName() string {
 	return DefaultSharedVolumeName
 }
 
-// IsTart returns whether this scale set uses the Tart VM backend.
+// IsTart returns whether this scale set uses the Tart VM provider.
 func (ss *ScaleSetConfig) IsTart() bool {
-	return ss.Backend == "tart"
+	return ss.Provider == "tart"
 }
 
 // IsBuildxCleanupEnabled reports whether orphaned buildx builder cleanup is
@@ -551,8 +551,8 @@ func (ss *ScaleSetConfig) Validate() error {
 		return fmt.Errorf("runner-image is required")
 	}
 
-	switch ss.Backend {
-	case DefaultBackend:
+	switch ss.Provider {
+	case DefaultProvider:
 		if ss.Docker.Platform != "" {
 			parts := strings.Split(ss.Docker.Platform, "/")
 			if (len(parts) != 2 && len(parts) != 3) || parts[0] == "" || parts[1] == "" || (len(parts) == 3 && parts[2] == "") {
@@ -581,13 +581,13 @@ func (ss *ScaleSetConfig) Validate() error {
 		}
 	case "tart":
 		if ss.MaxRunners > 2 {
-			return fmt.Errorf("max-runners must be <= 2 for the Tart backend (Apple host limit)")
+			return fmt.Errorf("max-runners must be <= 2 for the Tart provider (Apple host limit)")
 		}
 		if ss.Tart.PoolSize < 0 || ss.Tart.PoolSize > ss.MaxRunners {
 			return fmt.Errorf("tart pool-size must be between 0 and max-runners")
 		}
 	default:
-		return fmt.Errorf("unsupported backend %q (must be %q or \"tart\")", ss.Backend, DefaultBackend)
+		return fmt.Errorf("unsupported provider %q (must be %q or \"tart\")", ss.Provider, DefaultProvider)
 	}
 
 	return nil

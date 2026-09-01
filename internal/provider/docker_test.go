@@ -1,4 +1,4 @@
-package backend
+package provider
 
 import (
 	"context"
@@ -114,9 +114,9 @@ func (m *mockDocker) ContainerWait(_ context.Context, _ string, _ dockerclient.C
 	return dockerclient.ContainerWaitResult{Result: statusCh, Error: errCh}
 }
 
-func newTestDockerBackend(sharedVolume string, dind bool) (*DockerBackend, *mockDocker) {
+func newTestDockerProvider(sharedVolume string, dind bool) (*DockerProvider, *mockDocker) {
 	md := &mockDocker{}
-	b := &DockerBackend{
+	b := &DockerProvider{
 		dockerClient:     md,
 		runnerImage:      "test-image:latest",
 		dockerSocket:     "/var/run/docker.sock",
@@ -128,10 +128,10 @@ func newTestDockerBackend(sharedVolume string, dind bool) (*DockerBackend, *mock
 	return b, md
 }
 
-// newConfigDockerBackend builds a backend through NewDockerBackend so the
+// newConfigDockerProvider builds a provider through NewDockerProvider so the
 // constructor path (volume-name default, cache-volume parsing) is exercised.
 // DinD is disabled to keep tests hermetic (no host socket stat).
-func newConfigDockerBackend(dc config.DockerConfig) (*DockerBackend, *mockDocker) {
+func newConfigDockerProvider(dc config.DockerConfig) (*DockerProvider, *mockDocker) {
 	md := &mockDocker{}
 	dind := false
 	dc.DinD = &dind
@@ -139,12 +139,12 @@ func newConfigDockerBackend(dc config.DockerConfig) (*DockerBackend, *mockDocker
 		RunnerImage: "test-image:latest",
 		Docker:      dc,
 	}
-	return NewDockerBackend(ss, md, slog.New(slog.DiscardHandler)), md
+	return NewDockerProvider(ss, md, slog.New(slog.DiscardHandler)), md
 }
 
-func newTestDockerBackendWithResources(memory int64, cpu int64) (*DockerBackend, *mockDocker) {
+func newTestDockerProviderWithResources(memory int64, cpu int64) (*DockerProvider, *mockDocker) {
 	md := &mockDocker{}
-	b := &DockerBackend{
+	b := &DockerProvider{
 		dockerClient: md,
 		runnerImage:  "test-image:latest",
 		dockerSocket: "/var/run/docker.sock",
@@ -156,7 +156,7 @@ func newTestDockerBackendWithResources(memory int64, cpu int64) (*DockerBackend,
 	return b, md
 }
 
-// --- Docker Backend tests ---
+// --- Docker provider tests ---
 
 // findMountByTarget returns the mount with the given target, or nil if not found.
 func findMountByTarget(mounts []mount.Mount, target string) *mount.Mount {
@@ -195,16 +195,16 @@ func assertFixOwnCmd(t *testing.T, cmd []string, targets ...string) {
 	}
 }
 
-func TestDockerBackend_StartRunner_WithSharedVolume(t *testing.T) {
-	b, md := newTestDockerBackend("/shared", true)
+func TestDockerProvider_StartInstance_WithSharedVolume(t *testing.T) {
+	b, md := newTestDockerProvider("/shared", true)
 	ctx := context.Background()
 
-	resourceID, err := b.StartRunner(ctx, "runner-1", "mock-jit-config")
+	instanceID, err := b.StartInstance(ctx, "runner-1", "mock-jit-config")
 	if err != nil {
-		t.Fatalf("StartRunner() error: %v", err)
+		t.Fatalf("StartInstance() error: %v", err)
 	}
-	if resourceID != "sha256-runner-1" {
-		t.Errorf("resourceID = %q, want %q", resourceID, "sha256-runner-1")
+	if instanceID != "sha256-runner-1" {
+		t.Errorf("instanceID = %q, want %q", instanceID, "sha256-runner-1")
 	}
 
 	if len(md.createCalls) != 1 {
@@ -254,13 +254,13 @@ func TestDockerBackend_StartRunner_WithSharedVolume(t *testing.T) {
 	}
 }
 
-func TestDockerBackend_StartRunner_WithoutSharedVolume(t *testing.T) {
-	b, md := newTestDockerBackend("", true)
+func TestDockerProvider_StartInstance_WithoutSharedVolume(t *testing.T) {
+	b, md := newTestDockerProvider("", true)
 	ctx := context.Background()
 
-	_, err := b.StartRunner(ctx, "runner-1", "mock-jit-config")
+	_, err := b.StartInstance(ctx, "runner-1", "mock-jit-config")
 	if err != nil {
-		t.Fatalf("StartRunner() error: %v", err)
+		t.Fatalf("StartInstance() error: %v", err)
 	}
 
 	call := md.createCalls[0]
@@ -290,14 +290,14 @@ func TestDockerBackend_StartRunner_WithoutSharedVolume(t *testing.T) {
 	}
 }
 
-func TestDockerBackend_StartRunner_MultipleShareVolume(t *testing.T) {
-	b, md := newTestDockerBackend("/shared", true)
+func TestDockerProvider_StartInstance_MultipleShareVolume(t *testing.T) {
+	b, md := newTestDockerProvider("/shared", true)
 	ctx := context.Background()
 
 	for i := range 3 {
 		name := "runner-" + string(rune('a'+i))
-		if _, err := b.StartRunner(ctx, name, "jit"); err != nil {
-			t.Fatalf("StartRunner(%s) error: %v", name, err)
+		if _, err := b.StartInstance(ctx, name, "jit"); err != nil {
+			t.Fatalf("StartInstance(%s) error: %v", name, err)
 		}
 	}
 
@@ -319,8 +319,8 @@ func TestDockerBackend_StartRunner_MultipleShareVolume(t *testing.T) {
 	}
 }
 
-func TestDockerBackend_StartRunner_WithCacheVolumes(t *testing.T) {
-	b, md := newConfigDockerBackend(config.DockerConfig{
+func TestDockerProvider_StartInstance_WithCacheVolumes(t *testing.T) {
+	b, md := newConfigDockerProvider(config.DockerConfig{
 		SharedVolume: "/shared",
 		CacheVolumes: []string{
 			"gradle-cache:/home/runner/.gradle",
@@ -328,8 +328,8 @@ func TestDockerBackend_StartRunner_WithCacheVolumes(t *testing.T) {
 		},
 	})
 
-	if _, err := b.StartRunner(context.Background(), "runner-1", "jit"); err != nil {
-		t.Fatalf("StartRunner() error: %v", err)
+	if _, err := b.StartInstance(context.Background(), "runner-1", "jit"); err != nil {
+		t.Fatalf("StartInstance() error: %v", err)
 	}
 	call := md.createCalls[0]
 
@@ -366,13 +366,13 @@ func TestDockerBackend_StartRunner_WithCacheVolumes(t *testing.T) {
 		"/shared", "/home/runner/.gradle", "/home/runner/.local/share/pnpm/store")
 }
 
-func TestDockerBackend_StartRunner_CacheVolumesWithoutSharedVolume(t *testing.T) {
-	b, md := newConfigDockerBackend(config.DockerConfig{
+func TestDockerProvider_StartInstance_CacheVolumesWithoutSharedVolume(t *testing.T) {
+	b, md := newConfigDockerProvider(config.DockerConfig{
 		CacheVolumes: []string{"go-build-cache:/home/runner/.cache/go-build"},
 	})
 
-	if _, err := b.StartRunner(context.Background(), "runner-1", "jit"); err != nil {
-		t.Fatalf("StartRunner() error: %v", err)
+	if _, err := b.StartInstance(context.Background(), "runner-1", "jit"); err != nil {
+		t.Fatalf("StartInstance() error: %v", err)
 	}
 	call := md.createCalls[0]
 
@@ -395,15 +395,15 @@ func TestDockerBackend_StartRunner_CacheVolumesWithoutSharedVolume(t *testing.T)
 	}
 }
 
-func TestNewDockerBackend_InvalidCacheVolumesMountsNone(t *testing.T) {
-	// Validate() rejects such a config before startup; if a backend is built
+func TestNewDockerProvider_InvalidCacheVolumesMountsNone(t *testing.T) {
+	// Validate() rejects such a config before startup; if a provider is built
 	// anyway, the bad list must yield no cache mounts rather than a partial set.
-	b, md := newConfigDockerBackend(config.DockerConfig{
+	b, md := newConfigDockerProvider(config.DockerConfig{
 		CacheVolumes: []string{"gradle-cache:/home/runner/.gradle", "not-an-entry"},
 	})
 
-	if _, err := b.StartRunner(context.Background(), "runner-1", "jit"); err != nil {
-		t.Fatalf("StartRunner() error: %v", err)
+	if _, err := b.StartInstance(context.Background(), "runner-1", "jit"); err != nil {
+		t.Fatalf("StartInstance() error: %v", err)
 	}
 	call := md.createCalls[0]
 
@@ -416,14 +416,14 @@ func TestNewDockerBackend_InvalidCacheVolumesMountsNone(t *testing.T) {
 	}
 }
 
-func TestDockerBackend_StartRunner_CustomSharedVolumeName(t *testing.T) {
-	b, md := newConfigDockerBackend(config.DockerConfig{
+func TestDockerProvider_StartInstance_CustomSharedVolumeName(t *testing.T) {
+	b, md := newConfigDockerProvider(config.DockerConfig{
 		SharedVolume:     "/shared",
 		SharedVolumeName: "team-a-shared",
 	})
 
-	if _, err := b.StartRunner(context.Background(), "runner-1", "jit"); err != nil {
-		t.Fatalf("StartRunner() error: %v", err)
+	if _, err := b.StartInstance(context.Background(), "runner-1", "jit"); err != nil {
+		t.Fatalf("StartInstance() error: %v", err)
 	}
 
 	m := findMountByTarget(md.createCalls[0].hostConfig.Mounts, "/shared")
@@ -435,11 +435,11 @@ func TestDockerBackend_StartRunner_CustomSharedVolumeName(t *testing.T) {
 	}
 }
 
-func TestDockerBackend_StartRunner_NetworkMode(t *testing.T) {
+func TestDockerProvider_StartInstance_NetworkMode(t *testing.T) {
 	t.Run("set", func(t *testing.T) {
-		b, md := newConfigDockerBackend(config.DockerConfig{Network: "runners"})
-		if _, err := b.StartRunner(context.Background(), "runner-1", "jit"); err != nil {
-			t.Fatalf("StartRunner() error: %v", err)
+		b, md := newConfigDockerProvider(config.DockerConfig{Network: "runners"})
+		if _, err := b.StartInstance(context.Background(), "runner-1", "jit"); err != nil {
+			t.Fatalf("StartInstance() error: %v", err)
 		}
 		if got := md.createCalls[0].hostConfig.NetworkMode; got != "runners" {
 			t.Errorf("NetworkMode = %q, want %q", got, "runners")
@@ -447,9 +447,9 @@ func TestDockerBackend_StartRunner_NetworkMode(t *testing.T) {
 	})
 
 	t.Run("unset keeps daemon default", func(t *testing.T) {
-		b, md := newConfigDockerBackend(config.DockerConfig{})
-		if _, err := b.StartRunner(context.Background(), "runner-1", "jit"); err != nil {
-			t.Fatalf("StartRunner() error: %v", err)
+		b, md := newConfigDockerProvider(config.DockerConfig{})
+		if _, err := b.StartInstance(context.Background(), "runner-1", "jit"); err != nil {
+			t.Fatalf("StartInstance() error: %v", err)
 		}
 		if got := md.createCalls[0].hostConfig.NetworkMode; got != "" {
 			t.Errorf("NetworkMode = %q, want empty (daemon default)", got)
@@ -457,11 +457,11 @@ func TestDockerBackend_StartRunner_NetworkMode(t *testing.T) {
 	})
 }
 
-func TestDockerBackend_StartRunner_PidsLimit(t *testing.T) {
+func TestDockerProvider_StartInstance_PidsLimit(t *testing.T) {
 	t.Run("set", func(t *testing.T) {
-		b, md := newConfigDockerBackend(config.DockerConfig{PidsLimit: 4096})
-		if _, err := b.StartRunner(context.Background(), "runner-1", "jit"); err != nil {
-			t.Fatalf("StartRunner() error: %v", err)
+		b, md := newConfigDockerProvider(config.DockerConfig{PidsLimit: 4096})
+		if _, err := b.StartInstance(context.Background(), "runner-1", "jit"); err != nil {
+			t.Fatalf("StartInstance() error: %v", err)
 		}
 		got := md.createCalls[0].hostConfig.Resources.PidsLimit
 		if got == nil || *got != 4096 {
@@ -470,9 +470,9 @@ func TestDockerBackend_StartRunner_PidsLimit(t *testing.T) {
 	})
 
 	t.Run("unset leaves limit nil", func(t *testing.T) {
-		b, md := newConfigDockerBackend(config.DockerConfig{})
-		if _, err := b.StartRunner(context.Background(), "runner-1", "jit"); err != nil {
-			t.Fatalf("StartRunner() error: %v", err)
+		b, md := newConfigDockerProvider(config.DockerConfig{})
+		if _, err := b.StartInstance(context.Background(), "runner-1", "jit"); err != nil {
+			t.Fatalf("StartInstance() error: %v", err)
 		}
 		if got := md.createCalls[0].hostConfig.Resources.PidsLimit; got != nil {
 			t.Errorf("PidsLimit = %v, want nil (unlimited)", *got)
@@ -480,24 +480,24 @@ func TestDockerBackend_StartRunner_PidsLimit(t *testing.T) {
 	})
 }
 
-func TestDockerBackend_RemoveRunner(t *testing.T) {
-	b, md := newTestDockerBackend("", true)
+func TestDockerProvider_RemoveInstance(t *testing.T) {
+	b, md := newTestDockerProvider("", true)
 	ctx := context.Background()
 
-	if err := b.RemoveRunner(ctx, "sha256-runner-1"); err != nil {
-		t.Fatalf("RemoveRunner() error: %v", err)
+	if err := b.RemoveInstance(ctx, "sha256-runner-1"); err != nil {
+		t.Fatalf("RemoveInstance() error: %v", err)
 	}
 	if len(md.removed) != 1 || md.removed[0] != "sha256-runner-1" {
 		t.Errorf("removed = %v, want [sha256-runner-1]", md.removed)
 	}
 }
 
-func TestDockerBackend_Shutdown_IsNoOp(t *testing.T) {
+func TestDockerProvider_Shutdown_IsNoOp(t *testing.T) {
 	// Nothing shared (the volume, the daemon's images and build cache) is
 	// reclaimed at exit at all — see Shutdown's doc comment. Reclaiming any
-	// of it per backend would also race the other scale sets sharing this
+	// of it per provider would also race the other scale sets sharing this
 	// Docker client.
-	b, md := newTestDockerBackend("/shared", true)
+	b, md := newTestDockerProvider("/shared", true)
 	ctx := context.Background()
 
 	b.Shutdown(ctx)
@@ -507,7 +507,7 @@ func TestDockerBackend_Shutdown_IsNoOp(t *testing.T) {
 	}
 }
 
-func TestDockerBackend_BuildContainerEnv(t *testing.T) {
+func TestDockerProvider_BuildContainerEnv(t *testing.T) {
 	tests := []struct {
 		name         string
 		sharedVolume string
@@ -535,7 +535,7 @@ func TestDockerBackend_BuildContainerEnv(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			b, _ := newTestDockerBackend(tt.sharedVolume, true)
+			b, _ := newTestDockerProvider(tt.sharedVolume, true)
 			env := b.buildContainerEnv("test-jit-config")
 
 			// Always contains JIT config
@@ -568,15 +568,15 @@ func TestDockerBackend_BuildContainerEnv(t *testing.T) {
 	}
 }
 
-func TestDockerBackend_StartRunner_WithResourceLimits(t *testing.T) {
+func TestDockerProvider_StartInstance_WithResourceLimits(t *testing.T) {
 	memoryBytes := int64(8192) * 1024 * 1024 // 8GB
 	nanoCPUs := int64(4) * 1_000_000_000     // 4 cores
-	b, md := newTestDockerBackendWithResources(memoryBytes, nanoCPUs)
+	b, md := newTestDockerProviderWithResources(memoryBytes, nanoCPUs)
 	ctx := context.Background()
 
-	_, err := b.StartRunner(ctx, "runner-1", "mock-jit-config")
+	_, err := b.StartInstance(ctx, "runner-1", "mock-jit-config")
 	if err != nil {
-		t.Fatalf("StartRunner() error: %v", err)
+		t.Fatalf("StartInstance() error: %v", err)
 	}
 
 	call := md.createCalls[0]
@@ -588,13 +588,13 @@ func TestDockerBackend_StartRunner_WithResourceLimits(t *testing.T) {
 	}
 }
 
-func TestDockerBackend_StartRunner_WithoutResourceLimits(t *testing.T) {
-	b, md := newTestDockerBackendWithResources(0, 0)
+func TestDockerProvider_StartInstance_WithoutResourceLimits(t *testing.T) {
+	b, md := newTestDockerProviderWithResources(0, 0)
 	ctx := context.Background()
 
-	_, err := b.StartRunner(ctx, "runner-1", "mock-jit-config")
+	_, err := b.StartInstance(ctx, "runner-1", "mock-jit-config")
 	if err != nil {
-		t.Fatalf("StartRunner() error: %v", err)
+		t.Fatalf("StartInstance() error: %v", err)
 	}
 
 	call := md.createCalls[0]

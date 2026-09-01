@@ -11,13 +11,41 @@ import (
 	"github.com/ysya/runscaler/internal/config"
 )
 
+func TestDetectProviderSupportsCanonicalAndLegacyKeys(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{name: "canonical tart", body: `provider = "tart"`, want: "tart"},
+		{name: "legacy tart", body: `backend = "tart"`, want: "tart"},
+		{name: "mixed providers need docker service", body: `
+[[scaleset]]
+provider = "tart"
+[[scaleset]]
+provider = "docker"
+`, want: "docker"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.toml")
+			if err := os.WriteFile(path, []byte(tt.body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if got := detectProvider(path); got != tt.want {
+				t.Errorf("detectProvider() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestSystemdUnitUserModeOmitsDockerDependency(t *testing.T) {
 	// User-level units cannot reference system units: systemd fails with
 	// "Unit docker.service not found" and the service never starts.
 	unit, err := renderSystemdUnit(installOpts{
 		binaryPath: "/home/test/runner/runner",
 		configPath: "/home/test/runner/config.toml",
-		backend:    "docker",
+		provider:   "docker",
 		user:       true,
 	})
 	if err != nil {
@@ -36,7 +64,7 @@ func TestSystemdUnitSystemModeKeepsDockerDependency(t *testing.T) {
 	unit, err := renderSystemdUnit(installOpts{
 		binaryPath: "/usr/local/bin/runner",
 		configPath: "/etc/runner/config.toml",
-		backend:    "docker",
+		provider:   "docker",
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -13,9 +13,9 @@ import (
 	"github.com/ysya/runscaler/internal/metrics"
 )
 
-// RunnerCounter provides runner count information.
-type RunnerCounter interface {
-	RunnerCounts() (idle, busy int)
+// InstanceCounter provides runner count information.
+type InstanceCounter interface {
+	InstanceCounts() (idle, busy int)
 }
 
 // MetricsProvider provides a snapshot of listener metrics for a scale set.
@@ -25,15 +25,15 @@ type MetricsProvider interface {
 
 // HealthServer provides /healthz and /readyz endpoints for monitoring.
 type HealthServer struct {
-	server    *http.Server
-	startTime time.Time
-	version   string
-	logger    *slog.Logger
-	mu        sync.RWMutex
-	scalers   map[string]RunnerCounter
-	metrics   map[string]MetricsProvider
-	states    map[string]connectionState
-	diskFn    func() []DiskStatus
+	server      *http.Server
+	startTime   time.Time
+	version     string
+	logger      *slog.Logger
+	mu          sync.RWMutex
+	controllers map[string]InstanceCounter
+	metrics     map[string]MetricsProvider
+	states      map[string]connectionState
+	diskFn      func() []DiskStatus
 }
 
 type connectionState struct {
@@ -89,12 +89,12 @@ type HealthResponse struct {
 // NewHealthServer creates a new health check HTTP server.
 func NewHealthServer(port int, version string, logger *slog.Logger) *HealthServer {
 	h := &HealthServer{
-		startTime: time.Now(),
-		version:   version,
-		logger:    logger,
-		scalers:   make(map[string]RunnerCounter),
-		metrics:   make(map[string]MetricsProvider),
-		states:    make(map[string]connectionState),
+		startTime:   time.Now(),
+		version:     version,
+		logger:      logger,
+		controllers: make(map[string]InstanceCounter),
+		metrics:     make(map[string]MetricsProvider),
+		states:      make(map[string]connectionState),
 	}
 
 	mux := http.NewServeMux()
@@ -121,18 +121,18 @@ func (h *HealthServer) Shutdown(ctx context.Context) error {
 	return h.server.Shutdown(ctx)
 }
 
-// RegisterScaler adds a scaler to be reported in health checks.
-func (h *HealthServer) RegisterScaler(name string, s RunnerCounter) {
+// RegisterController adds a scale set controller to health reporting.
+func (h *HealthServer) RegisterController(name string, controller InstanceCounter) {
 	h.mu.Lock()
-	h.scalers[name] = s
+	h.controllers[name] = controller
 	h.states[name] = connectionState{}
 	h.mu.Unlock()
 }
 
-// UnregisterScaler removes a scaler from health reporting.
-func (h *HealthServer) UnregisterScaler(name string) {
+// UnregisterController removes a scale set controller from health reporting.
+func (h *HealthServer) UnregisterController(name string) {
 	h.mu.Lock()
-	delete(h.scalers, name)
+	delete(h.controllers, name)
 	delete(h.metrics, name)
 	delete(h.states, name)
 	h.mu.Unlock()
@@ -169,7 +169,7 @@ func (h *HealthServer) RegisterMetrics(name string, m MetricsProvider) {
 // main wires this to a function that calls internal/diskguard.StatFor per
 // configured cachestore.CacheStore, never Measure. Until this is called,
 // /healthz reports no disk section at all (Disk stays nil, omitted by its
-// omitempty tag) — the same "empty until registered" shape RegisterScaler
+// omitempty tag) — the same "empty until registered" shape RegisterController
 // gives ScaleSets before any scale set has started.
 func (h *HealthServer) SetDiskProvider(fn func() []DiskStatus) {
 	h.mu.Lock()
@@ -182,7 +182,7 @@ func (h *HealthServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	defer h.mu.RUnlock()
 
 	status := "ok"
-	for name := range h.scalers {
+	for name := range h.controllers {
 		if !h.states[name].Ready {
 			status = "degraded"
 			break
@@ -192,20 +192,20 @@ func (h *HealthServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		Status:    status,
 		Version:   h.version,
 		Uptime:    time.Since(h.startTime).Truncate(time.Second).String(),
-		ScaleSets: make([]ScaleSetStatus, 0, len(h.scalers)),
+		ScaleSets: make([]ScaleSetStatus, 0, len(h.controllers)),
 	}
 	if h.diskFn != nil {
 		resp.Disk = h.diskFn()
 	}
 
-	names := make([]string, 0, len(h.scalers))
-	for name := range h.scalers {
+	names := make([]string, 0, len(h.controllers))
+	for name := range h.controllers {
 		names = append(names, name)
 	}
 	sort.Strings(names)
 	for _, name := range names {
-		s := h.scalers[name]
-		idle, busy := s.RunnerCounts()
+		controller := h.controllers[name]
+		idle, busy := controller.InstanceCounts()
 		ss := ScaleSetStatus{
 			Name: name,
 			Idle: idle,
@@ -242,8 +242,8 @@ func (h *HealthServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
 
 func (h *HealthServer) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	h.mu.RLock()
-	ready := len(h.scalers) > 0
-	for name := range h.scalers {
+	ready := len(h.controllers) > 0
+	for name := range h.controllers {
 		if !h.states[name].Ready {
 			ready = false
 			break

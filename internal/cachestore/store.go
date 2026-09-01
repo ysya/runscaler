@@ -109,7 +109,7 @@ type CacheStore interface {
 // already carries a 10-minute cap (volumeHelperTimeout, dockerReclaimTimeout)
 // — and the wait itself honors ctx, so a caller on the job-start path is
 // still released the moment its own deadline expires (see the timeout
-// scaler.startRunner wraps its pre-job Sweep in) rather than inheriting the
+// controller.startInstance wraps its pre-job Sweep in) rather than inheriting the
 // holder's.
 type serialized struct {
 	CacheStore

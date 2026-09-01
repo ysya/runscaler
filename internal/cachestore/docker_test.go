@@ -69,7 +69,7 @@ func TestDockerGarbageStore_ReclaimsRegardlessOfEnabled(t *testing.T) {
 // TestDockerGarbageStore_ContinuesAfterContainerPruneError pins that a
 // ContainerPrune failure does not stop the ImagePrune attempt, and that the
 // failure surfaces in the returned error — coverage that moved here from
-// internal/backend's now-deleted TestPruneDockerRuntime_ContinuesAfterPruneErrors.
+// internal/provider's now-deleted TestPruneDockerRuntime_ContinuesAfterPruneErrors.
 func TestDockerGarbageStore_ContinuesAfterContainerPruneError(t *testing.T) {
 	fake := &fakeDockerAPI{rootDir: "/var/lib/docker", containerPruneErr: errors.New("containers boom")}
 	s := NewDockerGarbageStore(fake, DockerGarbageConfig{Enabled: true, PruneTTL: 24 * time.Hour})
@@ -204,7 +204,7 @@ func TestDockerBuildCacheStore_Tier2PrunesByAgeAndBudget(t *testing.T) {
 // TestDockerBuildCacheStore_ContinuesAfterAgePruneError pins that Tier2's
 // age-based BuildCachePrune call failing does not stop the budget-based one
 // from still running, and that the failure surfaces in the returned error
-// — coverage that moved here from internal/backend's now-deleted
+// — coverage that moved here from internal/provider's now-deleted
 // TestPruneDockerRuntime_ContinuesAfterPruneErrors. Both calls share one
 // injected error (fakeDockerAPI has no per-call error injection), but each
 // is wrapped with a distinct prefix in production code ("prune build cache

@@ -1,4 +1,4 @@
-package scaler
+package controller
 
 import (
 	"context"
@@ -14,39 +14,39 @@ import (
 
 // --- Mocks ---
 
-type mockBackend struct {
+type mockProvider struct {
 	mu       sync.Mutex
 	started  []string // runner names
-	removed  []string // resource IDs
+	removed  []string // instance IDs
 	shutdown bool
 }
 
-type watcherBackend struct {
+type watcherProvider struct {
 	mu      sync.Mutex
 	started []string
 	removed []string
 	waits   map[string]chan struct{}
 }
 
-func (m *watcherBackend) StartRunner(_ context.Context, name, _ string) (string, error) {
+func (m *watcherProvider) StartInstance(_ context.Context, name, _ string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	resource := "resource-" + name
+	resource := "instance-" + name
 	m.started = append(m.started, resource)
 	m.waits[resource] = make(chan struct{})
 	return resource, nil
 }
 
-func (m *watcherBackend) RemoveRunner(_ context.Context, resource string) error {
+func (m *watcherProvider) RemoveInstance(_ context.Context, resource string) error {
 	m.mu.Lock()
 	m.removed = append(m.removed, resource)
 	m.mu.Unlock()
 	return nil
 }
 
-func (m *watcherBackend) Shutdown(context.Context) {}
+func (m *watcherProvider) Shutdown(context.Context) {}
 
-func (m *watcherBackend) WaitRunner(ctx context.Context, resource string) error {
+func (m *watcherProvider) WaitInstance(ctx context.Context, resource string) error {
 	m.mu.Lock()
 	w := m.waits[resource]
 	m.mu.Unlock()
@@ -58,33 +58,33 @@ func (m *watcherBackend) WaitRunner(ctx context.Context, resource string) error 
 	}
 }
 
-func (m *watcherBackend) crashFirst() {
+func (m *watcherProvider) crashFirst() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	close(m.waits[m.started[0]])
 }
 
-func (m *watcherBackend) startedCount() int {
+func (m *watcherProvider) startedCount() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return len(m.started)
 }
 
-func (m *mockBackend) StartRunner(_ context.Context, name string, _ string) (string, error) {
+func (m *mockProvider) StartInstance(_ context.Context, name string, _ string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.started = append(m.started, name)
-	return "resource-" + name, nil
+	return "instance-" + name, nil
 }
 
-func (m *mockBackend) RemoveRunner(_ context.Context, resourceID string) error {
+func (m *mockProvider) RemoveInstance(_ context.Context, instanceID string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.removed = append(m.removed, resourceID)
+	m.removed = append(m.removed, instanceID)
 	return nil
 }
 
-func (m *mockBackend) Shutdown(_ context.Context) {
+func (m *mockProvider) Shutdown(_ context.Context) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.shutdown = true
@@ -131,17 +131,17 @@ func (f *fakeChecker) Sweep(ctx context.Context) error {
 	return f.sweepErr
 }
 
-func newTestScaler(minRunners, maxRunners int) (*Scaler, *mockBackend, *mockScaleset) {
-	mb := &mockBackend{}
+func newTestController(minRunners, maxRunners int) (*ScaleSetController, *mockProvider, *mockScaleset) {
+	mb := &mockProvider{}
 	ms := &mockScaleset{}
-	s := NewScaler(1, minRunners, maxRunners, mb, ms, slog.New(slog.DiscardHandler))
+	s := NewScaleSetController(1, minRunners, maxRunners, mb, ms, slog.New(slog.DiscardHandler))
 	return s, mb, ms
 }
 
-// --- runnerState tests ---
+// --- instanceState tests ---
 
 func TestRunnerStateLifecycle(t *testing.T) {
-	rs := runnerState{
+	rs := instanceState{
 		idle: make(map[string]string),
 		busy: make(map[string]string),
 	}
@@ -150,8 +150,8 @@ func TestRunnerStateLifecycle(t *testing.T) {
 		t.Fatalf("initial count = %d, want 0", rs.count())
 	}
 
-	rs.addIdle("runner-1", "resource-1")
-	rs.addIdle("runner-2", "resource-2")
+	rs.addIdle("runner-1", "instance-1")
+	rs.addIdle("runner-2", "instance-2")
 	if rs.count() != 2 {
 		t.Fatalf("count after addIdle = %d, want 2", rs.count())
 	}
@@ -167,24 +167,24 @@ func TestRunnerStateLifecycle(t *testing.T) {
 		t.Error("runner-1 should be in busy after markBusy")
 	}
 
-	resourceID, ok := rs.markDone("runner-1")
+	instanceID, ok := rs.markDone("runner-1")
 	if !ok {
 		t.Fatal("markDone should return ok=true for busy runner")
 	}
-	if resourceID != "resource-1" {
-		t.Errorf("markDone returned %q, want %q", resourceID, "resource-1")
+	if instanceID != "instance-1" {
+		t.Errorf("markDone returned %q, want %q", instanceID, "instance-1")
 	}
 	if rs.count() != 1 {
 		t.Fatalf("count after markDone = %d, want 1", rs.count())
 	}
 
 	// markDone on idle runner (no job started)
-	resourceID, ok = rs.markDone("runner-2")
+	instanceID, ok = rs.markDone("runner-2")
 	if !ok {
 		t.Fatal("markDone should return ok=true for idle runner")
 	}
-	if resourceID != "resource-2" {
-		t.Errorf("markDone(idle) returned %q, want %q", resourceID, "resource-2")
+	if instanceID != "instance-2" {
+		t.Errorf("markDone(idle) returned %q, want %q", instanceID, "instance-2")
 	}
 	if rs.count() != 0 {
 		t.Fatalf("count after all done = %d, want 0", rs.count())
@@ -192,7 +192,7 @@ func TestRunnerStateLifecycle(t *testing.T) {
 }
 
 func TestRunnerStateMarkBusyReturnsFalse(t *testing.T) {
-	rs := runnerState{
+	rs := instanceState{
 		idle: make(map[string]string),
 		busy: make(map[string]string),
 	}
@@ -203,7 +203,7 @@ func TestRunnerStateMarkBusyReturnsFalse(t *testing.T) {
 }
 
 func TestRunnerStateMarkDoneReturnsFalse(t *testing.T) {
-	rs := runnerState{
+	rs := instanceState{
 		idle: make(map[string]string),
 		busy: make(map[string]string),
 	}
@@ -214,7 +214,7 @@ func TestRunnerStateMarkDoneReturnsFalse(t *testing.T) {
 }
 
 func TestRunnerStateConcurrency(t *testing.T) {
-	rs := runnerState{
+	rs := instanceState{
 		idle: make(map[string]string),
 		busy: make(map[string]string),
 	}
@@ -225,7 +225,7 @@ func TestRunnerStateConcurrency(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			name := fmt.Sprintf("runner-%d", i)
-			rs.addIdle(name, fmt.Sprintf("resource-%d", i))
+			rs.addIdle(name, fmt.Sprintf("instance-%d", i))
 		}(i)
 	}
 	wg.Wait()
@@ -235,10 +235,10 @@ func TestRunnerStateConcurrency(t *testing.T) {
 	}
 }
 
-// --- Scaler tests ---
+// --- ScaleSetController tests ---
 
 func TestHandleDesiredRunnerCount_ScaleUp(t *testing.T) {
-	s, mb, ms := newTestScaler(0, 10)
+	s, mb, ms := newTestController(0, 10)
 	ctx := context.Background()
 
 	got, err := s.HandleDesiredRunnerCount(ctx, 3)
@@ -257,8 +257,8 @@ func TestHandleDesiredRunnerCount_ScaleUp(t *testing.T) {
 }
 
 func TestExitedRunnerIsRemovedAndReplaced(t *testing.T) {
-	b := &watcherBackend{waits: make(map[string]chan struct{})}
-	s := NewScaler(1, 0, 2, b, &mockScaleset{}, slog.New(slog.DiscardHandler))
+	b := &watcherProvider{waits: make(map[string]chan struct{})}
+	s := NewScaleSetController(1, 0, 2, b, &mockScaleset{}, slog.New(slog.DiscardHandler))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -274,13 +274,13 @@ func TestExitedRunnerIsRemovedAndReplaced(t *testing.T) {
 	if got := b.startedCount(); got != 2 {
 		t.Fatalf("started runners = %d, want crashed runner plus replacement", got)
 	}
-	if idle, busy := s.RunnerCounts(); idle != 1 || busy != 0 {
+	if idle, busy := s.InstanceCounts(); idle != 1 || busy != 0 {
 		t.Fatalf("counts = idle %d busy %d, want 1/0", idle, busy)
 	}
 }
 
 func TestHandleDesiredRunnerCount_RespectsMax(t *testing.T) {
-	s, mb, _ := newTestScaler(0, 5)
+	s, mb, _ := newTestController(0, 5)
 	ctx := context.Background()
 
 	got, err := s.HandleDesiredRunnerCount(ctx, 100)
@@ -296,7 +296,7 @@ func TestHandleDesiredRunnerCount_RespectsMax(t *testing.T) {
 }
 
 func TestHandleDesiredRunnerCount_WithMinRunners(t *testing.T) {
-	s, mb, _ := newTestScaler(2, 10)
+	s, mb, _ := newTestController(2, 10)
 	ctx := context.Background()
 
 	// With 0 assigned jobs, target = min(10, 2+0) = 2
@@ -313,13 +313,13 @@ func TestHandleDesiredRunnerCount_WithMinRunners(t *testing.T) {
 }
 
 func TestHandleDesiredRunnerCount_NoScaleWhenEqual(t *testing.T) {
-	s, mb, _ := newTestScaler(0, 10)
+	s, mb, _ := newTestController(0, 10)
 	ctx := context.Background()
 
 	// Pre-populate 3 idle runners
-	s.runners.addIdle("runner-1", "r1")
-	s.runners.addIdle("runner-2", "r2")
-	s.runners.addIdle("runner-3", "r3")
+	s.instances.addIdle("runner-1", "r1")
+	s.instances.addIdle("runner-2", "r2")
+	s.instances.addIdle("runner-3", "r3")
 
 	got, err := s.HandleDesiredRunnerCount(ctx, 3)
 	if err != nil {
@@ -334,12 +334,12 @@ func TestHandleDesiredRunnerCount_NoScaleWhenEqual(t *testing.T) {
 }
 
 func TestHandleDesiredRunnerCount_NoScaleDown(t *testing.T) {
-	s, mb, _ := newTestScaler(0, 10)
+	s, mb, _ := newTestController(0, 10)
 	ctx := context.Background()
 
 	// Pre-populate 5 runners
 	for i := range 5 {
-		s.runners.addIdle(fmt.Sprintf("runner-%d", i), fmt.Sprintf("r%d", i))
+		s.instances.addIdle(fmt.Sprintf("runner-%d", i), fmt.Sprintf("r%d", i))
 	}
 
 	// Desired is 2, but we don't scale down (ephemeral runners removed via HandleJobCompleted)
@@ -359,10 +359,10 @@ func TestHandleDesiredRunnerCount_NoScaleDown(t *testing.T) {
 }
 
 func TestHandleJobStarted(t *testing.T) {
-	s, _, _ := newTestScaler(0, 10)
+	s, _, _ := newTestController(0, 10)
 	ctx := context.Background()
 
-	s.runners.addIdle("runner-abc", "resource-abc")
+	s.instances.addIdle("runner-abc", "instance-abc")
 
 	err := s.HandleJobStarted(ctx, &scaleset.JobStarted{
 		JobMessageBase: scaleset.JobMessageBase{
@@ -375,20 +375,20 @@ func TestHandleJobStarted(t *testing.T) {
 		t.Fatalf("HandleJobStarted() error: %v", err)
 	}
 
-	if _, ok := s.runners.idle["runner-abc"]; ok {
+	if _, ok := s.instances.idle["runner-abc"]; ok {
 		t.Error("runner should not be idle after job started")
 	}
-	if _, ok := s.runners.busy["runner-abc"]; !ok {
+	if _, ok := s.instances.busy["runner-abc"]; !ok {
 		t.Error("runner should be busy after job started")
 	}
 }
 
 func TestHandleJobCompleted(t *testing.T) {
-	s, mb, _ := newTestScaler(0, 10)
+	s, mb, _ := newTestController(0, 10)
 	ctx := context.Background()
 
-	s.runners.addIdle("runner-abc", "resource-abc")
-	s.runners.markBusy("runner-abc")
+	s.instances.addIdle("runner-abc", "instance-abc")
+	s.instances.markBusy("runner-abc")
 
 	err := s.HandleJobCompleted(ctx, &scaleset.JobCompleted{
 		JobMessageBase: scaleset.JobMessageBase{
@@ -401,44 +401,44 @@ func TestHandleJobCompleted(t *testing.T) {
 		t.Fatalf("HandleJobCompleted() error: %v", err)
 	}
 
-	if s.runners.count() != 0 {
-		t.Errorf("runner count = %d, want 0 after job completed", s.runners.count())
+	if s.instances.count() != 0 {
+		t.Errorf("runner count = %d, want 0 after job completed", s.instances.count())
 	}
 	if len(mb.removed) != 1 {
 		t.Errorf("runners removed = %d, want 1", len(mb.removed))
 	}
-	if mb.removed[0] != "resource-abc" {
-		t.Errorf("removed resource = %q, want %q", mb.removed[0], "resource-abc")
+	if mb.removed[0] != "instance-abc" {
+		t.Errorf("removed resource = %q, want %q", mb.removed[0], "instance-abc")
 	}
 }
 
 func TestShutdown(t *testing.T) {
-	s, mb, _ := newTestScaler(0, 10)
+	s, mb, _ := newTestController(0, 10)
 	ctx := context.Background()
 
-	s.runners.addIdle("idle-1", "r-idle-1")
-	s.runners.addIdle("busy-1", "r-busy-1")
-	s.runners.markBusy("busy-1")
+	s.instances.addIdle("idle-1", "r-idle-1")
+	s.instances.addIdle("busy-1", "r-busy-1")
+	s.instances.markBusy("busy-1")
 
 	s.Shutdown(ctx)
 
-	if s.runners.count() != 0 {
-		t.Errorf("runner count = %d after shutdown, want 0", s.runners.count())
+	if s.instances.count() != 0 {
+		t.Errorf("runner count = %d after shutdown, want 0", s.instances.count())
 	}
 	if len(mb.removed) != 2 {
 		t.Errorf("runners removed = %d, want 2", len(mb.removed))
 	}
 	if !mb.shutdown {
-		t.Error("backend.Shutdown() was not called")
+		t.Error("provider.Shutdown() was not called")
 	}
 }
 
 func TestDrain_RemovesIdleKeepsBusy(t *testing.T) {
-	mb := &mockBackend{}
-	s := NewScaler(1, 0, 5, mb, &mockScaleset{}, slog.New(slog.DiscardHandler))
-	s.runners.addIdle("runner-idle", "res-idle")
-	s.runners.addIdle("runner-busy", "res-busy")
-	s.runners.markBusy("runner-busy")
+	mb := &mockProvider{}
+	s := NewScaleSetController(1, 0, 5, mb, &mockScaleset{}, slog.New(slog.DiscardHandler))
+	s.instances.addIdle("runner-idle", "res-idle")
+	s.instances.addIdle("runner-busy", "res-busy")
+	s.instances.markBusy("runner-busy")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
@@ -451,19 +451,19 @@ func TestDrain_RemovesIdleKeepsBusy(t *testing.T) {
 		t.Error("busy runner was removed during drain; its job is still running")
 	}
 	if !s.IsDraining() {
-		t.Error("scaler should remain in draining state")
+		t.Error("controller should remain in draining state")
 	}
 }
 
 func TestDrain_ReturnsWhenBusyReachesZero(t *testing.T) {
-	mb := &mockBackend{}
-	s := NewScaler(1, 0, 5, mb, &mockScaleset{}, slog.New(slog.DiscardHandler))
-	s.runners.addIdle("runner-busy", "res-busy")
-	s.runners.markBusy("runner-busy")
+	mb := &mockProvider{}
+	s := NewScaleSetController(1, 0, 5, mb, &mockScaleset{}, slog.New(slog.DiscardHandler))
+	s.instances.addIdle("runner-busy", "res-busy")
+	s.instances.markBusy("runner-busy")
 
 	go func() {
 		time.Sleep(50 * time.Millisecond)
-		s.runners.markDone("runner-busy")
+		s.instances.markDone("runner-busy")
 	}()
 
 	start := time.Now()
@@ -478,8 +478,8 @@ func TestDrain_ReturnsWhenBusyReachesZero(t *testing.T) {
 }
 
 func TestDrain_StopsScalingUp(t *testing.T) {
-	mb := &mockBackend{}
-	s := NewScaler(1, 0, 5, mb, &mockScaleset{}, slog.New(slog.DiscardHandler))
+	mb := &mockProvider{}
+	s := NewScaleSetController(1, 0, 5, mb, &mockScaleset{}, slog.New(slog.DiscardHandler))
 
 	if err := s.Drain(context.Background()); err != nil {
 		t.Fatalf("Drain: %v", err)
@@ -489,14 +489,14 @@ func TestDrain_StopsScalingUp(t *testing.T) {
 		t.Fatalf("HandleDesiredRunnerCount: %v", err)
 	}
 	if got != 0 || len(mb.started) != 0 {
-		t.Errorf("draining scaler started %d runners (count=%d); it must take no new work",
+		t.Errorf("draining controller started %d runners (count=%d); it must take no new work",
 			len(mb.started), got)
 	}
 }
 
 func TestExitedRunnerIsNotReplacedWhileDraining(t *testing.T) {
-	b := &watcherBackend{waits: make(map[string]chan struct{})}
-	s := NewScaler(1, 0, 2, b, &mockScaleset{}, slog.New(slog.DiscardHandler))
+	b := &watcherProvider{waits: make(map[string]chan struct{})}
+	s := NewScaleSetController(1, 0, 2, b, &mockScaleset{}, slog.New(slog.DiscardHandler))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -508,7 +508,7 @@ func TestExitedRunnerIsNotReplacedWhileDraining(t *testing.T) {
 
 	deadline := time.Now().Add(500 * time.Millisecond)
 	for {
-		if idle, busy := s.RunnerCounts(); idle == 0 && busy == 0 {
+		if idle, busy := s.InstanceCounts(); idle == 0 && busy == 0 {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -530,51 +530,51 @@ func containsString(values []string, want string) bool {
 	return false
 }
 
-// --- startRunner disk-check tests ---
+// --- startInstance disk-check tests ---
 
-func TestStartRunner_ReclaimsWhenDiskLow(t *testing.T) {
+func TestStartInstance_ReclaimsWhenDiskLow(t *testing.T) {
 	chk := &fakeChecker{needs: true}
-	s := NewScaler(1, 0, 1, &mockBackend{}, &mockScaleset{}, slog.New(slog.DiscardHandler), WithDiskChecker(chk))
+	s := NewScaleSetController(1, 0, 1, &mockProvider{}, &mockScaleset{}, slog.New(slog.DiscardHandler), WithDiskChecker(chk))
 
-	if _, err := s.startRunner(context.Background()); err != nil {
-		t.Fatalf("startRunner error: %v", err)
+	if _, err := s.startInstance(context.Background()); err != nil {
+		t.Fatalf("startInstance error: %v", err)
 	}
 	if chk.sweeps != 1 {
 		t.Errorf("expected one reclaim before starting the runner, got %d", chk.sweeps)
 	}
 }
 
-func TestStartRunner_SkipsReclaimWhenDiskFine(t *testing.T) {
+func TestStartInstance_SkipsReclaimWhenDiskFine(t *testing.T) {
 	chk := &fakeChecker{needs: false}
-	s := NewScaler(1, 0, 1, &mockBackend{}, &mockScaleset{}, slog.New(slog.DiscardHandler), WithDiskChecker(chk))
+	s := NewScaleSetController(1, 0, 1, &mockProvider{}, &mockScaleset{}, slog.New(slog.DiscardHandler), WithDiskChecker(chk))
 
-	if _, err := s.startRunner(context.Background()); err != nil {
-		t.Fatalf("startRunner error: %v", err)
+	if _, err := s.startInstance(context.Background()); err != nil {
+		t.Fatalf("startInstance error: %v", err)
 	}
 	if chk.sweeps != 0 {
 		t.Errorf("healthy disk must not pay for a sweep, got %d", chk.sweeps)
 	}
 }
 
-func TestStartRunner_ProceedsWhenReclaimFails(t *testing.T) {
+func TestStartInstance_ProceedsWhenReclaimFails(t *testing.T) {
 	chk := &fakeChecker{needs: true, sweepErr: errors.New("daemon down")}
-	s := NewScaler(1, 0, 1, &mockBackend{}, &mockScaleset{}, slog.New(slog.DiscardHandler), WithDiskChecker(chk))
+	s := NewScaleSetController(1, 0, 1, &mockProvider{}, &mockScaleset{}, slog.New(slog.DiscardHandler), WithDiskChecker(chk))
 
-	if _, err := s.startRunner(context.Background()); err != nil {
+	if _, err := s.startInstance(context.Background()); err != nil {
 		t.Fatalf("a failed reclaim must not block the job: %v", err)
 	}
 }
 
-// TestStartRunner_ProceedsWhenNeedsReclaimErrors pins the subtlety in
+// TestStartInstance_ProceedsWhenNeedsReclaimErrors pins the subtlety in
 // diskguard.Guard.NeedsReclaim's own doc comment: on total statfs failure
 // it returns (true, err) — "cannot tell, assume we should reclaim". The
 // call site must not chase that bool once err is non-nil; it logs and
 // starts the runner without even attempting a sweep.
-func TestStartRunner_ProceedsWhenNeedsReclaimErrors(t *testing.T) {
+func TestStartInstance_ProceedsWhenNeedsReclaimErrors(t *testing.T) {
 	chk := &fakeChecker{needs: true, needsErr: errors.New("statfs failed for all stores")}
-	s := NewScaler(1, 0, 1, &mockBackend{}, &mockScaleset{}, slog.New(slog.DiscardHandler), WithDiskChecker(chk))
+	s := NewScaleSetController(1, 0, 1, &mockProvider{}, &mockScaleset{}, slog.New(slog.DiscardHandler), WithDiskChecker(chk))
 
-	if _, err := s.startRunner(context.Background()); err != nil {
+	if _, err := s.startInstance(context.Background()); err != nil {
 		t.Fatalf("a failed disk check must not block the job: %v", err)
 	}
 	if chk.sweeps != 0 {
@@ -582,20 +582,20 @@ func TestStartRunner_ProceedsWhenNeedsReclaimErrors(t *testing.T) {
 	}
 }
 
-// TestStartRunner_ReclaimIsBounded pins the timeout the spec's
+// TestStartInstance_ReclaimIsBounded pins the timeout the spec's
 // error-handling table requires around the pre-job sweep. Each store
 // carries its own 10-minute bound, but a sweep walks all of them, so an
 // unbounded aggregate lets one job start wait for their sum — and
-// startRunner is called once per runner inside HandleDesiredRunnerCount's
+// startInstance is called once per runner inside HandleDesiredRunnerCount's
 // scale-up loop, with reconcileMu held throughout.
-func TestStartRunner_ReclaimIsBounded(t *testing.T) {
+func TestStartInstance_ReclaimIsBounded(t *testing.T) {
 	chk := &fakeChecker{needs: true}
-	s := NewScaler(1, 0, 1, &mockBackend{}, &mockScaleset{}, slog.New(slog.DiscardHandler), WithDiskChecker(chk))
+	s := NewScaleSetController(1, 0, 1, &mockProvider{}, &mockScaleset{}, slog.New(slog.DiscardHandler), WithDiskChecker(chk))
 
 	// A parent with no deadline of its own: any deadline Sweep sees must
-	// have come from startRunner.
-	if _, err := s.startRunner(context.Background()); err != nil {
-		t.Fatalf("startRunner error: %v", err)
+	// have come from startInstance.
+	if _, err := s.startInstance(context.Background()); err != nil {
+		t.Fatalf("startInstance error: %v", err)
 	}
 	if !chk.sweepHadDeadline {
 		t.Fatal("Sweep was handed a context with no deadline — the pre-job reclaim is unbounded")
@@ -612,7 +612,7 @@ func TestStartRunner_ReclaimIsBounded(t *testing.T) {
 // costs milliseconds rather than preJobReclaimTimeout.
 func TestReclaimBeforeStart_ReturnsWhenTheSweepOverruns(t *testing.T) {
 	chk := &fakeChecker{needs: true, sweepBlocks: true}
-	s := NewScaler(1, 0, 1, &mockBackend{}, &mockScaleset{}, slog.New(slog.DiscardHandler), WithDiskChecker(chk))
+	s := NewScaleSetController(1, 0, 1, &mockProvider{}, &mockScaleset{}, slog.New(slog.DiscardHandler), WithDiskChecker(chk))
 
 	done := make(chan struct{})
 	go func() {
@@ -629,26 +629,26 @@ func TestReclaimBeforeStart_ReturnsWhenTheSweepOverruns(t *testing.T) {
 	}
 }
 
-// TestStartRunner_ProceedsAfterAnOverrunningReclaim is the end-to-end
-// counterpart: a sweep abandoned by its bound must still leave startRunner
+// TestStartInstance_ProceedsAfterAnOverrunningReclaim is the end-to-end
+// counterpart: a sweep abandoned by its bound must still leave startInstance
 // returning a live runner, not an error. It drives the whole path — check,
-// bounded sweep, JIT config, backend start — with a sweep that only ends
+// bounded sweep, JIT config, provider start — with a sweep that only ends
 // when its context does.
-func TestStartRunner_ProceedsAfterAnOverrunningReclaim(t *testing.T) {
+func TestStartInstance_ProceedsAfterAnOverrunningReclaim(t *testing.T) {
 	chk := &fakeChecker{needs: true, sweepBlocks: true}
-	s := NewScaler(1, 0, 1, &mockBackend{}, &mockScaleset{}, slog.New(slog.DiscardHandler), WithDiskChecker(chk))
+	s := NewScaleSetController(1, 0, 1, &mockProvider{}, &mockScaleset{}, slog.New(slog.DiscardHandler), WithDiskChecker(chk))
 
 	// A parent deadline shorter than preJobReclaimTimeout ends the blocked
-	// sweep here, so this costs milliseconds; the bound startRunner applies
+	// sweep here, so this costs milliseconds; the bound startInstance applies
 	// on its own is asserted above.
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 
-	name, err := s.startRunner(ctx)
+	name, err := s.startInstance(ctx)
 	if err != nil {
 		t.Fatalf("an abandoned reclaim must not block the job: %v", err)
 	}
 	if name == "" {
-		t.Error("startRunner returned no runner name")
+		t.Error("startInstance returned no runner name")
 	}
 }

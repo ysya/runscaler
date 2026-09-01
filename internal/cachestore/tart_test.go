@@ -8,13 +8,13 @@ import (
 	"time"
 )
 
-// fakeCommandRunner implements backend.CommandRunner for tartStore's tests.
+// fakeCommandRunner implements provider.CommandRunner for tartStore's tests.
 // Kept to what tartStore.Measure actually needs — one canned Run() result
 // plus its last invocation — rather than mirroring
-// internal/backend/tart_test.go's fuller mockCommandRunner (multi-call
+// internal/provider/tart_test.go's fuller mockCommandRunner (multi-call
 // history, prefix matching): PruneTartCache's own command construction is
 // already covered by that package's tests, and tartStore.Reclaim(Tier2)
-// delegates to the exported backend.PruneTartCache wrapper directly (it
+// delegates to the exported provider.PruneTartCache wrapper directly (it
 // builds its own execCommandRunner internally), so this double is never
 // consulted for Reclaim at all — only for Measure's direct `du` call.
 type fakeCommandRunner struct {
@@ -45,7 +45,7 @@ func TestTartStore_PathFollowsTartHome(t *testing.T) {
 }
 
 // TestTartStore_PathResolutionOrder pins the three-level TART_HOME
-// resolution Path() must share with internal/backend/tart.go's setVMMAC,
+// resolution Path() must share with internal/provider/tart.go's setVMMAC,
 // in the same order: cfg.Home, then the TART_HOME environment variable,
 // then tart's own default ($HOME/.tart). Dropping or reordering any level
 // makes this store report a path tart itself never reads or writes from,
@@ -162,13 +162,13 @@ func TestTartStore_Tier2ReclaimsRegardlessOfEnabled(t *testing.T) {
 }
 
 // TestTartStore_Tier2DelegatesToPruneTartCacheWithoutShellingOut proves
-// Reclaim(Tier2) is wired to backend.PruneTartCache without actually
+// Reclaim(Tier2) is wired to provider.PruneTartCache without actually
 // invoking the `tart` binary: PruneTartCache itself no-ops (returns nil
 // before running any command) when both MaxAge and BudgetGB are <= 0 — the
 // one Tier2 scenario safely exercisable from a unit test. This machine (and
 // any other with tart installed) must never have `go test` trigger a real
 // `tart prune`; PruneTartCache's actual command construction is already
-// covered by internal/backend/tart_test.go against an injected
+// covered by internal/provider/tart_test.go against an injected
 // CommandRunner, which this package has no access to (pruneTartCacheWith is
 // unexported).
 func TestTartStore_Tier2DelegatesToPruneTartCacheWithoutShellingOut(t *testing.T) {

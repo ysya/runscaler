@@ -60,7 +60,7 @@ flowchart LR
 - **macOS VMs via Tart** — native Apple Virtualization.framework with APFS Copy-on-Write cloning
 - **VM warm pool** — pre-boot macOS VMs for instant job pickup (~2s vs ~30s cold boot)
 - **Shared volumes** — cross-runner caching via named Docker volumes
-- **Multi-org support** — manage multiple scale sets from a single process, mix Docker and Tart backends
+- **Multi-org support** — manage multiple scale sets from a single process, mixing Docker and Tart providers
 - **Self-healing capacity** — replace containers/VMs that exit before GitHub reports job completion
 - **Safe restarts** — SIGTERM/SIGQUIT stop new work and wait for in-flight jobs; startup reclaims containers/VMs left by hard kills
 - **Operational safety** — one process per host, localhost-only health checks, and built-in rotating logs
@@ -71,8 +71,8 @@ flowchart LR
 
 ### Prerequisites
 
-- **Docker backend:** Docker running on the host
-- **Tart backend (macOS):** Apple Silicon Mac with [Tart](https://tart.run/) installed:
+- **Docker provider:** Docker running on the host
+- **Tart provider (macOS):** Apple Silicon Mac with [Tart](https://tart.run/) installed:
 
   ```bash
   brew install cirruslabs/cli/tart
@@ -167,7 +167,7 @@ jobs:
 
 | Command                  | Description                                            |
 | ------------------------ | ------------------------------------------------------ |
-| `runner run`             | Start the auto-scaler                                  |
+| `runner run`             | Start the runner manager                               |
 | `runner init`            | Generate a config file interactively                   |
 | `runner validate`        | Validate configuration and connectivity                |
 | `runner status`          | Show capacity, connections, jobs, queues, and disk headroom |
@@ -269,7 +269,7 @@ when `[[scaleset]]` entries exist.
 
 ### Config File (TOML)
 
-**Docker backend (default):**
+**Docker provider (default):**
 
 ```toml
 # config.toml
@@ -325,11 +325,11 @@ sweep — the host-wide disk guard (see [Caching](#caching)) still reclaims
 through both once a filesystem is actually under pressure, regardless of
 these switches.
 
-**Tart backend (macOS):**
+**Tart provider (macOS):**
 
 ```toml
 # config.toml
-backend = "tart"
+provider = "tart"
 url = "https://github.com/your-org"
 name = "macos-runners"
 token = "ghp_xxx"
@@ -405,7 +405,7 @@ name = "linux-runners"
 token = "ghp_aaa"
 
 [[scaleset]]
-backend = "tart"
+provider = "tart"
 url = "https://github.com/your-org"
 name = "macos-runners"
 token = "ghp_bbb"
@@ -424,17 +424,17 @@ pool-size = 2
 | `--url`             | `url`                | (required)                              | Registration URL (org or repo)                    |
 | `--name`            | `name`               | (required)                              | Scale set name (used as `runs-on` label)          |
 | `--token`           | `token`              | (required)                              | GitHub Personal Access Token                      |
-| `--backend`         | `backend`            | `docker`                                | Runner backend (`docker` or `tart`)               |
+| `--provider`        | `provider`           | `docker`                                | Instance provider (`docker` or `tart`)             |
 | `--max-runners`     | `max-runners`        | `10`                                    | Maximum concurrent runners                        |
 | `--min-runners`     | `min-runners`        | `0`                                     | Minimum runners to keep warm                      |
 | `--labels`          | `labels`             | `<name>`                                | Runner labels (comma-separated)                   |
 | `--runner-group`    | `runner-group`       | `default`                               | Runner group name                                 |
 | `--runner-image`    | `runner-image`       | `ghcr.io/actions/actions-runner:latest` | Runner image (Docker image or Tart VM image)      |
-| `--docker-socket`   | `[docker] socket`    | `/var/run/docker.sock`                  | Docker socket path (Docker backend)               |
-| `--dind`            | `[docker] dind`      | `true`                                  | Mount Docker socket into runners (Docker backend) |
-| `--shared-volume`   | `[docker] shared-volume` |                                     | Shared Docker volume path (Docker backend)        |
-| `--tart-cpu`        | `[tart] cpu`         | `0` (image default)                     | CPU cores per VM (Tart backend)                   |
-| `--tart-memory`     | `[tart] memory`      | `0` (image default)                     | Memory in MB per VM (Tart backend)                |
+| `--docker-socket`   | `[docker] socket`    | `/var/run/docker.sock`                  | Docker socket path (Docker provider)               |
+| `--dind`            | `[docker] dind`      | `true`                                  | Mount Docker socket into runners (Docker provider) |
+| `--shared-volume`   | `[docker] shared-volume` |                                     | Shared Docker volume path (Docker provider)        |
+| `--tart-cpu`        | `[tart] cpu`         | `0` (image default)                     | CPU cores per VM (Tart provider)                   |
+| `--tart-memory`     | `[tart] memory`      | `0` (image default)                     | Memory in MB per VM (Tart provider)                |
 | `--tart-runner-dir` | `[tart] runner-dir`  | `/Users/admin/actions-runner`           | Runner install directory inside Tart VM           |
 | `--tart-pool-size`  | `[tart] pool-size`   | `0`                                     | Number of pre-warmed VMs for instant job pickup   |
 | `--log-level`       | `log-level`          | `info`                                  | Log level (debug/info/warn/error)                 |
@@ -446,6 +446,9 @@ pool-size = 2
 Process-wide `drain-timeout` and advanced tuning keys (cleanup, cache volumes,
 isolation) are config-file only by design — see `config.example.toml` for the
 full list.
+
+The deprecated `backend` TOML key and `--backend` flag remain accepted for
+existing installations. New configuration and generated files use `provider`.
 
 ## Caching
 
@@ -565,7 +568,7 @@ Isolation knobs, all per scale set under `[docker]`:
 | `shared-volume-name` | back each scale set's shared volume with a different named volume so scale sets of different trust levels don't share files |
 | `dind = false` | no socket mount at all — strongest container-level isolation, no image builds |
 
-The Tart backend isolates at the hypervisor boundary — each job gets a fresh macOS VM cloned from the base image and deleted afterwards.
+The Tart provider isolates at the hypervisor boundary — each job gets a fresh macOS VM cloned from the base image and deleted afterwards.
 
 ## Deployment
 
@@ -610,7 +613,7 @@ runner service restart     # waits for active jobs automatically
 
 ```ini
 [Unit]
-Description=GitHub Actions Runner Auto-Scaler
+Description=GitHub Actions Runner Manager
 After=docker.service
 Requires=docker.service
 
@@ -645,19 +648,21 @@ Key components:
 cmd/runner/          CLI entry point, commands (run, init, validate, status, doctor, logs, version)
 internal/
   config/            Configuration management with Viper (flags + TOML)
-  backend/           RunnerBackend interface + Docker/Tart implementations
-  scaler/            Implements listener.Scaler for runner lifecycle
+  provider/          InstanceProvider + Docker/Tart implementations
+  controller/        ScaleSetController; adapts listener.Scaler to instance lifecycle
   health/            Health check HTTP server
   lock/              Machine-wide process and destructive-maintenance lock
   versioncheck/      GitHub releases API client for update notifications and in-place binary updates
 ```
 
-The `RunnerBackend` interface abstracts container/VM lifecycle:
+The runner process is the **manager**. Each configured scale set owns one
+`ScaleSetController`, which translates GitHub's desired-runner/job events into
+an `InstanceProvider` lifecycle:
 
-- **`DockerBackend`** — manages runner containers via Docker API
-- **`TartBackend`** — manages macOS VMs via Tart CLI (clone → run → exec → stop → delete)
+- **`DockerProvider`** — manages runner container instances via Docker API
+- **`TartProvider`** — manages VM instances via Tart CLI (clone → run → exec → stop → delete)
 
-The scaler implements three methods from the scaleset `Scaler` interface:
+`ScaleSetController` implements the upstream `listener.Scaler` interface:
 
 - `HandleDesiredRunnerCount` — Scales up runners to match job demand
 - `HandleJobStarted` — Marks runners as busy

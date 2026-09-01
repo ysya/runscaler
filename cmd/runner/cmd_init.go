@@ -31,7 +31,9 @@ func init() {
 	flags.String("name", "", "Scale set name")
 	flags.String("token", "", "Personal access token")
 	flags.Int("max-runners", config.DefaultMaxRunners, "Maximum concurrent runners")
-	flags.String("backend", "", "Runner backend (docker or tart)")
+	flags.String("provider", "", "Instance provider (docker or tart)")
+	flags.String("backend", "", "Deprecated alias for --provider")
+	_ = flags.MarkDeprecated("backend", "use --provider instead")
 	flags.String("runner-image", "", "Runner container or Tart VM image")
 	flags.Bool("dind", config.DefaultDinD, "Enable Docker-in-Docker")
 	flags.String("shared-volume", "", "Shared volume path (e.g. /shared)")
@@ -57,7 +59,8 @@ func runInit(cmd *cobra.Command, args []string) error {
 	name, _ := cmd.Flags().GetString("name")
 	token, _ := cmd.Flags().GetString("token")
 	maxRunners, _ := cmd.Flags().GetInt("max-runners")
-	backend, _ := cmd.Flags().GetString("backend")
+	providerName, _ := cmd.Flags().GetString("provider")
+	legacyBackend, _ := cmd.Flags().GetString("backend")
 	runnerImage, _ := cmd.Flags().GetString("runner-image")
 	dind, _ := cmd.Flags().GetBool("dind")
 	// Interactive mode: prompt for missing values
@@ -87,28 +90,37 @@ func runInit(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Backend selection
-	if !cmd.Flags().Changed("backend") {
-		useTart, err := promptYN("Use Tart VM backend for macOS runners?", false)
+	providerChanged := cmd.Flags().Lookup("provider") != nil && cmd.Flags().Changed("provider")
+	backendChanged := cmd.Flags().Lookup("backend") != nil && cmd.Flags().Changed("backend")
+	if providerChanged && backendChanged {
+		return fmt.Errorf("--provider and deprecated --backend cannot be used together")
+	}
+	if backendChanged {
+		providerName = legacyBackend
+	}
+
+	// Provider selection
+	if !providerChanged && !backendChanged {
+		useTart, err := promptYN("Use Tart VM provider for macOS runners?", false)
 		if err != nil {
 			return err
 		}
 		if useTart {
-			backend = "tart"
+			providerName = "tart"
 		} else {
-			backend = config.DefaultBackend
+			providerName = config.DefaultProvider
 		}
 	}
-	if backend != "docker" && backend != "tart" {
-		return fmt.Errorf("backend must be \"docker\" or \"tart\", got %q", backend)
+	if providerName != "docker" && providerName != "tart" {
+		return fmt.Errorf("provider must be \"docker\" or \"tart\", got %q", providerName)
 	}
 	if maxRunners < 1 {
 		return fmt.Errorf("max-runners must be at least 1")
 	}
 
 	var configContent string
-	if backend == "tart" {
-		// Tart backend config
+	if providerName == "tart" {
+		// Tart provider config
 		if runnerImage == "" || runnerImage == config.DefaultRunnerImage {
 			runnerImage, err = promptString("Tart base VM image (e.g. ghcr.io/cirruslabs/macos-sequoia-xcode:latest)")
 			if err != nil {
@@ -116,14 +128,14 @@ func runInit(cmd *cobra.Command, args []string) error {
 			}
 		}
 		if maxRunners > 2 {
-			return fmt.Errorf("max-runners must be <= 2 for the Tart backend")
+			return fmt.Errorf("max-runners must be <= 2 for the Tart provider")
 		}
 		candidate := config.ScaleSetConfig{
 			RegistrationURL: url,
 			ScaleSetName:    name,
 			Token:           token,
 			MaxRunners:      maxRunners,
-			Backend:         "tart",
+			Provider:        "tart",
 			RunnerImage:     runnerImage,
 			Tart:            config.TartConfig{RunnerDir: config.DefaultTartRunnerDir},
 		}
@@ -156,8 +168,8 @@ log-format = %q
 # health-address = %q
 # health-port = %d
 
-# Backend: "docker" (Linux containers) or "tart" (macOS VMs)
-backend = "tart"
+# Instance provider: "docker" (Linux containers) or "tart" (macOS VMs)
+provider = "tart"
 
 # Runner image (Tart VM image with GitHub Actions runner pre-installed)
 runner-image = %q
@@ -171,7 +183,7 @@ runner-dir = %q
 			runnerImage, config.DefaultTartRunnerDir,
 		)
 	} else {
-		// Docker backend config
+		// Docker provider config
 		if runnerImage == "" {
 			runnerImage = config.DefaultRunnerImage
 		}
@@ -196,7 +208,7 @@ runner-dir = %q
 			ScaleSetName:    name,
 			Token:           token,
 			MaxRunners:      maxRunners,
-			Backend:         config.DefaultBackend,
+			Provider:        config.DefaultProvider,
 			RunnerImage:     runnerImage,
 			Docker: config.DockerConfig{
 				Socket:       config.DefaultDockerSocket,
@@ -237,8 +249,8 @@ log-format = %q
 # Docker image for runners
 runner-image = %q
 
-# Backend: "docker" (Linux containers) or "tart" (macOS VMs)
-backend = %q
+# Instance provider: "docker" (Linux containers) or "tart" (macOS VMs)
+provider = %q
 
 [docker]
 # Docker-in-Docker: mount host Docker socket into runners
@@ -261,27 +273,27 @@ shared-volume = %q
 # prune = false
 # prune-ttl = "24h"
 
-# --- Multi-org / mixed backend example ---
+# --- Multi-org / mixed provider example ---
 # Uncomment and duplicate [[scaleset]] blocks:
 #
 # [[scaleset]]
 # url = "https://github.com/org-a"
 # name = "linux-runners"
 # token = "env:TOKEN_ORG_A"
-# backend = "docker"
+# provider = "docker"
 # max-runners = 10
 #
 # [[scaleset]]
 # url = "https://github.com/org-a"
 # name = "macos-runners"
 # token = "env:TOKEN_ORG_A"
-# backend = "tart"
+# provider = "tart"
 # max-runners = 2
 # runner-image = "ghcr.io/cirruslabs/macos-sequoia-xcode:latest"
 `, url, name, token, maxRunners,
 			config.DefaultLogLevel, config.DefaultLogFormat,
 			config.DefaultHealthAddress, config.DefaultHealthPort,
-			runnerImage, config.DefaultBackend,
+			runnerImage, config.DefaultProvider,
 			dind, config.DefaultDockerSocket, sharedVolume,
 		)
 	}

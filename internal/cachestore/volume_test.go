@@ -106,7 +106,7 @@ func TestSharedVolumeStore_DisabledReclaimsNothing(t *testing.T) {
 
 // TestSharedVolumeStore_Tier3RunsTwoPhaseDeleteAndReportsFreedBytes checks
 // the full happy path: one helper container, the same two-phase delete
-// script as backend.CleanupSharedVolumeStale (mtime days rounded, mount
+// script as provider.CleanupSharedVolumeStale (mtime days rounded, mount
 // path shell-quoted), and freed bytes computed from the before/after `du`
 // lines the fake plays back.
 func TestSharedVolumeStore_Tier3RunsTwoPhaseDeleteAndReportsFreedBytes(t *testing.T) {

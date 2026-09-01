@@ -8,7 +8,7 @@ import (
 
 	dockerclient "github.com/moby/moby/client"
 
-	"github.com/ysya/runscaler/internal/backend"
+	"github.com/ysya/runscaler/internal/provider"
 )
 
 // dockerInfoTimeout bounds the one-time Info() call the Docker daemon
@@ -22,7 +22,7 @@ const dockerInfoTimeout = 10 * time.Second
 
 // dockerReclaimTimeout bounds every prune call dockerGarbageStore and
 // dockerBuildCacheStore make to the Docker daemon, mirroring the bound the
-// retired backend.PruneDockerRuntime used to carry
+// retired provider.PruneDockerRuntime used to carry
 // (context.WithTimeout(ctx, 10*time.Minute) around its own prune calls) —
 // see volumeHelperTimeout in volume.go for the equivalent bound on the
 // volume-backed stores. Without this, a wedged daemon blocks the sweeper
@@ -35,7 +35,7 @@ const dockerReclaimTimeout = 10 * time.Minute
 // construction. A failed lookup returns "" rather than an error — the disk
 // guard already treats an unresolvable Path() as "skip this store, warn"
 // (see StatFor errors), so degrading quietly here is consistent with that.
-func resolveDockerRootDir(client backend.DockerAPI) string {
+func resolveDockerRootDir(client provider.DockerAPI) string {
 	ctx, cancel := context.WithTimeout(context.Background(), dockerInfoTimeout)
 	defer cancel()
 	info, err := client.Info(ctx, dockerclient.InfoOptions{})
@@ -63,7 +63,7 @@ type DockerGarbageConfig struct {
 }
 
 type dockerGarbageStore struct {
-	client  backend.DockerAPI
+	client  provider.DockerAPI
 	cfg     DockerGarbageConfig
 	rootDir string
 }
@@ -76,7 +76,7 @@ type dockerGarbageStore struct {
 // call, since the disk guard's cheap pre-job path calls Path() on every
 // store (to group them by filesystem) and must stay statfs-cheap — it must
 // not pay a daemon round trip per store on every check.
-func NewDockerGarbageStore(client backend.DockerAPI, cfg DockerGarbageConfig) CacheStore {
+func NewDockerGarbageStore(client provider.DockerAPI, cfg DockerGarbageConfig) CacheStore {
 	return serialize(&dockerGarbageStore{client: client, cfg: cfg, rootDir: resolveDockerRootDir(client)})
 }
 
@@ -157,7 +157,7 @@ type DockerBuildCacheConfig struct {
 }
 
 type dockerBuildCacheStore struct {
-	client  backend.DockerAPI
+	client  provider.DockerAPI
 	cfg     DockerBuildCacheConfig
 	rootDir string
 }
@@ -166,7 +166,7 @@ type dockerBuildCacheStore struct {
 // KindCache — removing it only costs time on the next build — and
 // participates in Tier2 (age/budget trim) and Tier4 (unconditional wipe,
 // the guard's emergency tier; see TiersFor).
-func NewDockerBuildCacheStore(client backend.DockerAPI, cfg DockerBuildCacheConfig) CacheStore {
+func NewDockerBuildCacheStore(client provider.DockerAPI, cfg DockerBuildCacheConfig) CacheStore {
 	return serialize(&dockerBuildCacheStore{client: client, cfg: cfg, rootDir: resolveDockerRootDir(client)})
 }
 

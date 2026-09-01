@@ -27,15 +27,15 @@ import (
 	"github.com/spf13/viper"
 	"golang.org/x/term"
 
-	"github.com/ysya/runscaler/internal/backend"
 	"github.com/ysya/runscaler/internal/bytesize"
 	"github.com/ysya/runscaler/internal/cachestore"
 	"github.com/ysya/runscaler/internal/config"
+	"github.com/ysya/runscaler/internal/controller"
 	"github.com/ysya/runscaler/internal/diskguard"
 	"github.com/ysya/runscaler/internal/health"
 	runnerlock "github.com/ysya/runscaler/internal/lock"
 	"github.com/ysya/runscaler/internal/metrics"
-	"github.com/ysya/runscaler/internal/scaler"
+	"github.com/ysya/runscaler/internal/provider"
 	"github.com/ysya/runscaler/internal/versioncheck"
 )
 
@@ -60,9 +60,11 @@ func init() {
 	flags.StringSlice("labels", nil, "Runner labels (comma-separated)")
 	flags.String("runner-group", config.DefaultRunnerGroup, "Runner group name")
 	flags.String("runner-image", config.DefaultRunnerImage, "Docker image for runners")
-	flags.String("backend", config.DefaultBackend, "Runner backend (docker or tart)")
+	flags.String("provider", config.DefaultProvider, "Instance provider (docker or tart)")
+	flags.String("backend", "", "Deprecated alias for --provider")
+	_ = flags.MarkDeprecated("backend", "use --provider instead")
 
-	// Docker backend
+	// Docker provider
 	flags.String("docker-socket", config.DefaultDockerSocket, "Path to Docker socket")
 	flags.Bool("dind", config.DefaultDinD, "Mount Docker socket into runner containers (Docker-in-Docker)")
 	flags.String("shared-volume", "", "Shared Docker volume mounted into all runners (container path, e.g. /shared)")
@@ -70,7 +72,7 @@ func init() {
 	flags.Int("docker-cpu", 0, "CPU cores for each Docker runner container (0 = unlimited)")
 	flags.String("docker-platform", "", "Force container platform (e.g. linux/amd64)")
 
-	// Tart backend
+	// Tart provider
 	flags.String("tart-runner-dir", "", "Runner binary path inside VM")
 	flags.Int("tart-cpu", 0, "Number of CPU cores for each VM (0 = use image default)")
 	flags.Int("tart-memory", 0, "Memory in MB for each VM (0 = use image default)")
@@ -95,14 +97,13 @@ func init() {
 	viper.BindPFlag("labels", flags.Lookup("labels"))
 	viper.BindPFlag("runner-group", flags.Lookup("runner-group"))
 	viper.BindPFlag("runner-image", flags.Lookup("runner-image"))
-	viper.BindPFlag("backend", flags.Lookup("backend"))
 	viper.BindPFlag("log-level", flags.Lookup("log-level"))
 	viper.BindPFlag("log-format", flags.Lookup("log-format"))
 	viper.BindPFlag("dry-run", flags.Lookup("dry-run"))
 	viper.BindPFlag("health-port", flags.Lookup("health-port"))
 	viper.BindPFlag("health-address", flags.Lookup("health-address"))
 
-	// Nested keys (flag name → nested viper key for backend sub-structs):
+	// Nested keys (flag name → nested viper key for provider sub-structs):
 	viper.BindPFlag("docker.socket", flags.Lookup("docker-socket"))
 	viper.BindPFlag("docker.dind", flags.Lookup("dind"))
 	viper.BindPFlag("docker.shared-volume", flags.Lookup("shared-volume"))
@@ -125,10 +126,10 @@ func main() {
 	}
 }
 
-// startScaling loads config, sets up signal handling, and runs the scaler.
+// startManager loads config, sets up signal handling, and runs the runner manager.
 // Shared by `runner run` and the root drop-in compat path. var (not func) so
 // tests can stub it.
-var startScaling = func(cmd *cobra.Command) error {
+var startManager = func(cmd *cobra.Command) error {
 	cfg, err := loadConfig(cmd)
 	if err != nil {
 		return err
@@ -162,7 +163,7 @@ var startScaling = func(cmd *cobra.Command) error {
 		os.Exit(1)
 	})
 
-	return run(runCtx, cfg, drain)
+	return runManager(runCtx, cfg, drain)
 }
 
 // handleShutdownSignals implements the three-stage shutdown sequence.
@@ -204,7 +205,7 @@ func handleShutdownSignals(ctx context.Context, signals <-chan os.Signal, reques
 var cmd = &cobra.Command{
 	Use:     "runner",
 	Version: version,
-	Short:   "GitHub Actions Runner Auto-Scaler",
+	Short:   "GitHub Actions Runner Manager",
 	Long: `Dynamically scales GitHub Actions self-hosted runners as Docker containers
 or Tart VMs using the actions/scaleset library. Runners are ephemeral — each
 handles one job and is removed upon completion.
@@ -225,7 +226,7 @@ or a single scale set via 'runner run' CLI flags.`,
 		// service keeps working; bare `runner` still just prints help.
 		if cmd.PersistentFlags().Changed("config") {
 			warnLegacy("starting via `runner --config` is deprecated — use `runner run` (or `runner migrate` to update your service)")
-			return startScaling(cmd)
+			return startManager(cmd)
 		}
 		return cmd.Help()
 	},
@@ -240,11 +241,11 @@ jobs — scaling runners up and down until interrupted.`,
   runner run --url https://github.com/org --name my-runners --token ghp_xxx
   runner run --dry-run --config config.toml`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return startScaling(cmd)
+		return startManager(cmd)
 	},
 }
 
-func run(ctx context.Context, cfg config.Config, drain <-chan struct{}) error {
+func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) error {
 	if err := cfg.ValidateGlobal(); err != nil {
 		return fmt.Errorf("invalid global configuration: %w", err)
 	}
@@ -275,7 +276,7 @@ func run(ctx context.Context, cfg config.Config, drain <-chan struct{}) error {
 		}
 	}
 
-	// Check which backends are needed
+	// Check which instance providers are needed.
 	needsDocker := false
 	needsTart := false
 	for _, ss := range scaleSets {
@@ -362,15 +363,15 @@ func run(ctx context.Context, cfg config.Config, drain <-chan struct{}) error {
 
 	// One coordinator is shared by every Tart scale set so MAC slots and the
 	// Apple two-VM limit are host-wide rather than reset per scale set.
-	var tartCoordinator *backend.TartHostCoordinator
-	// Verify Tart binary exists if any scaleset uses Tart backend
+	var tartCoordinator *provider.TartHostCoordinator
+	// Verify Tart binary exists if any scale set uses the Tart provider.
 	if needsTart {
-		tartCoordinator = backend.NewTartHostCoordinator(2)
+		tartCoordinator = provider.NewTartHostCoordinator(2)
 		if _, err := exec.LookPath("tart"); err != nil {
 			return fmt.Errorf("tart binary not found in PATH: %w\n\n"+
 				"  Install Tart: brew install cirruslabs/cli/tart", err)
 		}
-		logger.Info("Tart backend enabled")
+		logger.Info("Tart provider enabled")
 
 		// Ensure Tart images are available locally (auto-pull if missing)
 		pulled := make(map[string]bool)
@@ -378,7 +379,7 @@ func run(ctx context.Context, cfg config.Config, drain <-chan struct{}) error {
 			if !ss.IsTart() || pulled[ss.RunnerImage] {
 				continue
 			}
-			tb := backend.NewTartBackendWithCoordinator(ss, logger, tartCoordinator)
+			tb := provider.NewTartProviderWithCoordinator(ss, logger, tartCoordinator)
 			if err := tb.EnsureImage(ctx); err != nil {
 				return err
 			}
@@ -403,7 +404,7 @@ func run(ctx context.Context, cfg config.Config, drain <-chan struct{}) error {
 		return nil
 	}
 
-	// The machine-wide lock is acquired by startScaling before run is called,
+	// The machine-wide lock is acquired by startManager before runManager is called,
 	// so resources created by runner but still present now belong to a dead
 	// previous process. Reconcile them before any new scale set can start.
 	// Dry-run returns above because it must not perform destructive cleanup.
@@ -441,7 +442,7 @@ func run(ctx context.Context, cfg config.Config, drain <-chan struct{}) error {
 	// reclaim through these exact same instances: constructing them twice
 	// (once for the guard's flat list, once more for sweeper-wiring) used
 	// to also log every "Conflicting ... settings" warning twice at
-	// startup. buildCacheStores (used by callers outside run(), e.g. Task
+	// startup. buildCacheStores (used by callers outside runManager(), e.g. Task
 	// 8's `runner cache`) is intentionally not called here for the same
 	// reason.
 	//
@@ -479,7 +480,7 @@ func run(ctx context.Context, cfg config.Config, drain <-chan struct{}) error {
 
 	// Start the periodic disk-pressure guard over every store built above.
 	// The same *diskguard.Guard is threaded into each scale set below as
-	// its pre-job-start check (see runScaleSet, scaler.WithDiskChecker)
+	// its pre-job-start check (see runScaleSetController, controller.WithDiskChecker)
 	// instead of constructing a second one.
 	guard := startDiskGuard(ctx, cacheStores, cfg, logger)
 
@@ -510,7 +511,7 @@ func run(ctx context.Context, cfg config.Config, drain <-chan struct{}) error {
 		go func() {
 			defer wg.Done()
 			ssLogger := config.NewScaleSetLoggerWithWriter(cfg.LogLevel, cfg.LogFormat, ss.ScaleSetName, i, logFile)
-			if err := runScaleSet(runCtx, drain, cfg.EffectiveDrainTimeout(), ss, dockerClients[ss.Docker.Socket], ssLogger, healthServer, tartCoordinator, guard); err != nil {
+			if err := runScaleSetController(runCtx, drain, cfg.EffectiveDrainTimeout(), ss, dockerClients[ss.Docker.Socket], ssLogger, healthServer, tartCoordinator, guard); err != nil {
 				errs <- fmt.Errorf("scaleset %q: %w", ss.ScaleSetName, err)
 				cancelRun()
 			}
@@ -564,11 +565,11 @@ func logServiceDrainTimeoutReminder(drainTimeout time.Duration, logger *slog.Log
 		slog.String("action", "runner service uninstall, then runner service install"))
 }
 
-// runScaleSet manages the lifecycle of a single scale set. guard is the
-// shared disk-pressure guard built once in run() (nil when the disk guard
-// is disabled); it is wired into this scale set's Scaler as its
-// pre-job-start check, see scaler.WithDiskChecker below.
-func runScaleSet(ctx context.Context, drain <-chan struct{}, drainTimeout time.Duration, ss config.ScaleSetConfig, dockerClient *dockerclient.Client, logger *slog.Logger, h *health.HealthServer, tartCoordinator *backend.TartHostCoordinator, guard *diskguard.Guard) error {
+// runScaleSetController manages the lifecycle of a single scale set. guard is the
+// shared disk-pressure guard built once in runManager() (nil when the disk guard
+// is disabled); it is wired into this ScaleSetController as its
+// pre-job-start check, see controller.WithDiskChecker below.
+func runScaleSetController(ctx context.Context, drain <-chan struct{}, drainTimeout time.Duration, ss config.ScaleSetConfig, dockerClient *dockerclient.Client, logger *slog.Logger, h *health.HealthServer, tartCoordinator *provider.TartHostCoordinator, guard *diskguard.Guard) error {
 	// Create scaleset client
 	scalesetClient, err := config.NewScalesetClient(ss.RegistrationURL, ss.Token, logger)
 	if err != nil {
@@ -635,25 +636,25 @@ func runScaleSet(ctx context.Context, drain <-chan struct{}, drainTimeout time.D
 		}
 	}()
 
-	// Create backend based on config (persists across reconnections)
-	var b backend.RunnerBackend
+	// Create the instance provider once; it persists across reconnections.
+	var instanceProvider provider.InstanceProvider
 	if ss.IsTart() {
-		tb := backend.NewTartBackendWithCoordinator(ss, logger, tartCoordinator)
+		tb := provider.NewTartProviderWithCoordinator(ss, logger, tartCoordinator)
 		tb.StartPool(ctx) // starts warm pool if tart-pool-size > 0
-		b = tb
+		instanceProvider = tb
 	} else {
-		b = backend.NewDockerBackend(ss, dockerClient, logger)
+		instanceProvider = provider.NewDockerProvider(ss, dockerClient, logger)
 	}
 
-	// guard is a *diskguard.Guard; only wrap it into the scaler.DiskChecker
+	// guard is a *diskguard.Guard; only wrap it into the controller.DiskChecker
 	// option when non-nil so a disabled guard doesn't become a non-nil
 	// interface holding a nil pointer (which would panic the first time
-	// startRunner called NeedsReclaim on it).
-	var scalerOpts []scaler.Option
+	// startInstance called NeedsReclaim on it).
+	var controllerOpts []controller.Option
 	if guard != nil {
-		scalerOpts = append(scalerOpts, scaler.WithDiskChecker(guard))
+		controllerOpts = append(controllerOpts, controller.WithDiskChecker(guard))
 	}
-	s := scaler.NewScaler(scaleSet.ID, ss.MinRunners, ss.MaxRunners, b, scalesetClient, logger, scalerOpts...)
+	s := controller.NewScaleSetController(scaleSet.ID, ss.MinRunners, ss.MaxRunners, instanceProvider, scalesetClient, logger, controllerOpts...)
 	defer s.Shutdown(context.WithoutCancel(ctx))
 
 	// The listener must keep delivering JobCompleted messages while Drain
@@ -676,9 +677,9 @@ func runScaleSet(ctx context.Context, drain <-chan struct{}, drainTimeout time.D
 
 	// Register with health server
 	if h != nil {
-		h.RegisterScaler(ss.ScaleSetName, s)
+		h.RegisterController(ss.ScaleSetName, s)
 		h.RegisterMetrics(ss.ScaleSetName, recorder)
-		defer h.UnregisterScaler(ss.ScaleSetName)
+		defer h.UnregisterController(ss.ScaleSetName)
 	}
 
 	// Session ID for message session
@@ -743,10 +744,10 @@ type drainer interface {
 	Drain(context.Context) error
 }
 
-// watchScaleSetDrain bridges the process-wide drain broadcast to one scaler.
+// watchScaleSetDrain bridges the process-wide drain broadcast to one controller.
 // It deliberately leaves listenCtx alive during Drain so the listener can
 // report job completions. Once draining finishes or times out, cancelListen
-// ends the listener and runScaleSet's existing Shutdown defer removes any
+// ends the listener and runScaleSetController's existing Shutdown defer removes any
 // resources that remain.
 func watchScaleSetDrain(listenCtx context.Context, drain <-chan struct{}, timeout time.Duration, d drainer, cancelListen context.CancelFunc, logger *slog.Logger) {
 	select {
@@ -812,17 +813,17 @@ func validateScaleSetCollection(scaleSets []config.ScaleSetConfig) error {
 // Both the periodic sweepers below and the disk guard (startDiskGuard) must
 // reclaim through stores configured identically: two independently derived
 // copies of "which scaleset's settings win" for the same store would drift
-// the way the pre-Task-7 backend.PruneDockerRuntime / the new
+// the way the pre-Task-7 provider.PruneDockerRuntime / the new
 // cachestore.dockerBuildCacheStore duplication did. Every store this
 // process constructs — whether for a sweeper or for the disk guard — goes
-// through exactly one of the functions below; run() and buildCacheStores
+// through exactly one of the functions below; runManager() and buildCacheStores
 // both call them, so a store's configuration always traces back to one
 // selection, never two that could disagree.
 
 // execCommandRunner runs real host commands via os/exec, implementing
-// backend.CommandRunner for the Tart cache store's Measure (a plain
+// provider.CommandRunner for the Tart cache store's Measure (a plain
 // `du -sb <resolved TART_HOME>/cache` — see cachestore.tartStore.Measure).
-// backend.execCommandRunner (used for `tart` CLI invocations, which do need
+// provider.execCommandRunner (used for `tart` CLI invocations, which do need
 // TART_HOME injected into the child's environment) is unexported, so it
 // cannot be reused here; this one needs no such injection because
 // tartStore.Path() already resolves TART_HOME to an absolute path before
@@ -840,7 +841,7 @@ func (execCommandRunner) Run(ctx context.Context, name string, args ...string) (
 
 // RunStreaming is never called on tartStore's path (only Run is, for
 // `du`) but is implemented for real, not stubbed, to satisfy
-// backend.CommandRunner honestly for any future caller.
+// provider.CommandRunner honestly for any future caller.
 func (execCommandRunner) RunStreaming(ctx context.Context, name string, args ...string) error {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Stdout = os.Stdout
@@ -1136,7 +1137,7 @@ func sharedVolumeSweepTargetsFor(sets []config.ScaleSetConfig, client *dockercli
 // run `du`/`find` in (see cachestore's runVolumeHelper) — never to the
 // runner containers that mount the volume — so the first scaleset to name a
 // given volume picks that path arbitrarily; ParseCacheVolumes errors are
-// ignored here the same way NewDockerBackend ignores them, since
+// ignored here the same way NewDockerProvider ignores them, since
 // ScaleSetConfig.Validate already surfaced them before startup.
 //
 // BudgetBytes/OnExceed pass straight through from the parsed mount
@@ -1288,12 +1289,12 @@ func tartCacheStoreFor(home string, sets []config.ScaleSetConfig, logger *slog.L
 // scaleSets: the Docker-daemon-scoped stores for each unique socket (via
 // dockerCacheStoresForSocket) and the Tart-scoped stores for each unique
 // TART_HOME (via tartCacheStores). It is the one place this flat, host-wide
-// set is assembled — used both for the disk guard's input in run() and as
+// set is assembled — used both for the disk guard's input in runManager() and as
 // the standalone entry point for callers that only want the full set
 // without also wiring the periodic sweepers: Task 8's `runner cache` and
 // Task 9's pre-job disk check.
 //
-// NOTE: run() itself does not call this function — see its own comment at
+// NOTE: runManager() itself does not call this function — see its own comment at
 // the call site for why (avoiding double construction and double
 // "Conflicting ... settings" warnings). It is kept for Task 8/9 and is
 // covered directly by this package's own tests.
@@ -1349,7 +1350,7 @@ func diskStatusesFor(stores []cachestore.CacheStore) []health.DiskStatus {
 // logReclaimResult logs the outcome of one store's Reclaim call: Info with
 // the reclaimed total when it freed anything — so a data-deleting sweep
 // leaves a record an operator can find, restoring the completion logging
-// the pre-Task-7 backend.PruneDockerRuntime ("Docker runtime prune
+// the pre-Task-7 provider.PruneDockerRuntime ("Docker runtime prune
 // reclaimed disk") and CleanupSharedVolumeStale ("Shared volume cleanup
 // completed") used to do before cachestore.CacheStore.Reclaim's uniform
 // (bytes, error) return replaced their own bespoke summaries — Debug when
@@ -1364,7 +1365,7 @@ func logReclaimResult(logger *slog.Logger, action, store string, freed uint64, e
 		return
 	}
 	if freed > 0 {
-		logger.Info(action+" reclaimed disk", slog.String("store", store), slog.String("reclaimed", backend.FormatBytes(freed)))
+		logger.Info(action+" reclaimed disk", slog.String("store", store), slog.String("reclaimed", provider.FormatBytes(freed)))
 		return
 	}
 	logger.Debug(action+" found nothing to reclaim", slog.String("store", store))
@@ -1431,8 +1432,8 @@ func startSharedVolumeCleanup(ctx context.Context, targets []sharedVolumeSweepTa
 // the shared Docker daemon, through the buildx store's own Reclaim(Tier1) —
 // the same reclaim path the disk guard uses (see
 // cachestore.buildxStore.Reclaim, which itself still delegates to
-// backend.CleanupOrphanedBuildxBuilders — see this task's report for why
-// that backend function was kept rather than retired). Builders are global
+// provider.CleanupOrphanedBuildxBuilders — see this task's report for why
+// that provider function was kept rather than retired). Builders are global
 // to the daemon — like the shared volume — so a single sweeper covers all
 // Docker scalesets; stores.buildxCfg/buildxInterval were selected from the
 // first Docker scaleset with cleanup enabled (see buildxConfigFor). This is
@@ -1539,8 +1540,8 @@ func startDockerPrune(ctx context.Context, stores dockerSocketStores, logger *sl
 // function filters for enabled itself), running `tart prune` on a timer
 // through the tart store's own Reclaim(Tier2) — the same reclaim path the
 // disk guard uses (see cachestore.tartStore.Reclaim, which itself still
-// delegates to backend.PruneTartCache — see this task's report for why
-// that backend function was kept rather than retired). Enabled by default;
+// delegates to provider.PruneTartCache — see this task's report for why
+// that provider function was kept rather than retired). Enabled by default;
 // no-op for any home where no Tart scaleset has cleanup enabled.
 func startTartCacheCleanup(ctx context.Context, targets map[string]tartCacheSweepTarget, logger *slog.Logger) {
 	for _, s := range targets {
@@ -1592,8 +1593,8 @@ func startTartCacheCleanup(ctx context.Context, targets map[string]tartCacheSwee
 // construction path below.
 //
 // Returns the constructed Guard, or nil when the guard is disabled or
-// misconfigured. The caller (run()) threads this same instance into every
-// scale set's pre-job-start check (see runScaleSet, scaler.WithDiskChecker)
+// misconfigured. The caller (runManager()) threads this same instance into every
+// scale set's pre-job-start check (see runScaleSetController, controller.WithDiskChecker)
 // instead of building a second Guard over the same stores.
 func startDiskGuard(ctx context.Context, stores []cachestore.CacheStore, cfg config.Config, logger *slog.Logger) *diskguard.Guard {
 	if !cfg.IsDiskGuardEnabled() {
@@ -1608,7 +1609,7 @@ func startDiskGuard(ctx context.Context, stores []cachestore.CacheStore, cfg con
 	if targetFree == "" {
 		targetFree = config.DefaultDiskTargetFree
 	}
-	// ValidateGlobal (called before startup — see run()) already rejected an
+	// ValidateGlobal (called before startup — see runManager()) already rejected an
 	// unparseable threshold or an inverted min/target pair, so these two
 	// parses cannot fail here; handled anyway rather than ignored, matching
 	// this file's error-handling style everywhere else.
@@ -1671,7 +1672,7 @@ func startDiskGuard(ctx context.Context, stores []cachestore.CacheStore, cfg con
 
 // listenOnce creates a message session and listener, then runs until
 // disconnection or context cancellation. Callers retry on transient errors.
-func listenOnce(ctx context.Context, client *scaleset.Client, scaleSetID int, sessionID string, maxRunners int, s *scaler.Scaler, recorder *metrics.Recorder, logger *slog.Logger, onReady func()) error {
+func listenOnce(ctx context.Context, client *scaleset.Client, scaleSetID int, sessionID string, maxRunners int, s *controller.ScaleSetController, recorder *metrics.Recorder, logger *slog.Logger, onReady func()) error {
 	sessionClient, err := client.MessageSessionClient(ctx, scaleSetID, sessionID)
 	if err != nil {
 		return fmt.Errorf("failed to create message session: %w", err)

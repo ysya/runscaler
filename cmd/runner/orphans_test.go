@@ -21,7 +21,7 @@ type fakeContainer struct {
 	labels map[string]string
 }
 
-// orphanFake implements backend.DockerAPI (for findOrphanContainers and
+// orphanFake implements provider.DockerAPI (for findOrphanContainers and
 // removeOrphanContainers) and also cmd_doctor.go's narrower volumeAPI (for
 // checkDockerVolume), with just enough behavior to exercise both.
 // ContainerList is driven by containers; ContainerRemove records every ID
@@ -78,7 +78,7 @@ func (f *orphanFake) VolumeRemove(_ context.Context, volumeID string, _ dockercl
 	return dockerclient.VolumeRemoveResult{}, nil
 }
 
-// The remaining backend.DockerAPI methods are unused by orphans.go; each
+// The remaining provider.DockerAPI methods are unused by orphans.go; each
 // returns its zero value.
 
 func (f *orphanFake) ContainerCreate(_ context.Context, _ dockerclient.ContainerCreateOptions) (dockerclient.ContainerCreateResult, error) {

@@ -10,12 +10,12 @@ import (
 	"github.com/ysya/runscaler/internal/metrics"
 )
 
-// stubScaler implements RunnerCounter for testing.
-type stubScaler struct {
+// stubController implements InstanceCounter for testing.
+type stubController struct {
 	idle, busy int
 }
 
-func (s *stubScaler) RunnerCounts() (int, int) { return s.idle, s.busy }
+func (s *stubController) InstanceCounts() (int, int) { return s.idle, s.busy }
 
 // stubMetrics implements MetricsProvider for testing.
 type stubMetrics struct {
@@ -54,9 +54,9 @@ func TestHealthzEmpty(t *testing.T) {
 	}
 }
 
-func TestHealthzWithScaler(t *testing.T) {
+func TestHealthzWithController(t *testing.T) {
 	h := newTestServer()
-	h.RegisterScaler("test-set", &stubScaler{idle: 2, busy: 3})
+	h.RegisterController("test-set", &stubController{idle: 2, busy: 3})
 
 	req := httptest.NewRequest("GET", "/healthz", nil)
 	w := httptest.NewRecorder()
@@ -80,7 +80,7 @@ func TestHealthzWithScaler(t *testing.T) {
 
 func TestHealthzWithMetrics(t *testing.T) {
 	h := newTestServer()
-	h.RegisterScaler("test-set", &stubScaler{idle: 1, busy: 0})
+	h.RegisterController("test-set", &stubController{idle: 1, busy: 0})
 	h.RegisterMetrics("test-set", &stubMetrics{snap: metrics.Snapshot{
 		JobsStarted:    10,
 		JobsCompleted:  8,
@@ -107,7 +107,7 @@ func TestHealthzWithMetrics(t *testing.T) {
 	}
 }
 
-func TestReadyzNoScalers(t *testing.T) {
+func TestReadyzNoControllers(t *testing.T) {
 	h := newTestServer()
 
 	req := httptest.NewRequest("GET", "/readyz", nil)
@@ -127,9 +127,9 @@ func TestReadyzNoScalers(t *testing.T) {
 	}
 }
 
-func TestReadyzWithScaler(t *testing.T) {
+func TestReadyzWithController(t *testing.T) {
 	h := newTestServer()
-	h.RegisterScaler("test-set", &stubScaler{idle: 1, busy: 0})
+	h.RegisterController("test-set", &stubController{idle: 1, busy: 0})
 	h.MarkConnected("test-set")
 
 	req := httptest.NewRequest("GET", "/readyz", nil)
@@ -149,9 +149,9 @@ func TestReadyzWithScaler(t *testing.T) {
 	}
 }
 
-func TestReadyzDisconnectedScaler(t *testing.T) {
+func TestReadyzDisconnectedController(t *testing.T) {
 	h := newTestServer()
-	h.RegisterScaler("test-set", &stubScaler{})
+	h.RegisterController("test-set", &stubController{})
 	h.MarkDisconnected("test-set", "connection lost")
 
 	req := httptest.NewRequest("GET", "/readyz", nil)
@@ -202,11 +202,11 @@ func TestHealthzDiskFromProvider(t *testing.T) {
 	}
 }
 
-func TestUnregisterScaler(t *testing.T) {
+func TestUnregisterController(t *testing.T) {
 	h := newTestServer()
-	h.RegisterScaler("test-set", &stubScaler{idle: 1, busy: 0})
+	h.RegisterController("test-set", &stubController{idle: 1, busy: 0})
 	h.RegisterMetrics("test-set", &stubMetrics{})
-	h.UnregisterScaler("test-set")
+	h.UnregisterController("test-set")
 
 	// After unregister, readyz should return 503
 	req := httptest.NewRequest("GET", "/readyz", nil)

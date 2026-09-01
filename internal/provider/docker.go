@@ -1,4 +1,4 @@
-package backend
+package provider
 
 import (
 	"context"
@@ -19,7 +19,7 @@ import (
 	"github.com/ysya/runscaler/internal/config"
 )
 
-// DockerAPI abstracts the Docker client methods used by DockerBackend,
+// DockerAPI abstracts the Docker client methods used by DockerProvider,
 // enabling dependency injection and testing.
 type DockerAPI interface {
 	ContainerCreate(ctx context.Context, options dockerclient.ContainerCreateOptions) (dockerclient.ContainerCreateResult, error)
@@ -43,8 +43,8 @@ type DockerAPI interface {
 	DiskUsage(ctx context.Context, options dockerclient.DiskUsageOptions) (dockerclient.DiskUsageResult, error)
 }
 
-// DockerBackend runs GitHub Actions runners as Docker containers.
-type DockerBackend struct {
+// DockerProvider runs GitHub Actions runners as Docker containers.
+type DockerProvider struct {
 	dockerClient     DockerAPI
 	runnerImage      string
 	dockerSocket     string
@@ -60,9 +60,9 @@ type DockerBackend struct {
 	logger           *slog.Logger
 }
 
-// NewDockerBackend creates a DockerBackend from scale set config.
-func NewDockerBackend(ss config.ScaleSetConfig, client DockerAPI, logger *slog.Logger) *DockerBackend {
-	b := &DockerBackend{
+// NewDockerProvider creates a DockerProvider from scale set config.
+func NewDockerProvider(ss config.ScaleSetConfig, client DockerAPI, logger *slog.Logger) *DockerProvider {
+	p := &DockerProvider{
 		dockerClient:     client,
 		runnerImage:      ss.RunnerImage,
 		dockerSocket:     ss.Docker.Socket,
@@ -77,11 +77,11 @@ func NewDockerBackend(ss config.ScaleSetConfig, client DockerAPI, logger *slog.L
 	}
 	// Validate() already surfaced parse errors before startup; on error no
 	// cache volumes are mounted rather than a partial set.
-	b.cacheVolumes, _ = ss.Docker.ParseCacheVolumes()
+	p.cacheVolumes, _ = ss.Docker.ParseCacheVolumes()
 	if ss.Docker.Platform != "" {
-		b.platform = parsePlatform(ss.Docker.Platform)
+		p.platform = parsePlatform(ss.Docker.Platform)
 	}
-	return b
+	return p
 }
 
 // parsePlatform parses a platform string like "linux/amd64" into an OCI platform spec.
@@ -97,21 +97,21 @@ func parsePlatform(s string) *ocispec.Platform {
 	return p
 }
 
-// StartRunner creates and starts a new ephemeral Docker container runner.
-func (b *DockerBackend) StartRunner(ctx context.Context, name string, jitConfig string) (string, error) {
+// StartInstance creates and starts a new ephemeral Docker container runner.
+func (p *DockerProvider) StartInstance(ctx context.Context, name string, jitConfig string) (string, error) {
 	// Build mounts and group membership.
 	var mounts []mount.Mount
 	var groupAdd []string
-	if b.dind {
+	if p.dind {
 		mounts = append(mounts, mount.Mount{
 			Type:     mount.TypeBind,
-			Source:   b.dockerSocket,
+			Source:   p.dockerSocket,
 			Target:   "/var/run/docker.sock",
 			ReadOnly: false,
 		})
 		// Add socket's owning group (works on native Linux where socket is root:docker).
 		// Also add GID 0 for macOS/OrbStack where virtiofs maps the socket to root:root.
-		if gid, err := socketGroupID(b.dockerSocket); err == nil && gid != 0 {
+		if gid, err := socketGroupID(p.dockerSocket); err == nil && gid != 0 {
 			groupAdd = append(groupAdd, strconv.Itoa(gid))
 		}
 		groupAdd = append(groupAdd, "0")
@@ -119,15 +119,15 @@ func (b *DockerBackend) StartRunner(ctx context.Context, name string, jitConfig 
 	// Named volume mounts (shared + cache); their targets need ownership
 	// fixed before the runner starts.
 	var volumeTargets []string
-	if b.sharedVolume != "" {
+	if p.sharedVolume != "" {
 		mounts = append(mounts, mount.Mount{
 			Type:   mount.TypeVolume,
-			Source: b.sharedVolumeName,
-			Target: b.sharedVolume,
+			Source: p.sharedVolumeName,
+			Target: p.sharedVolume,
 		})
-		volumeTargets = append(volumeTargets, b.sharedVolume)
+		volumeTargets = append(volumeTargets, p.sharedVolume)
 	}
-	for _, cv := range b.cacheVolumes {
+	for _, cv := range p.cacheVolumes {
 		mounts = append(mounts, mount.Mount{
 			Type:   mount.TypeVolume,
 			Source: cv.Volume,
@@ -140,34 +140,34 @@ func (b *DockerBackend) StartRunner(ctx context.Context, name string, jitConfig 
 		Mounts:      mounts,
 		GroupAdd:    groupAdd,
 		SecurityOpt: []string{"label:disable"},
-		Resources:   b.containerResources(),
+		Resources:   p.containerResources(),
 	}
-	if b.network != "" {
-		hostConfig.NetworkMode = container.NetworkMode(b.network)
+	if p.network != "" {
+		hostConfig.NetworkMode = container.NetworkMode(p.network)
 	}
 
-	c, err := b.dockerClient.ContainerCreate(ctx, dockerclient.ContainerCreateOptions{
+	c, err := p.dockerClient.ContainerCreate(ctx, dockerclient.ContainerCreateOptions{
 		Config: &container.Config{
-			Image:  b.runnerImage,
+			Image:  p.runnerImage,
 			User:   "runner",
 			Cmd:    runnerCmd(volumeTargets),
-			Env:    b.buildContainerEnv(jitConfig),
+			Env:    p.buildContainerEnv(jitConfig),
 			Labels: map[string]string{"managed-by": "runner"},
 		},
 		HostConfig: hostConfig,
-		Platform:   b.platform,
+		Platform:   p.platform,
 		Name:       name,
 	})
 	if err != nil {
 		return "", fmt.Errorf("failed to create runner container: %w", err)
 	}
 
-	if _, err := b.dockerClient.ContainerStart(ctx, c.ID, dockerclient.ContainerStartOptions{}); err != nil {
-		_, _ = b.dockerClient.ContainerRemove(ctx, c.ID, dockerclient.ContainerRemoveOptions{Force: true})
+	if _, err := p.dockerClient.ContainerStart(ctx, c.ID, dockerclient.ContainerStartOptions{}); err != nil {
+		_, _ = p.dockerClient.ContainerRemove(ctx, c.ID, dockerclient.ContainerRemoveOptions{Force: true})
 		return "", fmt.Errorf("failed to start runner container: %w", err)
 	}
 
-	b.logger.Debug("Runner started",
+	p.logger.Debug("Runner started",
 		slog.String("name", name),
 		slog.String("containerID", c.ID),
 		slog.Int("mounts", len(mounts)),
@@ -175,18 +175,18 @@ func (b *DockerBackend) StartRunner(ctx context.Context, name string, jitConfig 
 	return c.ID, nil
 }
 
-// RemoveRunner force-removes a Docker container by ID.
-func (b *DockerBackend) RemoveRunner(ctx context.Context, resourceID string) error {
-	if _, err := b.dockerClient.ContainerRemove(ctx, resourceID, dockerclient.ContainerRemoveOptions{Force: true}); err != nil {
+// RemoveInstance force-removes a Docker container by ID.
+func (p *DockerProvider) RemoveInstance(ctx context.Context, instanceID string) error {
+	if _, err := p.dockerClient.ContainerRemove(ctx, instanceID, dockerclient.ContainerRemoveOptions{Force: true}); err != nil {
 		return fmt.Errorf("failed to remove runner container: %w", err)
 	}
 	return nil
 }
 
-// WaitRunner returns when a runner container is no longer running. Scaler uses
+// WaitInstance returns when a runner container is no longer running. The controller uses
 // this to evict containers that crash before GitHub can send JobCompleted.
-func (b *DockerBackend) WaitRunner(ctx context.Context, resourceID string) error {
-	wait := b.dockerClient.ContainerWait(ctx, resourceID, dockerclient.ContainerWaitOptions{Condition: container.WaitConditionNotRunning})
+func (p *DockerProvider) WaitInstance(ctx context.Context, instanceID string) error {
+	wait := p.dockerClient.ContainerWait(ctx, instanceID, dockerclient.ContainerWaitOptions{Condition: container.WaitConditionNotRunning})
 	select {
 	case err := <-wait.Error:
 		if err != nil {
@@ -206,14 +206,14 @@ func (b *DockerBackend) WaitRunner(ctx context.Context, resourceID string) error
 	}
 }
 
-// Shutdown is a no-op for DockerBackend. Nothing shared is reclaimed at
+// Shutdown is a no-op for DockerProvider. Nothing shared is reclaimed at
 // exit: the shared volume carries handoff data for runs still in flight
 // across a restart, and images and build cache belong to the daemon, not to
 // this process. Every one of them is reclaimed on its own schedule instead,
 // through internal/cachestore — the periodic sweepers in cmd/runner and the
-// disk guard. A per-backend Shutdown that touched any of it would also race
+// disk guard. A per-provider Shutdown that touched any of it would also race
 // the other scale sets sharing this Docker client.
-func (b *DockerBackend) Shutdown(_ context.Context) {}
+func (p *DockerProvider) Shutdown(_ context.Context) {}
 
 // runnerCmd returns the container command: plain run.sh when no named
 // volumes are mounted, otherwise a shell prelude that fixes the ownership of
@@ -240,12 +240,12 @@ func shellQuote(value string) string {
 }
 
 // buildContainerEnv returns the environment variables for a runner container.
-func (b *DockerBackend) buildContainerEnv(jitConfig string) []string {
+func (p *DockerProvider) buildContainerEnv(jitConfig string) []string {
 	env := []string{
 		fmt.Sprintf("ACTIONS_RUNNER_INPUT_JITCONFIG=%s", jitConfig),
 	}
-	if b.sharedVolume != "" {
-		env = append(env, fmt.Sprintf("SHARED_DIR=%s", b.sharedVolume))
+	if p.sharedVolume != "" {
+		env = append(env, fmt.Sprintf("SHARED_DIR=%s", p.sharedVolume))
 	}
 	return env
 }
@@ -346,18 +346,18 @@ func CleanupOrphanedBuildxBuilders(ctx context.Context, client DockerAPI, maxAge
 }
 
 // containerResources builds the resource constraints for a runner container.
-func (b *DockerBackend) containerResources() container.Resources {
+func (p *DockerProvider) containerResources() container.Resources {
 	var r container.Resources
-	if b.memoryBytes > 0 {
-		r.Memory = b.memoryBytes
+	if p.memoryBytes > 0 {
+		r.Memory = p.memoryBytes
 	}
-	if b.nanoCPUs > 0 {
-		r.NanoCPUs = b.nanoCPUs
+	if p.nanoCPUs > 0 {
+		r.NanoCPUs = p.nanoCPUs
 	}
-	if b.pidsLimit > 0 {
+	if p.pidsLimit > 0 {
 		// Pids cgroup limit counts threads too — protects the host from
 		// fork bombs inside a job.
-		limit := b.pidsLimit
+		limit := p.pidsLimit
 		r.PidsLimit = &limit
 	}
 	return r

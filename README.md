@@ -608,11 +608,12 @@ update cannot rewrite an already-installed service file, so services installed
 before drain support should be refreshed once:
 
 ```bash
-sudo runner service uninstall
-sudo runner service install
+sudo runner service uninstall --user=false
+sudo runner service install --user=false
 ```
 
-For a user-level service, run both commands with `--user` instead of `sudo`.
+For a user-level service, omit `sudo` and use `--user` instead of `--user=false`.
+User scope is the default on macOS.
 
 After that, the normal upgrade flow is:
 
@@ -685,10 +686,16 @@ an `InstanceProvider` lifecycle:
 The `runscaler` binary is now `runner` (start is a subcommand: `runner run`).
 After installing the new binary, run:
 
-    sudo runner migrate --dry-run          # inspect system-level changes
-    sudo runner migrate                    # perform system-level migration
+    sudo runner migrate --user=false --dry-run # inspect system-level changes
+    sudo runner migrate --user=false           # perform system-level migration
     runner migrate --user --dry-run        # inspect user-level changes
     runner migrate --user                  # no sudo; uses ~/.config/runner
+
+On macOS, `runner migrate` and all `runner service` commands default to
+user scope (no sudo). Services use `~/Library/LaunchAgents` and start at login;
+they do not provide pre-login startup. Use `--user=false` explicitly to manage
+an existing system service. Linux retains its system-level default. User
+migration does not stop or uninstall a system-level service.
 
 `migrate` creates a `0600` backup before changing config. Backup filenames
 include the runner version, a UTC timestamp, the config SHA-256 prefix, and an
@@ -710,7 +717,18 @@ User migration reads `~/.config/runscaler/config.toml` and writes
 `~/.config/runner/config.toml`. It discovers a custom config path from a known
 legacy service when possible; otherwise pass it explicitly with
 `runner migrate --user --config /path/to/config.toml`. Explicit source files
-are never removed. Use `--backup-dir` to override the backup location.
+are never removed. If no user config exists, `/etc/runscaler/config.toml` or
+`/etc/runner/config.toml` can be copied when readable; user migration never
+removes these system sources. Use `--backup-dir` to override the backup location.
+
+On both Linux and macOS, an absolute, nonempty `XDG_CONFIG_HOME` replaces
+`~/.config` for user config and its default backups. Relative values are ignored.
+Config loading searches the current directory, user runner directory,
+`/etc/runner`, user runscaler directory, then `/etc/runscaler`. An explicit
+`--config` takes precedence. `init` continues to write `./config.toml` unless
+`--output` is supplied. User service installation selects that local file if
+present, otherwise the user runner config; it stores an absolute path in the
+service definition. `--config-path` overrides `--config` for service installation.
 
 The legacy Docker volume is intentionally left untouched by default. Remove it
 only after reviewing the migration with `runner migrate --cleanup` (or add

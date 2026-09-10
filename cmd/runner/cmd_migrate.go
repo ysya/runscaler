@@ -34,7 +34,7 @@ volume cleanup is opt-in with --cleanup.`,
 }
 
 func init() {
-	migrateCmd.Flags().Bool("user", false, "Migrate user-level service")
+	migrateCmd.Flags().Bool("user", defaultUserService(), "Migrate user-level service (default on macOS; --user=false for system scope)")
 	migrateCmd.Flags().Bool("dry-run", false, "Validate and show the migration plan without changing anything")
 	migrateCmd.Flags().Bool("cleanup", false, "Remove the legacy Docker volume after a successful migration")
 	migrateCmd.Flags().String("backup-dir", "", "Directory for versioned config backups (default: <target-config-dir>/backups)")
@@ -151,13 +151,13 @@ func runMigrate(c *cobra.Command, _ []string) error {
 func resolveConfigMigrationPaths(c *cobra.Command, user bool) (configMigrationPaths, error) {
 	paths := configMigrationPaths{Mode: "system", Target: newConfigPath, DirPerm: 0o755, RemoveSource: true}
 	if user {
-		home, err := os.UserHomeDir()
+		target, err := userConfigPath("runner")
 		if err != nil {
-			return paths, fmt.Errorf("resolve user home: %w", err)
+			return paths, err
 		}
 		paths.Mode = "user"
 		paths.DirPerm = 0o700
-		paths.Target = filepath.Join(home, ".config", "runner", "config.toml")
+		paths.Target = target
 	}
 	explicitSource, _ := c.Flags().GetString("config")
 	if explicitSource != "" {
@@ -171,15 +171,23 @@ func resolveConfigMigrationPaths(c *cobra.Command, user bool) (configMigrationPa
 		paths.Source = invocation.ConfigPath
 		paths.RemoveSource = isDefaultLegacyConfigPath(invocation.ConfigPath, user)
 	} else if user {
-		home, _ := os.UserHomeDir()
-		paths.Source = filepath.Join(home, ".config", "runscaler", "config.toml")
+		source, err := userConfigPath("runscaler")
+		paths.Source = source
+		if err != nil {
+			return paths, err
+		}
 		// Some user services historically referenced the system legacy config.
 		// It is safe to copy when readable, but a user migration must never try
 		// to remove a root-owned source.
 		if _, err := os.Stat(paths.Source); os.IsNotExist(err) {
-			if _, legacyErr := os.Stat(legacyConfigPath); legacyErr == nil {
-				paths.Source = legacyConfigPath
-				paths.RemoveSource = false
+			// Prefer the migrated user config on repeated runs. System paths
+			// are read-only fallbacks, including installs already named runner.
+			for _, candidate := range []string{paths.Target, legacyConfigPath, newConfigPath} {
+				if _, candidateErr := os.Stat(candidate); candidateErr == nil || !os.IsNotExist(candidateErr) {
+					paths.Source = candidate
+					paths.RemoveSource = false
+					break
+				}
 			}
 		}
 	} else {
@@ -314,8 +322,8 @@ func isDefaultLegacyConfigPath(path string, user bool) bool {
 	if !user {
 		return false
 	}
-	home, err := os.UserHomeDir()
-	return err == nil && sameFilePath(path, filepath.Join(home, ".config", "runscaler", "config.toml"))
+	legacy, err := userConfigPath("runscaler")
+	return err == nil && sameFilePath(path, legacy)
 }
 
 func printServiceMigrationPlan(user bool) {

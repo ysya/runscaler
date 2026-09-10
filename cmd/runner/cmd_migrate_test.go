@@ -345,6 +345,7 @@ func TestRollbackConfigMigration(t *testing.T) {
 func TestResolveConfigMigrationPathsUsesUserOwnedDefaults(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
 	c := &cobra.Command{Use: "migrate-test"}
 	c.Flags().String("config", "", "")
 	c.Flags().String("backup-dir", "", "")
@@ -408,6 +409,7 @@ ExecStart=/opt/runscaler --config=/srv/runner/config.toml
 func TestResolveConfigMigrationPathsDiscoversUserServiceConfig(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
 	customConfig := filepath.Join(home, "runner config.toml")
 	var servicePath string
 	var serviceData []byte
@@ -560,6 +562,7 @@ func TestRunMigrateRollsBackConfigWhenServiceCutoverFails(t *testing.T) {
 	fixMigrationIdentity(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
 	source := filepath.Join(home, ".config", "runscaler", "config.toml")
 	target := filepath.Join(home, ".config", "runner", "config.toml")
 	writeTestFile(t, source, validLegacyConfig(), 0o600)
@@ -596,6 +599,7 @@ func TestRunMigrateRemovesDefaultLegacyConfigOnlyAfterCutover(t *testing.T) {
 	fixMigrationIdentity(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
 	source := filepath.Join(home, ".config", "runscaler", "config.toml")
 	target := filepath.Join(home, ".config", "runner", "config.toml")
 	writeTestFile(t, source, validLegacyConfig(), 0o600)
@@ -635,6 +639,7 @@ func TestRunMigrateRemovesDefaultLegacyConfigOnlyAfterCutover(t *testing.T) {
 func TestNewServiceInstalledUserLevel(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
 
 	if newServiceInstalled(true) {
 		t.Error("should be false with no new unit/plist present")

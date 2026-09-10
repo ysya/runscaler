@@ -24,9 +24,13 @@ func loadConfig(cmd *cobra.Command) (config.Config, error) {
 	} else {
 		viper.SetConfigName("config")
 		viper.SetConfigType("toml")
-		viper.AddConfigPath(".")
-		viper.AddConfigPath("/etc/runner")
-		viper.AddConfigPath(legacyConfigDir) // legacy /etc/runscaler — deprecated
+		paths, err := configSearchPaths()
+		if err != nil {
+			return config.Config{}, err
+		}
+		for _, path := range paths {
+			viper.AddConfigPath(path)
+		}
 		if err := viper.ReadInConfig(); err != nil {
 			// A missing config is fine (single-mode via flags); anything else
 			// (parse error, permission denied) must surface.
@@ -36,8 +40,8 @@ func loadConfig(cmd *cobra.Command) (config.Config, error) {
 			}
 		}
 
-		if used := viper.ConfigFileUsed(); used != "" && filepath.Dir(used) == filepath.Clean(legacyConfigDir) {
-			warnLegacy("config loaded from legacy path %s — run 'runner migrate' or move it to /etc/runner", used)
+		if used := viper.ConfigFileUsed(); used != "" && isLegacyConfigFile(used) {
+			warnLegacy("config loaded from legacy path %s — run 'runner migrate' to migrate it", used)
 		}
 	}
 
@@ -76,4 +80,12 @@ func resolveLogFilePath(cfg config.Config) (string, bool) {
 		return filepath.Join(filepath.Dir(used), config.DefaultLogFileName), true
 	}
 	return config.DefaultLogFileName, true
+}
+
+func isLegacyConfigFile(path string) bool {
+	if filepath.Dir(path) == filepath.Clean(legacyConfigDir) {
+		return true
+	}
+	legacy, err := userConfigPath("runscaler")
+	return err == nil && sameFilePath(path, legacy)
 }

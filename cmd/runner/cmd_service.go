@@ -74,13 +74,14 @@ var serviceCmd = &cobra.Command{
 	Long: `Install, start, stop, and manage runner as a system service.
 
 On Linux, this uses systemd. On macOS, this uses launchd.
-By default, services are installed at the system level (requires root).
-Use --user for user-level services that don't require root.`,
-	Example: `  sudo runner service install              # Install as system service
+macOS defaults to user-level LaunchAgents (no root required).
+Linux defaults to system-level services. Use --user for user-level services
+or --user=false to explicitly manage a system-level service.`,
+	Example: `  sudo runner service install --user=false # Install as system service
   runner service install --user             # Install as user service
   runner service status                     # Show service status
   runner service logs -f                    # Follow service logs
-  sudo runner service uninstall             # Remove system service`,
+  sudo runner service uninstall --user=false # Remove system service`,
 }
 
 var serviceInstallCmd = &cobra.Command{
@@ -138,23 +139,23 @@ func init() {
 
 	// install flags
 	f := serviceInstallCmd.Flags()
-	f.Bool("user", false, "Install as user-level service (no root required)")
+	f.Bool("user", defaultUserService(), "Install as user-level service (no root required)")
 	f.String("config-path", "", "Config file path for the service (default: auto-detect)")
 	f.String("binary-path", "", "Path to runner binary (default: auto-detect)")
 	f.Bool("no-start", false, "Install and enable without starting")
 
 	// uninstall / start / stop / restart share --user
 	for _, c := range []*cobra.Command{serviceUninstallCmd, serviceStartCmd, serviceStopCmd, serviceRestartCmd} {
-		c.Flags().Bool("user", false, "Manage user-level service")
+		c.Flags().Bool("user", defaultUserService(), "Manage user-level service")
 	}
 
 	// logs flags
 	serviceLogsCmd.Flags().BoolP("follow", "f", false, "Follow log output")
 	serviceLogsCmd.Flags().IntP("lines", "n", 100, "Number of lines to show")
-	serviceLogsCmd.Flags().Bool("user", false, "Show user-level service logs")
+	serviceLogsCmd.Flags().Bool("user", defaultUserService(), "Show user-level service logs")
 
 	// status --user
-	serviceStatusCmd.Flags().Bool("user", false, "Show user-level service status")
+	serviceStatusCmd.Flags().Bool("user", defaultUserService(), "Show user-level service status")
 }
 
 // ── Handler functions ───────────────────────────────────────────────────
@@ -177,7 +178,10 @@ func runServiceInstall(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	configPath := resolveConfigPath(cmd)
+	configPath, err := resolveConfigPath(cmd)
+	if err != nil {
+		return err
+	}
 
 	// Verify binary exists
 	if _, err := os.Stat(binaryPath); err != nil {
@@ -629,7 +633,7 @@ func checkPrivileges(user bool) error {
 	}
 	if os.Geteuid() != 0 {
 		return fmt.Errorf("system-level service management requires root privileges\n\n" +
-			"  Run with sudo:  sudo runner service install\n" +
+			"  Run with sudo:  sudo runner service install --user=false\n" +
 			"  Or use --user:  runner service install --user")
 	}
 	return nil
@@ -646,23 +650,30 @@ func resolveBinaryPath(cmd *cobra.Command) (string, error) {
 	return filepath.EvalSymlinks(exe)
 }
 
-func resolveConfigPath(cmd *cobra.Command) string {
+func resolveConfigPath(cmd *cobra.Command) (string, error) {
 	if p, _ := cmd.Flags().GetString("config-path"); p != "" {
-		abs, err := filepath.Abs(p)
-		if err == nil {
-			return abs
-		}
-		return p
+		return filepath.Abs(p)
 	}
-	// Try the persistent --config flag
+	if p, _ := cmd.Flags().GetString("config"); p != "" {
+		return filepath.Abs(p)
+	}
 	if p := cmd.Root().PersistentFlags().Lookup("config"); p != nil && p.Value.String() != "" {
-		abs, err := filepath.Abs(p.Value.String())
-		if err == nil {
-			return abs
-		}
-		return p.Value.String()
+		return filepath.Abs(p.Value.String())
 	}
-	return defaultConfigPath
+	user, _ := cmd.Flags().GetBool("user")
+	if !user {
+		return defaultConfigPath, nil
+	}
+	path, err := userConfigPath("runner")
+	if err != nil {
+		return "", err
+	}
+	// Match the CLI's local-file precedence, without silently installing a user
+	// service against a system-owned config (whose adjacent log is not writable).
+	if _, err := os.Stat("config.toml"); err == nil || !os.IsNotExist(err) {
+		return filepath.Abs("config.toml")
+	}
+	return path, nil
 }
 
 func detectProvider(configPath string) string {

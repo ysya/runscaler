@@ -2,8 +2,10 @@ package main
 
 import (
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/spf13/cobra"
 
 	"github.com/ysya/runscaler/internal/config"
 )
@@ -422,5 +426,237 @@ func TestDetectDrainTimeoutPreservesUnsetAndExplicitZero(t *testing.T) {
 	}
 	if explicit == nil || *explicit != 0 {
 		t.Fatalf("explicit zero = %v, want non-nil zero", explicit)
+	}
+}
+
+func TestReadServiceConfig(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		t.Helper()
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	valid := write("valid.toml", "provider = \"tart\"\ndrain-timeout = \"3h\"\nlog-file = \"/var/log/custom/runner.log\"\n")
+	broken := write("broken.toml", "provider = \n")
+	missing := filepath.Join(dir, "missing.toml")
+
+	facts, err := readServiceConfig(valid, true)
+	if err != nil || !facts.found || facts.provider != "tart" ||
+		facts.drainTimeout == nil || *facts.drainTimeout != 3*time.Hour ||
+		facts.logFile == nil || *facts.logFile != "/var/log/custom/runner.log" {
+		t.Fatalf("valid config facts = %+v, %v", facts, err)
+	}
+	if _, err := readServiceConfig(broken, false); err == nil {
+		t.Fatal("a config with a syntax error was accepted")
+	}
+	if facts, err := readServiceConfig(missing, false); err != nil || facts.found {
+		t.Fatalf("missing optional config = %+v, %v", facts, err)
+	}
+	if _, err := readServiceConfig(missing, true); err == nil {
+		t.Fatal("a missing required config was accepted")
+	}
+}
+
+func TestBuildInstallOptsRecordsConfigFactsAndXDG(t *testing.T) {
+	dir := t.TempDir()
+	valid := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(valid, []byte("provider = \"tart\"\nlog-file = \"/var/log/custom/runner.log\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env := envFrom(map[string]string{"XDG_STATE_HOME": "/xdg/state", "XDG_CONFIG_HOME": "/xdg/config"})
+
+	opts, warnings, err := buildInstallOpts(true, valid, "/usr/local/bin/runner", true, env)
+	if err != nil || len(warnings) != 0 {
+		t.Fatalf("buildInstallOpts() warnings=%q err=%v", warnings, err)
+	}
+	if !opts.user || opts.configPath != valid || opts.binaryPath != "/usr/local/bin/runner" || opts.provider != "tart" ||
+		opts.logFile == nil || *opts.logFile != "/var/log/custom/runner.log" ||
+		opts.xdgStateHome != "/xdg/state" || opts.xdgConfigHome != "/xdg/config" {
+		t.Fatalf("installOpts = %+v", opts)
+	}
+
+	missing := filepath.Join(dir, "missing.toml")
+	if _, warnings, err := buildInstallOpts(true, missing, "/usr/local/bin/runner", false, env); err != nil || len(warnings) != 1 || !strings.Contains(warnings[0], "Config file not found") {
+		t.Fatalf("fresh install without config: warnings=%q err=%v", warnings, err)
+	}
+	if _, _, err := buildInstallOpts(true, missing, "/usr/local/bin/runner", true, env); err == nil {
+		t.Fatal("--force without a config was accepted")
+	}
+}
+
+func TestValidateServiceBinary(t *testing.T) {
+	safe := map[string]fileStat{
+		"/": rootDir(0o755), "/usr": rootDir(0o755), "/usr/local": rootDir(0o755),
+		"/usr/local/bin": rootDir(0o755), "/usr/local/bin/runner": {UID: 0, Mode: 0o755},
+	}
+	unsafe := map[string]fileStat{
+		"/": rootDir(0o755), "/home": rootDir(0o755), "/home/ada": {UID: 1000, Mode: fs.ModeDir | 0o755},
+		"/home/ada/runner": {UID: 1000, Mode: 0o755},
+	}
+	resolve := func(path string) (string, error) {
+		switch path {
+		case "/usr/local/bin/link":
+			return "/usr/local/bin/runner", nil
+		case "/missing":
+			return "", fs.ErrNotExist
+		}
+		return path, nil
+	}
+	tests := []struct {
+		name    string
+		goos    string
+		user    bool
+		path    string
+		stat    map[string]fileStat
+		want    string
+		wantErr string
+	}{
+		{name: "linux system resolves the symlink then passes", goos: "linux", path: "/usr/local/bin/link", stat: safe, want: "/usr/local/bin/runner"},
+		{name: "linux system user-owned binary", goos: "linux", path: "/home/ada/runner", stat: unsafe, wantErr: "sudo install -m 0755"},
+		{name: "linux user service skips the check", goos: "linux", user: true, path: "/home/ada/runner", stat: unsafe, want: "/home/ada/runner"},
+		{name: "unresolvable binary", goos: "linux", path: "/missing", stat: safe, wantErr: "resolve binary"},
+		{name: "system binary that is a directory", goos: "linux", path: "/usr/local/bin", stat: safe, wantErr: "not a regular file"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := validateServiceBinary(tt.goos, tt.user, tt.path, resolve, fakeStat(tt.stat))
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("validateServiceBinary() error = %v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil || got != tt.want {
+				t.Fatalf("validateServiceBinary() = %q, %v; want %q", got, err, tt.want)
+			}
+		})
+	}
+}
+
+func TestInstallServiceValidatesBeforeTouchingExistingDefinition(t *testing.T) {
+	var actions []string
+	installed, running := true, true
+	manager := &fakeMigrationServiceManager{actions: &actions, installed: &installed, running: &running}
+	opts := installOpts{binaryPath: "/home/ada/runner", configPath: "/etc/runner/config.toml", force: true}
+
+	err := installService(manager, opts, func(bool, string) (string, error) { return "", errors.New("unsafe binary") })
+	if err == nil || len(actions) != 0 {
+		t.Fatalf("failed validation: err=%v actions=%v, want no manager action", err, actions)
+	}
+
+	saved := renderServiceDefinition
+	t.Cleanup(func() { renderServiceDefinition = saved })
+	renderServiceDefinition = func(installOpts) (string, error) { return "", errors.New("render failed") }
+	err = installService(manager, opts, func(_ bool, p string) (string, error) { return p, nil })
+	if err == nil || len(actions) != 0 {
+		t.Fatalf("failed render: err=%v actions=%v, want no manager action", err, actions)
+	}
+
+	renderServiceDefinition = saved
+	err = installService(manager, opts, func(bool, string) (string, error) { return "/usr/local/bin/runner", nil })
+	if err != nil || strings.Join(actions, ",") != "install-new" || manager.installOpts.binaryPath != "/usr/local/bin/runner" {
+		t.Fatalf("valid install: err=%v actions=%v opts=%+v", err, actions, manager.installOpts)
+	}
+}
+
+func TestUninstallServicesRemovesLegacyDefinitions(t *testing.T) {
+	notInstalled := func(bool) error { return fmt.Errorf("%w (no unit file)", errServiceNotInstalled) }
+	removed := func(bool) error { return nil }
+	tests := []struct {
+		name        string
+		current     func(bool) error
+		legacy      bool
+		removeErr   error
+		wantLegacy  bool
+		wantErrIs   error
+		wantErrText string
+	}{
+		{name: "only legacy present", current: notInstalled, legacy: true, wantLegacy: true},
+		{name: "both present", current: removed, legacy: true, wantLegacy: true},
+		{name: "only current present", current: removed},
+		{name: "nothing installed", current: notInstalled, wantErrIs: errServiceNotInstalled},
+		{name: "legacy removal fails", current: removed, legacy: true, removeErr: errors.New("busy"), wantErrText: "busy"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotLegacy, err := uninstallServices(false, tt.current, func(bool) bool { return tt.legacy }, func(bool) error { return tt.removeErr })
+			if gotLegacy != tt.wantLegacy {
+				t.Errorf("removedLegacy = %v, want %v", gotLegacy, tt.wantLegacy)
+			}
+			switch {
+			case tt.wantErrIs != nil:
+				if !errors.Is(err, tt.wantErrIs) {
+					t.Errorf("err = %v, want %v", err, tt.wantErrIs)
+				}
+			case tt.wantErrText != "":
+				if err == nil || !strings.Contains(err.Error(), tt.wantErrText) {
+					t.Errorf("err = %v, want %q", err, tt.wantErrText)
+				}
+			case err != nil:
+				t.Errorf("err = %v, want nil", err)
+			}
+		})
+	}
+}
+
+func TestLaunchdServiceLogFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	current := filepath.Join(home, "Library", "Logs", "runner", "stderr.log")
+	legacy := filepath.Join(home, "Library", "Logs", "runner.log")
+	only := func(paths ...string) func(string) bool {
+		return func(p string) bool { return slices.Contains(paths, p) }
+	}
+	if path, note := launchdServiceLogFile(true, only(current, legacy)); path != current || note != "" {
+		t.Errorf("with the current log = %q, %q", path, note)
+	}
+	if path, note := launchdServiceLogFile(true, only(legacy)); path != legacy || !strings.Contains(note, "--force") {
+		t.Errorf("with only the legacy log = %q, %q", path, note)
+	}
+	if path, _ := launchdServiceLogFile(true, only()); path != "" {
+		t.Errorf("with no log = %q, want empty", path)
+	}
+}
+
+func TestStatusPrivilegeError(t *testing.T) {
+	if err := statusPrivilegeError("darwin", false, 501); err == nil || !strings.Contains(err.Error(), "sudo runner service status --user=false") {
+		t.Errorf("macOS system status as a user = %v", err)
+	}
+	for _, tc := range []struct {
+		goos string
+		user bool
+		euid int
+	}{{"darwin", true, 501}, {"darwin", false, 0}, {"linux", false, 1000}} {
+		if err := statusPrivilegeError(tc.goos, tc.user, tc.euid); err != nil {
+			t.Errorf("statusPrivilegeError(%+v) = %v, want nil", tc, err)
+		}
+	}
+}
+
+func TestResolveBinaryPathResolvesSymlinks(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "runner")
+	if err := os.WriteFile(real, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "runner-link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	c := &cobra.Command{}
+	c.Flags().String("binary-path", "", "")
+	if err := c.Flags().Set("binary-path", link); err != nil {
+		t.Fatal(err)
+	}
+	got, err := resolveBinaryPath(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, _ := filepath.EvalSymlinks(real)
+	if got != want {
+		t.Fatalf("resolveBinaryPath() = %q, want %q", got, want)
 	}
 }

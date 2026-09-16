@@ -2,7 +2,9 @@ package main
 
 import (
 	"encoding/xml"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -55,6 +57,7 @@ type installOpts struct {
 	configPath string
 	binaryPath string
 	noStart    bool
+	force      bool
 	provider   string
 	// nil means the config omitted drain-timeout and therefore inherits the
 	// compiled-in default; a non-nil zero explicitly disables draining.
@@ -156,6 +159,7 @@ func init() {
 	f.String("config-path", "", "Config file path for the service (default: auto-detect)")
 	f.String("binary-path", "", "Path to runner binary (default: auto-detect)")
 	f.Bool("no-start", false, "Install and enable without starting")
+	f.Bool("force", false, "Regenerate an existing service definition after validating the new one")
 
 	// uninstall / start / stop / restart share --user
 	for _, c := range []*cobra.Command{serviceUninstallCmd, serviceStartCmd, serviceStopCmd, serviceRestartCmd} {
@@ -173,54 +177,167 @@ func init() {
 
 // ── Handler functions ───────────────────────────────────────────────────
 
+var errServiceNotInstalled = errors.New("service not installed")
+
+// serviceConfigFacts are the parts of a config a service definition encodes.
+type serviceConfigFacts struct {
+	found        bool
+	provider     string
+	drainTimeout *time.Duration
+	logFile      *string
+}
+
+// readServiceConfig loads the facts a service definition depends on. A config
+// that exists must read and load; a missing one is allowed only when not
+// required.
+func readServiceConfig(configPath string, required bool) (serviceConfigFacts, error) {
+	facts := serviceConfigFacts{provider: platformDefaultProvider()}
+	if _, err := os.Stat(configPath); errors.Is(err, fs.ErrNotExist) {
+		if required {
+			return facts, fmt.Errorf("config %s does not exist", configPath)
+		}
+		return facts, nil
+	} else if err != nil {
+		return facts, fmt.Errorf("inspect config %s: %w", configPath, err)
+	}
+	v := viper.New()
+	v.SetConfigFile(configPath)
+	if err := v.ReadInConfig(); err != nil {
+		return facts, fmt.Errorf("read config %s: %w", configPath, err)
+	}
+	cfg, err := config.Load(v)
+	if err != nil {
+		return facts, fmt.Errorf("load config %s: %w", configPath, err)
+	}
+	facts.found = true
+	facts.drainTimeout = cfg.DrainTimeout
+	facts.logFile = cfg.LogFile
+	if sets := cfg.ResolveScaleSets(); len(sets) > 0 {
+		facts.provider = "tart"
+		for _, ss := range sets {
+			if !ss.IsTart() {
+				facts.provider = config.DefaultProvider
+				break
+			}
+		}
+	}
+	return facts, nil
+}
+
+// buildInstallOpts gathers everything a service definition depends on from
+// one read of the config. A missing config is only a warning for a fresh
+// install; --force and migration require one.
+func buildInstallOpts(user bool, configPath, binaryPath string, requireConfig bool, getenv func(string) string) (installOpts, []string, error) {
+	facts, err := readServiceConfig(configPath, requireConfig)
+	if err != nil {
+		return installOpts{}, nil, err
+	}
+	var warnings []string
+	if !facts.found {
+		warnings = append(warnings, fmt.Sprintf("Config file not found at %s; run 'runner init' to generate one first", configPath))
+	}
+	if !user && runtime.GOOS == "linux" {
+		if _, warning := systemdLogsDirectory(facts.logFile); warning != "" {
+			warnings = append(warnings, warning)
+		}
+	}
+	return installOpts{
+		user:          user,
+		configPath:    configPath,
+		binaryPath:    binaryPath,
+		provider:      facts.provider,
+		drainTimeout:  facts.drainTimeout,
+		logFile:       facts.logFile,
+		xdgConfigHome: getenv("XDG_CONFIG_HOME"),
+		xdgStateHome:  getenv("XDG_STATE_HOME"),
+	}, warnings, nil
+}
+
 func runServiceInstall(cmd *cobra.Command, _ []string) error {
 	user, _ := cmd.Flags().GetBool("user")
 	noStart, _ := cmd.Flags().GetBool("no-start")
+	force, _ := cmd.Flags().GetBool("force")
 
+	if err := refuseDarwinRoot(runtime.GOOS, os.Geteuid(), "install the runner service", pathExists); err != nil {
+		return err
+	}
 	if err := checkPrivileges(user); err != nil {
 		return err
 	}
-
 	mgr, err := newServiceManager()
 	if err != nil {
 		return err
 	}
-
 	binaryPath, err := resolveBinaryPath(cmd)
 	if err != nil {
 		return err
 	}
-
 	configPath, err := resolveConfigPath(cmd)
 	if err != nil {
 		return err
 	}
-
-	// Verify binary exists
-	if _, err := os.Stat(binaryPath); err != nil {
-		return fmt.Errorf("binary not found at %s: %w", binaryPath, err)
-	}
-
-	// Warn if config doesn't exist
-	if _, err := os.Stat(configPath); err != nil {
-		fmt.Fprintf(os.Stderr, "  ⚠ Config file not found at %s\n", configPath)
-		fmt.Fprintf(os.Stderr, "    Run 'runner init' to generate one first.\n\n")
-	}
-
-	providerName := detectProvider(configPath)
-	drainTimeout, err := detectDrainTimeout(configPath)
+	opts, warnings, err := buildInstallOpts(user, configPath, binaryPath, force, os.Getenv)
 	if err != nil {
 		return err
 	}
+	for _, w := range warnings {
+		fmt.Fprintf(os.Stderr, "  ⚠ %s\n", w)
+	}
+	opts.noStart = noStart
+	opts.force = force
+	return installService(mgr, opts, validateServiceBinaryFor)
+}
 
-	return mgr.install(installOpts{
-		user:         user,
-		configPath:   configPath,
-		binaryPath:   binaryPath,
-		noStart:      noStart,
-		provider:     providerName,
-		drainTimeout: drainTimeout,
-	})
+// renderServiceDefinition renders what install would write, so every render
+// failure surfaces before an existing service is touched.
+var renderServiceDefinition = func(opts installOpts) (string, error) {
+	if runtime.GOOS == "darwin" {
+		return renderLaunchdPlist(opts)
+	}
+	return renderSystemdUnit(opts)
+}
+
+// installService validates the binary and renders the definition before the
+// manager writes anything, so a failed --force leaves the installed service
+// as it was. Every entry point that installs a service goes through here.
+func installService(mgr serviceManager, opts installOpts, validateBinary func(user bool, path string) (string, error)) error {
+	binaryPath, err := validateBinary(opts.user, opts.binaryPath)
+	if err != nil {
+		return err
+	}
+	opts.binaryPath = binaryPath
+	if _, err := renderServiceDefinition(opts); err != nil {
+		return err
+	}
+	return mgr.install(opts)
+}
+
+// validateServiceBinary resolves the binary a service will run and, for a
+// system service on Linux, requires that only root can change it: a root
+// service executing a user-writable file hands that user root.
+func validateServiceBinary(goos string, user bool, path string, evalSymlinks func(string) (string, error), stat statFunc) (string, error) {
+	resolved, err := evalSymlinks(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve binary %s: %w", path, err)
+	}
+	if user || goos != "linux" {
+		return resolved, nil
+	}
+	st, err := stat(resolved)
+	if err != nil {
+		return "", fmt.Errorf("inspect binary %s: %w", resolved, err)
+	}
+	if !st.Mode.IsRegular() {
+		return "", fmt.Errorf("binary %s is not a regular file", resolved)
+	}
+	if err := checkRootOnlyChain(resolved, stat); err != nil {
+		return "", fmt.Errorf("a system service must run a binary only root can modify: %w\n\n  Install it to a root-owned directory first:\n    sudo install -m 0755 %s /usr/local/bin/runner\n    sudo /usr/local/bin/runner service install --user=false --binary-path /usr/local/bin/runner", err, shellQuotePath(resolved))
+	}
+	return resolved, nil
+}
+
+func validateServiceBinaryFor(user bool, path string) (string, error) {
+	return validateServiceBinary(runtime.GOOS, user, path, filepath.EvalSymlinks, lstatFile)
 }
 
 func runServiceUninstall(cmd *cobra.Command, _ []string) error {
@@ -232,11 +349,34 @@ func runServiceUninstall(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	return mgr.uninstall(user)
+	removedLegacy, err := uninstallServices(user, mgr.uninstall, legacyServiceInstalled, removeLegacyServiceFile)
+	if removedLegacy {
+		fmt.Printf("  ✓ Legacy runscaler service removed\n")
+	}
+	return err
+}
+
+// uninstallServices removes runner's service and any pre-rename definition at
+// the same level; finding only the legacy one is not an error.
+func uninstallServices(user bool, uninstallCurrent func(bool) error, legacyInstalled func(bool) bool, removeLegacy func(bool) error) (removedLegacy bool, err error) {
+	currentErr := uninstallCurrent(user)
+	if legacyInstalled(user) {
+		if err := removeLegacy(user); err != nil {
+			return false, errors.Join(currentErr, fmt.Errorf("remove legacy service: %w", err))
+		}
+		removedLegacy = true
+	}
+	if removedLegacy && errors.Is(currentErr, errServiceNotInstalled) {
+		return true, nil
+	}
+	return removedLegacy, currentErr
 }
 
 func runServiceStart(cmd *cobra.Command, _ []string) error {
 	user, _ := cmd.Flags().GetBool("user")
+	if err := refuseDarwinRoot(runtime.GOOS, os.Geteuid(), "start the runner service", pathExists); err != nil {
+		return err
+	}
 	if err := checkPrivileges(user); err != nil {
 		return err
 	}
@@ -261,6 +401,9 @@ func runServiceStop(cmd *cobra.Command, _ []string) error {
 
 func runServiceRestart(cmd *cobra.Command, _ []string) error {
 	user, _ := cmd.Flags().GetBool("user")
+	if err := refuseDarwinRoot(runtime.GOOS, os.Geteuid(), "restart the runner service", pathExists); err != nil {
+		return err
+	}
 	if err := checkPrivileges(user); err != nil {
 		return err
 	}
@@ -273,11 +416,35 @@ func runServiceRestart(cmd *cobra.Command, _ []string) error {
 
 func runServiceStatus(cmd *cobra.Command, _ []string) error {
 	user, _ := cmd.Flags().GetBool("user")
+	if err := statusPrivilegeError(runtime.GOOS, user, os.Geteuid()); err != nil {
+		return err
+	}
 	mgr, err := newServiceManager()
 	if err != nil {
 		return err
 	}
 	return mgr.status(user)
+}
+
+// statusPrivilegeError explains that launchctl's legacy list only shows
+// system services to root.
+func statusPrivilegeError(goos string, user bool, euid int) error {
+	if goos == "darwin" && !user && euid != 0 {
+		return errors.New("launchctl lists system services only to root; run: sudo runner service status --user=false")
+	}
+	return nil
+}
+
+// launchdServiceLogFile prefers the current stderr log and falls back to the
+// combined log of plists generated by older releases.
+func launchdServiceLogFile(user bool, exists func(string) bool) (path, note string) {
+	if current := launchdStderrPath(user); exists(current) {
+		return current, ""
+	}
+	if legacy := launchdLegacyLogPath(user); exists(legacy) {
+		return legacy, fmt.Sprintf("  ⚠ Showing %s from a service generated by an older runner; regenerate it with 'runner service install --force' to log to %s", legacy, launchdStderrPath(user))
+	}
+	return "", ""
 }
 
 func runServiceLogs(cmd *cobra.Command, _ []string) error {
@@ -467,37 +634,39 @@ func (m *systemdManager) install(opts installOpts) error {
 
 	unitPath := filepath.Join(unitDir, systemdUnitFile)
 
-	// Check if already installed
-	if _, err := os.Stat(unitPath); err == nil {
-		return fmt.Errorf("service already installed at %s\n\n  Run 'runner service uninstall' first", unitPath)
+	_, statErr := os.Stat(unitPath)
+	existed := statErr == nil
+	if existed && !opts.force {
+		return fmt.Errorf("service already installed at %s\n\n  Regenerate it in place with --force", unitPath)
 	}
 
 	unit, err := renderSystemdUnit(opts)
 	if err != nil {
 		return fmt.Errorf("failed to render unit template: %w", err)
 	}
-	if err := os.WriteFile(unitPath, []byte(unit), 0644); err != nil {
+	if err := writeFileAtomic(unitPath, []byte(unit), 0o644); err != nil {
 		return fmt.Errorf("failed to write unit file: %w", err)
 	}
 	fmt.Printf("  ✓ Service file installed at %s\n", unitPath)
 
-	// daemon-reload, enable, start
 	userFlag := systemdUserFlag(opts.user)
-
 	if err := runCmd("systemctl", append(userFlag, "daemon-reload")...); err != nil {
 		return fmt.Errorf("systemctl daemon-reload failed: %w", err)
 	}
-
 	if err := runCmd("systemctl", append(userFlag, "enable", serviceName)...); err != nil {
 		return fmt.Errorf("systemctl enable failed: %w", err)
 	}
 	fmt.Printf("  ✓ Service enabled\n")
 
 	if !opts.noStart {
-		if err := runCmd("systemctl", append(userFlag, "start", serviceName)...); err != nil {
-			return fmt.Errorf("systemctl start failed: %w", err)
+		action := "start"
+		if existed {
+			action = "restart"
 		}
-		fmt.Printf("  ✓ Service started\n")
+		if err := runCmd("systemctl", append(userFlag, action, serviceName)...); err != nil {
+			return fmt.Errorf("systemctl %s failed: %w", action, err)
+		}
+		fmt.Printf("  ✓ Service %sed\n", action)
 	}
 
 	fmt.Printf("\n  Next steps:\n")
@@ -515,7 +684,7 @@ func removeSystemdUnit(user bool, unitFile, svcName string) error {
 	}
 	unitPath := filepath.Join(unitDir, unitFile)
 	if _, err := os.Stat(unitPath); os.IsNotExist(err) {
-		return fmt.Errorf("service not installed (no unit file at %s)", unitPath)
+		return fmt.Errorf("%w (no unit file at %s)", errServiceNotInstalled, unitPath)
 	}
 	userFlag := systemdUserFlag(user)
 	_ = runCmd("systemctl", append(userFlag, "stop", svcName)...)
@@ -654,6 +823,16 @@ func launchdStderrPath(user bool) string {
 	return "/var/log/runner/stderr.log"
 }
 
+// launchdLegacyLogPath is the combined stdout and stderr file of plists
+// generated before stdout was discarded.
+func launchdLegacyLogPath(user bool) string {
+	if user {
+		home, _ := os.UserHomeDir()
+		return filepath.Join(home, "Library", "Logs", "runner.log")
+	}
+	return "/var/log/runner.log"
+}
+
 func (m *launchdManager) plistPath(user bool) string {
 	if user {
 		home, _ := os.UserHomeDir()
@@ -676,21 +855,25 @@ func (m *launchdManager) install(opts installOpts) error {
 		return fmt.Errorf("failed to create log directory: %w", err)
 	}
 
-	// Check if already installed
-	if _, err := os.Stat(plist); err == nil {
-		return fmt.Errorf("service already installed at %s\n\n  Run 'runner service uninstall' first", plist)
+	_, statErr := os.Stat(plist)
+	existed := statErr == nil
+	if existed && !opts.force {
+		return fmt.Errorf("service already installed at %s\n\n  Regenerate it in place with --force", plist)
 	}
 
 	rendered, err := renderLaunchdPlist(opts)
 	if err != nil {
 		return fmt.Errorf("failed to render plist template: %w", err)
 	}
-	if err := os.WriteFile(plist, []byte(rendered), 0644); err != nil {
+	if err := writeFileAtomic(plist, []byte(rendered), 0o644); err != nil {
 		return fmt.Errorf("failed to write plist file: %w", err)
 	}
 	fmt.Printf("  ✓ Service file installed at %s\n", plist)
 
 	if !opts.noStart {
+		if existed {
+			_ = runCmd("launchctl", "unload", plist)
+		}
 		if err := runCmd("launchctl", "load", "-w", plist); err != nil {
 			return fmt.Errorf("launchctl load failed: %w", err)
 		}
@@ -706,7 +889,7 @@ func (m *launchdManager) install(opts installOpts) error {
 // removeLaunchdPlist unloads and removes a launchd plist at the given path.
 func removeLaunchdPlist(plistPath string) error {
 	if _, err := os.Stat(plistPath); os.IsNotExist(err) {
-		return fmt.Errorf("service not installed (no plist at %s)", plistPath)
+		return fmt.Errorf("%w (no plist at %s)", errServiceNotInstalled, plistPath)
 	}
 	_ = runCmd("launchctl", "unload", plistPath)
 	if err := os.Remove(plistPath); err != nil {
@@ -744,9 +927,12 @@ func (m *launchdManager) status(_ bool) error {
 }
 
 func (m *launchdManager) logs(user bool, follow bool, lines int) error {
-	logFile := launchdStderrPath(user)
-	if _, err := os.Stat(logFile); os.IsNotExist(err) {
-		return fmt.Errorf("log file not found at %s", logFile)
+	logFile, note := launchdServiceLogFile(user, pathExists)
+	if logFile == "" {
+		return fmt.Errorf("service log not found at %s", launchdStderrPath(user))
+	}
+	if note != "" {
+		fmt.Fprintln(os.Stderr, note)
 	}
 	args := []string{"-n", fmt.Sprintf("%d", lines)}
 	if follow {
@@ -770,15 +956,26 @@ func checkPrivileges(user bool) error {
 	return nil
 }
 
+// resolveBinaryPath returns the real file the service will execute; the
+// security check must see the same file the definition runs.
 func resolveBinaryPath(cmd *cobra.Command) (string, error) {
-	if p, _ := cmd.Flags().GetString("binary-path"); p != "" {
-		return filepath.Abs(p)
+	path, _ := cmd.Flags().GetString("binary-path")
+	if path == "" {
+		exe, err := os.Executable()
+		if err != nil {
+			return "", fmt.Errorf("cannot detect binary path: %w (use --binary-path)", err)
+		}
+		path = exe
 	}
-	exe, err := os.Executable()
+	abs, err := filepath.Abs(path)
 	if err != nil {
-		return "", fmt.Errorf("cannot detect binary path: %w (use --binary-path)", err)
+		return "", err
 	}
-	return filepath.EvalSymlinks(exe)
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return "", fmt.Errorf("resolve binary %s: %w", abs, err)
+	}
+	return resolved, nil
 }
 
 func resolveConfigPath(cmd *cobra.Command) (string, error) {

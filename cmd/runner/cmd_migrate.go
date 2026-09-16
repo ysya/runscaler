@@ -434,16 +434,7 @@ func defaultMigrationServiceDeps() migrationServiceDeps {
 		detectDrain:       detectDrainTimeout,
 		stopLegacy:        stopLegacyService,
 		startLegacy:       startLegacyService,
-		removeLegacyFile: func(user bool) error {
-			switch runtime.GOOS {
-			case "linux":
-				return removeSystemdUnit(user, legacySystemdUnit, legacyServiceName)
-			case "darwin":
-				return removeLaunchdPlist(legacyLaunchdPlistPath(user))
-			default:
-				return fmt.Errorf("unsupported platform: %s", runtime.GOOS)
-			}
-		},
+		removeLegacyFile:  removeLegacyServiceFile,
 	}
 }
 

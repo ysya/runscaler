@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -43,6 +44,9 @@ func init() {
 }
 
 func runInit(cmd *cobra.Command, args []string) error {
+	if err := refuseDarwinRoot(runtime.GOOS, os.Geteuid(), "write the runner config", pathExists); err != nil {
+		return err
+	}
 	output, _ := cmd.Flags().GetString("output")
 	id := layout.CurrentIdentity()
 	if output == "" {

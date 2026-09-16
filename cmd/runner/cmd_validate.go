@@ -103,7 +103,7 @@ func runValidate(cmd *cobra.Command, args []string) error {
 	if needsTart {
 		if _, err := exec.LookPath("tart"); err != nil {
 			fmt.Println("  ✗ Tart binary not found in PATH")
-			fmt.Println("\n  Install Tart: brew install cirruslabs/cli/tart")
+			fmt.Println("\n  Install Tart: brew install openai/tools/tart")
 			return fmt.Errorf("validation failed")
 		}
 		fmt.Println("  ✓ Tart binary found")

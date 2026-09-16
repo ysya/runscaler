@@ -375,7 +375,7 @@ func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) e
 		tartCoordinator = provider.NewTartHostCoordinator(2)
 		if _, err := exec.LookPath("tart"); err != nil {
 			return fmt.Errorf("tart binary not found in PATH: %w\n\n"+
-				"  Install Tart: brew install cirruslabs/cli/tart", err)
+				"  Install Tart: brew install openai/tools/tart", err)
 		}
 		logger.Info("Tart provider enabled")
 

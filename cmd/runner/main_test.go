@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"strings"
@@ -13,7 +15,25 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/ysya/runscaler/internal/config"
+	runnerlock "github.com/ysya/runscaler/internal/lock"
 )
+
+func TestExplainLockError(t *testing.T) {
+	readOnly := explainLockError(fmt.Errorf("open runner lock /tmp/runner.lock: %w", syscall.EROFS))
+	if !errors.Is(readOnly, syscall.EROFS) || !strings.Contains(readOnly.Error(), "sudo runner service install --user=false") {
+		t.Errorf("read-only lock error should keep its cause and point at a service reinstall:\n%v", readOnly)
+	}
+
+	held := explainLockError(&runnerlock.AlreadyRunningError{Path: "/tmp/runner.lock"})
+	if !errors.Is(held, runnerlock.ErrAlreadyRunning) || !strings.Contains(held.Error(), "Only one runner may run per machine") {
+		t.Errorf("held lock error should keep its cause and explain the single-instance rule:\n%v", held)
+	}
+
+	other := errors.New("permission denied")
+	if got := explainLockError(other); got != other {
+		t.Errorf("unrelated lock error = %v, want it unchanged", got)
+	}
+}
 
 func TestHandleShutdownSignals_DrainsThenCancelsThenForces(t *testing.T) {
 	ctx, stop := context.WithCancel(context.Background())

@@ -123,6 +123,7 @@ func init() {
 }
 
 func main() {
+	ensureHomebrewPath()
 	if err := cmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
@@ -144,10 +145,7 @@ var startManager = func(cmd *cobra.Command) error {
 		ConfigPath: viper.ConfigFileUsed(),
 	})
 	if err != nil {
-		if errors.Is(err, runnerlock.ErrAlreadyRunning) {
-			return fmt.Errorf("%w\n\n  Only one runner may run per machine.\n  To manage multiple organizations, use multiple [[scaleset]] entries in one config", err)
-		}
-		return err
+		return explainLockError(err)
 	}
 	defer releaseLock()
 
@@ -167,6 +165,20 @@ var startManager = func(cmd *cobra.Command) error {
 	})
 
 	return runManager(runCtx, cfg, drain)
+}
+
+// explainLockError adds the operator action to lock failures that have one.
+func explainLockError(err error) error {
+	switch {
+	case errors.Is(err, runnerlock.ErrAlreadyRunning):
+		return fmt.Errorf("%w\n\n  Only one runner may run per machine.\n  To manage multiple organizations, use multiple [[scaleset]] entries in one config", err)
+	case errors.Is(err, syscall.EROFS):
+		// A binary update cannot rewrite an installed unit, and system units
+		// from older releases keep /tmp read-only under ProtectSystem=strict.
+		return fmt.Errorf("%w\n\n  If this is a systemd service installed by an older runner, reinstall it:\n    sudo runner service uninstall --user=false\n    sudo runner service install --user=false", err)
+	default:
+		return err
+	}
 }
 
 // handleShutdownSignals implements the three-stage shutdown sequence.

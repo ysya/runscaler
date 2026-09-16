@@ -129,6 +129,12 @@ func runMigrate(c *cobra.Command, _ []string) error {
 					err = errors.Join(err, fmt.Errorf("config rollback failed: %w", rollbackErr))
 				}
 			}
+			var ub *untrustedBinaryError
+			if errors.As(err, &ub) {
+				configFlag, _ := c.Flags().GetString("config")
+				backupDirFlag, _ := c.Flags().GetString("backup-dir")
+				return fmt.Errorf("service migration failed: %w%s", err, untrustedBinaryHint(ub.Path, migrateRetryCommand(user, configFlag, backupDirFlag, cleanup)))
+			}
 			return fmt.Errorf("service migration failed: %w", err)
 		}
 		if migratedSvc {
@@ -164,6 +170,27 @@ func runMigrate(c *cobra.Command, _ []string) error {
 		fmt.Println("  ✓ Nothing to migrate")
 	}
 	return nil
+}
+
+// migrateRetryCommand reruns migrate with the root-only copy of the binary and
+// the options of the failed run; an empty path is an option that was not set.
+func migrateRetryCommand(user bool, configPath, backupDir string, cleanup bool) string {
+	parts := []string{"sudo", rootBinaryPath, "migrate"}
+	if user {
+		parts = append(parts, "--user")
+	} else {
+		parts = append(parts, "--user=false")
+	}
+	if configPath != "" {
+		parts = append(parts, "--config", shellQuotePath(configPath))
+	}
+	if backupDir != "" {
+		parts = append(parts, "--backup-dir", shellQuotePath(backupDir))
+	}
+	if cleanup {
+		parts = append(parts, "--cleanup")
+	}
+	return strings.Join(parts, " ")
 }
 
 func resolveConfigMigrationPaths(c *cobra.Command, user bool) (configMigrationPaths, error) {

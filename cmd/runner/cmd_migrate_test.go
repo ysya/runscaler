@@ -610,6 +610,32 @@ func TestMigrateScopeError(t *testing.T) {
 	}
 }
 
+func TestMigrateRetryCommand(t *testing.T) {
+	tests := []struct {
+		name      string
+		user      bool
+		config    string
+		backupDir string
+		cleanup   bool
+		want      string
+	}{
+		{name: "system scope", want: "sudo /usr/local/bin/runner migrate --user=false"},
+		{name: "system scope with --config", config: "/srv/runscaler/my config.toml", want: "sudo /usr/local/bin/runner migrate --user=false --config '/srv/runscaler/my config.toml'"},
+		{
+			name: "user scope with every option", user: true,
+			config: "/root/runscaler.toml", backupDir: "/var/backups/runner", cleanup: true,
+			want: "sudo /usr/local/bin/runner migrate --user --config '/root/runscaler.toml' --backup-dir '/var/backups/runner' --cleanup",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := migrateRetryCommand(tt.user, tt.config, tt.backupDir, tt.cleanup); got != tt.want {
+				t.Errorf("migrateRetryCommand() = %q\nwant %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestRunMigrateRollsBackConfigWhenServiceCutoverFails(t *testing.T) {
 	fixMigrationIdentity(t)
 	home := t.TempDir()
@@ -645,6 +671,50 @@ func TestRunMigrateRollsBackConfigWhenServiceCutoverFails(t *testing.T) {
 	backups, err := filepath.Glob(filepath.Join(home, ".local", "state", "runner", "backups", "*.bak"))
 	if err != nil || len(backups) != 1 {
 		t.Fatalf("backups after rollback = %v, %v; want one retained backup", backups, err)
+	}
+}
+
+func TestRunMigrateAppendsRetryHintForUntrustedBinary(t *testing.T) {
+	fixMigrationIdentity(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("XDG_STATE_HOME", "")
+	source := filepath.Join(home, "legacy config.toml")
+	backupDir := filepath.Join(home, "backups")
+	writeTestFile(t, source, validLegacyConfig(), 0o600)
+
+	originalMigrateService := migrateServiceForCommand
+	migrateServiceForCommand = func(bool, string) (bool, bool, error) {
+		return false, false, &untrustedBinaryError{
+			Path: "/home/ada/runner",
+			Err:  &untrustedPathError{Path: "/home/ada/runner", Reason: "is owned by uid 1000, not root"},
+		}
+	}
+	t.Cleanup(func() { migrateServiceForCommand = originalMigrateService })
+
+	c := &cobra.Command{Use: "migrate-test"}
+	c.Flags().Bool("user", true, "")
+	c.Flags().Bool("dry-run", false, "")
+	c.Flags().Bool("cleanup", false, "")
+	c.Flags().String("config", "", "")
+	c.Flags().String("backup-dir", "", "")
+	for flag, value := range map[string]string{"config": source, "backup-dir": backupDir, "cleanup": "true"} {
+		if err := c.Flags().Set(flag, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	err := runMigrate(c, nil)
+	var untrusted *untrustedBinaryError
+	if !errors.As(err, &untrusted) {
+		t.Fatalf("runMigrate error = %v, want it to keep the untrusted binary error", err)
+	}
+	want := "service migration failed: a service that runs as root must run a binary only root can modify: /home/ada/runner is owned by uid 1000, not root" +
+		"\n\n  Install a copy only root can modify, then retry:\n" +
+		"    sudo install -m 0755 '/home/ada/runner' /usr/local/bin/runner\n" +
+		"    sudo /usr/local/bin/runner migrate --user --config " + shellQuotePath(source) + " --backup-dir " + shellQuotePath(backupDir) + " --cleanup"
+	if err.Error() != want {
+		t.Fatalf("runMigrate error = %q\nwant %q", err, want)
 	}
 }
 

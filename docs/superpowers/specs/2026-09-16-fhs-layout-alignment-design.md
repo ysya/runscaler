@@ -1,7 +1,7 @@
 # 設計：目錄配置對齊業界慣例（FHS / XDG / Apple）
 
 日期：2026-09-16（2026-09-17 依第二次審查修訂）
-狀態：設計已確認（含兩次 Codex 審查後修訂），待實作
+狀態：已實作（v0.10.0）
 取代：`2026-08-12-single-instance-lock-and-logs-design.md` 的「B. 自有 log 檔」中「預設寫在 config 檔旁」的決定（log 檔本身、輪替、`runner logs` 維持）
 
 ## 背景與動機
@@ -38,7 +38,7 @@
 1. runner 的 config、log、備份、binary 位置依執行身分遵循平台慣例
 2. Linux system service 在 `ProtectSystem=strict` 下能正常運作，且 `/etc/runner` 對 service 唯讀
 3. macOS 只支援一般使用者執行與 LaunchAgent；launchd 下找得到 tart、不再重複寫入完整 log
-4. system service 只執行 root 擁有、一般使用者無法改寫的 binary；root 寫 log 時，任何上層目錄被替換都無法導走寫入
+4. 以 root 執行的 service 只執行 root 擁有、一般使用者無法改寫的 binary；root 寫 log 時，任何上層目錄被替換都無法導走寫入
 5. root 與一般使用者輪流執行時，machine-wide lock 仍能運作
 6. 提醒過舊的 service 範本與不足的停止逾時，並提供驗證失敗時不動既有服務的重裝方式
 7. 所有會安裝 service 的入口（`service install`、`migrate`）產生相同的定義
@@ -75,7 +75,7 @@
 4. **config 搜尋順序不變**：目前目錄 → 使用者 config 目錄 → `/etc/runner` → 舊版位置。任何位置的 config 仍可用 `--config` 指定（例如 `~/runner/config.toml`）。`XDG_CONFIG_HOME` 為絕對路徑時，解析使用者 config 目錄不需要 `$HOME`（維持現況）。
 5. **lock 維持 `/tmp/runner.lock`**：root 的 service 與使用者手動執行必須搶同一把鎖；macOS 沒有 `/run` 與 `/var/lock`（本機實測），`/tmp` 是兩平台所有身分皆可寫之處。跨身分的開檔方式見 D.2。
 6. **macOS 的 root（effective UID 0，不論 `--user` 為何）**：
-   - 拒絕：`runner run`、`service install|start|restart`、`migrate`（任何 scope）
+   - 拒絕：`runner run`、`init`、`service install|start|restart`、`migrate`（任何 scope）
    - 允許：`service uninstall|stop|status|logs --user=false`，讓既有 LaunchDaemon 可被清除
 
 ### B. `internal/layout`（新套件）
@@ -163,17 +163,19 @@ ReadWritePaths=/tmp
 所有會安裝 service 的入口（`runner service install`、`runner migrate`）共用：
 
 1. **安裝參數準備**（`buildInstallOpts`）：一次讀取 config，得出 provider、`drain-timeout`、`log-file`，並帶入安裝當下的 XDG 變數。config 存在但無法讀取、語法錯誤或載入失敗時一律中止；config 不存在時，全新安裝只警告，`--force` 與 migrate 則中止
-2. **binary 驗證**（`validateServiceBinary`）：binary 路徑一律 `EvalSymlinks` 成真實路徑（解析失敗即中止）。Linux system scope 另要求真實路徑為 regular file，且它本身與每一層上層目錄直到 `/` 皆通過 `pathtrust.Problem`。寫進定義的就是檢查過的真實路徑
+2. **binary 驗證**（`validateServiceBinary`）：binary 路徑一律 `EvalSymlinks` 成真實路徑（解析失敗即中止）。Linux 上以 root 執行的 service（system scope，或由 root 安裝的 user scope）另要求真實路徑為 regular file，且它本身與每一層上層目錄直到 `/` 皆通過 `pathtrust.Problem`。寫進定義的就是檢查過的真實路徑
 3. **產生定義**：在寫入任何檔案前完成 render（含 C.1 的跳脫檢查）
 
 以上任一步失敗時不呼叫 service manager，既有定義保持原樣。binary 不符合時訊息列出違規路徑與原因，並提示：
 
 ```
 sudo install -m 0755 <binary> /usr/local/bin/runner
-sudo /usr/local/bin/runner service install --user=false --binary-path /usr/local/bin/runner
+sudo /usr/local/bin/runner service install <原本的 scope> [--force] [--no-start] --config-path <config> --binary-path /usr/local/bin/runner
 ```
 
-只在安裝 system service 時檢查 binary：常駐的 service 才是提權管道，手動 `sudo runner run` 的人本來就有 sudo。
+migrate 時第二行改為以 `/usr/local/bin/runner` 重跑相同選項的 `migrate`。
+
+只在安裝以 root 執行的 service 時檢查 binary：常駐的 root service 才是提權管道，手動 `sudo runner run` 的人本來就有 sudo。
 
 #### C.4 `service install --force` 與其他 service 指令
 
@@ -219,6 +221,8 @@ lock 是防止誤啟動第二個實例的安全網，不是安全邊界：本機
 - **提醒內容**：附上可直接執行的單一指令，帶入目前實際使用的 config（絕對路徑）與 binary（解析後）：
   - root：`sudo <binary> service install --user=false --force --config-path <config> --binary-path <binary>`
   - 使用者：`<binary> service install --user --force --config-path <config> --binary-path <binary>`
+  - 同一層級仍有舊版（runscaler）定義時，改為提示 `runner migrate`（root 加 `sudo` 與 `--user=false`，使用者加 `--user`）
+  - root 執行且目前的 binary 不是只有 root 能改時，改為一行兩步驟：先 `sudo install -m 0755 <binary> /usr/local/bin/runner`，再以 `/usr/local/bin/runner` 執行上述 `--force` 指令
 - 兩者皆通過時不輸出任何提醒
 
 #### D.4 `runner logs`
@@ -247,7 +251,7 @@ lock 是防止誤啟動第二個實例的安全網，不是安全邊界：本機
 
 | 既有狀態 | 升級新 binary 後 | 操作者要做的事 |
 |---|---|---|
-| Linux system unit | lock 開檔失敗，錯誤訊息附重裝指令 | 把 binary 放到 root 擁有的 `/usr/local/bin`，執行 `sudo /usr/local/bin/runner service install --user=false --force --config-path <config>` |
+| Linux system unit | lock 開檔失敗，錯誤訊息附重裝指令 | 執行印出的指令（binary 不是 root 專屬時，指令會先安裝一份到 `/usr/local/bin`） |
 | Linux user unit | 照常執行；log 改寫新位置；D.3 提醒 | 依提醒執行 `--force` 重裝 |
 | macOS LaunchAgent | 照常執行；log 改寫新位置；D.3 提醒 | 依提醒執行 `--force` 重裝；舊的無限成長 log 即停止寫入 |
 | macOS LaunchDaemon | `runner run` 被拒絕，daemon 重複重啟 | 依 E.2 轉換 |

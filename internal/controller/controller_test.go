@@ -279,7 +279,7 @@ func TestRunnerStateLifecycle(t *testing.T) {
 		t.Fatalf("count after addIdle = %d, want 2", rs.count())
 	}
 
-	rs.markBusy("runner-1")
+	rs.markBusy("runner-1", jobRef{})
 	if rs.count() != 2 {
 		t.Fatalf("count after markBusy = %d, want 2", rs.count())
 	}
@@ -287,7 +287,7 @@ func TestRunnerStateLifecycle(t *testing.T) {
 		t.Errorf("runner-1 phase = %v, %v; want busy", phase, ok)
 	}
 
-	instanceID, ready, ok := rs.markDone("runner-1")
+	instanceID, ready, ok := rs.markDone("runner-1", reasonJobCompleted, "")
 	if !ok {
 		t.Fatal("markDone should return ok=true for busy runner")
 	}
@@ -302,7 +302,7 @@ func TestRunnerStateLifecycle(t *testing.T) {
 	}
 
 	// markDone on idle runner (no job started)
-	instanceID, ready, ok = rs.markDone("runner-2")
+	instanceID, ready, ok = rs.markDone("runner-2", reasonJobCompleted, "")
 	if !ok {
 		t.Fatal("markDone should return ok=true for idle runner")
 	}
@@ -320,7 +320,7 @@ func TestRunnerStateLifecycle(t *testing.T) {
 func TestRunnerStateMarkBusyReturnsFalse(t *testing.T) {
 	rs := newInstanceState()
 
-	if rs.markBusy("nonexistent") {
+	if rs.markBusy("nonexistent", jobRef{}) {
 		t.Error("markBusy on non-existent runner should return false")
 	}
 }
@@ -328,7 +328,7 @@ func TestRunnerStateMarkBusyReturnsFalse(t *testing.T) {
 func TestRunnerStateMarkDoneReturnsFalse(t *testing.T) {
 	rs := newInstanceState()
 
-	if _, _, ok := rs.markDone("nonexistent"); ok {
+	if _, _, ok := rs.markDone("nonexistent", reasonJobCompleted, ""); ok {
 		t.Error("markDone on non-existent runner should return ok=false")
 	}
 }
@@ -366,7 +366,7 @@ func TestRunnerStateTracksProvisioningToRemoving(t *testing.T) {
 	if phase, _ := rs.phase("runner-1"); phase != instanceProvisioning {
 		t.Fatalf("phase = %v, want provisioning", phase)
 	}
-	if !rs.markBusy("runner-1") {
+	if !rs.markBusy("runner-1", jobRef{}) {
 		t.Fatal("job start should be recorded while provider startup is in flight")
 	}
 	if remove, tracked := rs.markReady("runner-1", "instance-1"); remove || !tracked {
@@ -375,7 +375,7 @@ func TestRunnerStateTracksProvisioningToRemoving(t *testing.T) {
 	if phase, _ := rs.phase("runner-1"); phase != instanceBusy {
 		t.Fatalf("phase = %v after markReady, want busy", phase)
 	}
-	instanceID, ready, ok := rs.markDone("runner-1")
+	instanceID, ready, ok := rs.markDone("runner-1", reasonJobCompleted, "")
 	if !ok || !ready || instanceID != "instance-1" {
 		t.Fatalf("markDone() = %q/%v/%v, want instance-1/true/true", instanceID, ready, ok)
 	}
@@ -383,7 +383,7 @@ func TestRunnerStateTracksProvisioningToRemoving(t *testing.T) {
 	if !ok {
 		t.Fatal("finishRemoval returned false")
 	}
-	released.Release()
+	released.lease.Release()
 	if got := b.InUse(); got != 0 {
 		t.Fatalf("capacity in use = %d, want 0", got)
 	}
@@ -844,7 +844,7 @@ func TestHandleJobCompleted(t *testing.T) {
 	ctx := context.Background()
 
 	s.instances.addIdle("runner-abc", "instance-abc")
-	s.instances.markBusy("runner-abc")
+	s.instances.markBusy("runner-abc", jobRef{})
 
 	err := s.HandleJobCompleted(ctx, &scaleset.JobCompleted{
 		JobMessageBase: scaleset.JobMessageBase{
@@ -875,7 +875,7 @@ func TestShutdown(t *testing.T) {
 
 	s.instances.addIdle("idle-1", "r-idle-1")
 	s.instances.addIdle("busy-1", "r-busy-1")
-	s.instances.markBusy("busy-1")
+	s.instances.markBusy("busy-1", jobRef{})
 
 	s.Shutdown(ctx)
 
@@ -895,7 +895,7 @@ func TestDrain_RemovesIdleKeepsBusy(t *testing.T) {
 	s := NewScaleSetController(1, 0, 5, mb, &mockScaleset{}, slog.New(slog.DiscardHandler))
 	s.instances.addIdle("runner-idle", "res-idle")
 	s.instances.addIdle("runner-busy", "res-busy")
-	s.instances.markBusy("runner-busy")
+	s.instances.markBusy("runner-busy", jobRef{})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
@@ -916,11 +916,11 @@ func TestDrain_ReturnsWhenBusyReachesZero(t *testing.T) {
 	mb := &mockProvider{}
 	s := NewScaleSetController(1, 0, 5, mb, &mockScaleset{}, slog.New(slog.DiscardHandler))
 	s.instances.addIdle("runner-busy", "res-busy")
-	s.instances.markBusy("runner-busy")
+	s.instances.markBusy("runner-busy", jobRef{})
 
 	go func() {
 		time.Sleep(50 * time.Millisecond)
-		_, _, _ = s.instances.markDone("runner-busy")
+		_, _, _ = s.instances.markDone("runner-busy", reasonJobCompleted, "")
 	}()
 
 	start := time.Now()
@@ -1109,4 +1109,189 @@ func TestStartInstance_ProceedsAfterAnOverrunningReclaim(t *testing.T) {
 	if name == "" {
 		t.Error("startInstance returned no runner name")
 	}
+}
+
+// --- lifecycle log tests ---
+
+// logRecorder is a slog.Handler that keeps every record so a test can assert
+// on the operator-facing lifecycle lines the controller emits.
+type logRecorder struct {
+	mu      sync.Mutex
+	entries []logEntry
+}
+
+type logEntry struct {
+	level slog.Level
+	msg   string
+	attrs map[string]string
+}
+
+func (r *logRecorder) Enabled(context.Context, slog.Level) bool { return true }
+
+func (r *logRecorder) Handle(_ context.Context, rec slog.Record) error {
+	e := logEntry{level: rec.Level, msg: rec.Message, attrs: map[string]string{}}
+	rec.Attrs(func(a slog.Attr) bool {
+		e.attrs[a.Key] = a.Value.String()
+		return true
+	})
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.entries = append(r.entries, e)
+	return nil
+}
+
+func (r *logRecorder) WithAttrs([]slog.Attr) slog.Handler { return r }
+func (r *logRecorder) WithGroup(string) slog.Handler      { return r }
+
+// find returns every record carrying the given message.
+func (r *logRecorder) find(msg string) []logEntry {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []logEntry
+	for _, e := range r.entries {
+		if e.msg == msg {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+func newRecordedController(t *testing.T, minRunners, maxRunners int) (*ScaleSetController, *mockProvider, *logRecorder) {
+	t.Helper()
+	mb := &mockProvider{}
+	rec := &logRecorder{}
+	s := NewScaleSetController(1, minRunners, maxRunners, mb, &mockScaleset{}, slog.New(rec))
+	t.Cleanup(func() { s.Shutdown(context.Background()) })
+	return s, mb, rec
+}
+
+// waitForLog blocks until a record with msg appears and asserts it was
+// emitted exactly once.
+func waitForLog(t *testing.T, rec *logRecorder, msg string) logEntry {
+	t.Helper()
+	waitFor(t, func() bool { return len(rec.find(msg)) >= 1 }, "no "+msg+" log line")
+	got := rec.find(msg)
+	if len(got) != 1 {
+		t.Fatalf("%q logged %d times, want 1", msg, len(got))
+	}
+	return got[0]
+}
+
+func assertInfoAttrs(t *testing.T, e logEntry, want map[string]string) {
+	t.Helper()
+	if e.level != slog.LevelInfo {
+		t.Errorf("%q level = %v, want INFO", e.msg, e.level)
+	}
+	for k, v := range want {
+		if got, ok := e.attrs[k]; !ok || got != v {
+			t.Errorf("%q attr %s = %q (present=%v), want %q", e.msg, k, got, ok, v)
+		}
+	}
+}
+
+func TestStartInstanceLogsRunnerStarted(t *testing.T) {
+	s, mb, rec := newRecordedController(t, 0, 1)
+	if _, err := s.HandleDesiredRunnerCount(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+
+	e := waitForLog(t, rec, "Runner started")
+	waitFor(t, func() bool { return mb.startedCount() == 1 }, "runner did not start")
+	name := mb.started[0]
+	assertInfoAttrs(t, e, map[string]string{"name": name, "instanceID": "instance-" + name})
+	if _, ok := e.attrs["startupTime"]; !ok {
+		t.Error("Runner started log carries no startupTime")
+	}
+}
+
+func TestJobCompletionLogsRunnerRemovedWithJob(t *testing.T) {
+	s, _, rec := newRecordedController(t, 0, 10)
+	ctx := context.Background()
+	s.instances.addIdle("runner-abc", "instance-abc")
+
+	job := scaleset.JobMessageBase{
+		JobID:          "job-1",
+		OwnerName:      "acme",
+		RepositoryName: "app",
+		WorkflowRunID:  42,
+		JobDisplayName: "build-ios",
+	}
+	if err := s.HandleJobStarted(ctx, &scaleset.JobStarted{RunnerName: "runner-abc", JobMessageBase: job}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.HandleJobCompleted(ctx, &scaleset.JobCompleted{RunnerName: "runner-abc", Result: "succeeded", JobMessageBase: job}); err != nil {
+		t.Fatal(err)
+	}
+
+	e := waitForLog(t, rec, "Runner removed")
+	assertInfoAttrs(t, e, map[string]string{
+		"name":          "runner-abc",
+		"instanceID":    "instance-abc",
+		"reason":        "job-completed",
+		"jobId":         "job-1",
+		"repo":          "acme/app",
+		"workflowRunId": "42",
+		"job":           "build-ios",
+		"result":        "succeeded",
+	})
+}
+
+func TestScaleDownLogsRunnerRemoved(t *testing.T) {
+	s, _, rec := newRecordedController(t, 0, 10)
+	s.instances.addIdle("runner-0", "r0")
+	s.instances.addIdle("runner-1", "r1")
+
+	if _, err := s.HandleDesiredRunnerCount(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+
+	e := waitForLog(t, rec, "Runner removed")
+	assertInfoAttrs(t, e, map[string]string{"reason": "scaled-down"})
+	if _, ok := e.attrs["jobId"]; ok {
+		t.Error("idle runner removal should carry no job attrs")
+	}
+}
+
+func TestExitedRunnerLogsRunnerRemoved(t *testing.T) {
+	b := &watcherProvider{waits: make(map[string]chan struct{})}
+	rec := &logRecorder{}
+	s := NewScaleSetController(1, 0, 1, b, &mockScaleset{}, slog.New(rec))
+	defer s.Shutdown(context.Background())
+	ctx := context.Background()
+
+	if _, err := s.HandleDesiredRunnerCount(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return b.startedCount() == 1 }, "runner did not start")
+	instanceID := b.firstStarted() // watcherProvider records "instance-<name>"
+	name := strings.TrimPrefix(instanceID, "instance-")
+	if err := s.HandleJobStarted(ctx, &scaleset.JobStarted{RunnerName: name, JobMessageBase: scaleset.JobMessageBase{JobID: "job-9"}}); err != nil {
+		t.Fatal(err)
+	}
+	b.crashFirst()
+
+	e := waitForLog(t, rec, "Runner removed")
+	assertInfoAttrs(t, e, map[string]string{"name": name, "instanceID": instanceID, "reason": "exited", "jobId": "job-9"})
+}
+
+func TestShutdownLogsRunnerRemoved(t *testing.T) {
+	s, _, rec := newRecordedController(t, 0, 10)
+	s.instances.addIdle("runner-abc", "instance-abc")
+
+	s.Shutdown(context.Background())
+
+	e := waitForLog(t, rec, "Runner removed")
+	assertInfoAttrs(t, e, map[string]string{"name": "runner-abc", "instanceID": "instance-abc", "reason": "shutdown"})
+}
+
+func TestDrainLogsRunnerRemoved(t *testing.T) {
+	s, _, rec := newRecordedController(t, 0, 10)
+	s.instances.addIdle("runner-abc", "instance-abc")
+
+	if err := s.Drain(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	e := waitForLog(t, rec, "Runner removed")
+	assertInfoAttrs(t, e, map[string]string{"name": "runner-abc", "reason": "drain"})
 }

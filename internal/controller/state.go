@@ -16,13 +16,42 @@ const (
 	instanceRemoving
 )
 
+// Why a runner left the controller's state. Reported on the "Runner removed"
+// log line so an operator can tell a finished job from a scale-down.
+const (
+	reasonJobCompleted = "job-completed"
+	reasonScaledDown   = "scaled-down"
+	reasonDrain        = "drain"
+	reasonExited       = "exited"
+	reasonShutdown     = "shutdown"
+)
+
+// jobRef identifies the job a runner picked up, for the removal log line.
+type jobRef struct {
+	id     string
+	name   string // JobDisplayName
+	repo   string // owner/name
+	runID  int64
+	result string // set once the job completes
+}
+
 type managedInstance struct {
 	id              string
 	phase           instancePhase
 	lease           *capacity.Lease
+	removeReason    string
+	job             jobRef
 	cleanupInFlight bool
 	cleanupAttempts int
 	cleanupRetryAt  time.Time
+}
+
+// removedInstance is what markDead and finishRemoval hand back: the lease to
+// release and the context the removal log line reports.
+type removedInstance struct {
+	lease  *capacity.Lease
+	reason string
+	job    jobRef
 }
 
 // instanceState is the controller's source of truth. Provisioning instances
@@ -142,7 +171,7 @@ func (r *instanceState) contains(name, instanceID string) bool {
 	return ok && instance.id == instanceID && instance.phase != instanceRemoving
 }
 
-func (r *instanceState) markBusy(name string) bool {
+func (r *instanceState) markBusy(name string, job jobRef) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	instance, ok := r.instances[name]
@@ -150,12 +179,15 @@ func (r *instanceState) markBusy(name string) bool {
 		return false
 	}
 	instance.phase = instanceBusy
+	instance.job = job
 	return true
 }
 
-// markDone transitions a runner to removing. ready is false only for the
-// narrow race where GitHub reports completion before StartInstance returns.
-func (r *instanceState) markDone(name string) (instanceID string, ready, ok bool) {
+// markDone transitions a runner to removing and records why, plus the job's
+// result when one finished, for the "Runner removed" line. ready is false only
+// for the narrow race where GitHub reports completion before StartInstance
+// returns.
+func (r *instanceState) markDone(name, reason, result string) (instanceID string, ready, ok bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	instance, ok := r.instances[name]
@@ -163,18 +195,20 @@ func (r *instanceState) markDone(name string) (instanceID string, ready, ok bool
 		return "", false, false
 	}
 	instance.phase = instanceRemoving
+	instance.removeReason = reason
+	instance.job.result = result
 	return instance.id, instance.id != "", true
 }
 
-func (r *instanceState) markDead(name, instanceID string) (*capacity.Lease, bool) {
+func (r *instanceState) markDead(name, instanceID string) (removedInstance, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	instance, ok := r.instances[name]
 	if !ok || instance.id != instanceID || instance.phase == instanceRemoving {
-		return nil, false
+		return removedInstance{}, false
 	}
 	delete(r.instances, name)
-	return instance.lease, true
+	return removedInstance{lease: instance.lease, reason: reasonExited, job: instance.job}, true
 }
 
 // markIdleAboveTarget transitions one surplus idle instance to removing. Busy
@@ -195,6 +229,7 @@ func (r *instanceState) markIdleAboveTarget(target int) bool {
 	for _, instance := range r.instances {
 		if instance.phase == instanceIdle {
 			instance.phase = instanceRemoving
+			instance.removeReason = reasonScaledDown
 			return true
 		}
 	}
@@ -210,6 +245,7 @@ func (r *instanceState) idleForRemoval() map[string]string {
 	for name, instance := range r.instances {
 		if instance.phase == instanceIdle {
 			instance.phase = instanceRemoving
+			instance.removeReason = reasonDrain
 			result[name] = instance.id
 		}
 	}
@@ -248,15 +284,15 @@ func (r *instanceState) retryRemoval(name, instanceID string, now time.Time) (ti
 	return delay, true
 }
 
-func (r *instanceState) finishRemoval(name, instanceID string) (*capacity.Lease, bool) {
+func (r *instanceState) finishRemoval(name, instanceID string) (removedInstance, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	instance, ok := r.instances[name]
 	if !ok || instance.phase != instanceRemoving || instance.id != instanceID {
-		return nil, false
+		return removedInstance{}, false
 	}
 	delete(r.instances, name)
-	return instance.lease, true
+	return removedInstance{lease: instance.lease, reason: instance.removeReason, job: instance.job}, true
 }
 
 func (r *instanceState) detachAll() map[string]managedInstance {

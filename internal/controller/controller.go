@@ -148,7 +148,7 @@ func (s *ScaleSetController) HandleJobStarted(ctx context.Context, jobInfo *scal
 		slog.String("jobId", jobInfo.JobID),
 		slog.String("runnerName", jobInfo.RunnerName),
 	)
-	marked := s.instances.markBusy(jobInfo.RunnerName)
+	marked := s.instances.markBusy(jobInfo.RunnerName, jobRefFrom(&jobInfo.JobMessageBase))
 	if !marked {
 		s.logger.Warn("Job started for unknown runner (already removed?)", slog.String("runnerName", jobInfo.RunnerName))
 	}
@@ -164,7 +164,7 @@ func (s *ScaleSetController) HandleJobCompleted(ctx context.Context, jobInfo *sc
 		slog.String("runnerName", jobInfo.RunnerName),
 	)
 
-	_, ready, ok := s.instances.markDone(jobInfo.RunnerName)
+	_, ready, ok := s.instances.markDone(jobInfo.RunnerName, reasonJobCompleted, jobInfo.Result)
 	if !ok {
 		s.logger.Warn("Job completed for unknown runner (already removed?)", slog.String("runnerName", jobInfo.RunnerName))
 		return nil
@@ -306,6 +306,7 @@ func (s *ScaleSetController) startInstance(ctx context.Context) (string, error) 
 }
 
 func (s *ScaleSetController) startInstanceWithLease(ctx context.Context, lease *capacity.Lease) (string, error) {
+	started := time.Now()
 	name := fmt.Sprintf("runner-%s", uuid.NewString()[:8])
 	if !s.instances.reserve(name, lease) {
 		lease.Release()
@@ -353,6 +354,11 @@ func (s *ScaleSetController) startInstanceWithLease(ctx context.Context, lease *
 		lease.Release()
 		return "", fmt.Errorf("runner %s was no longer tracked after provider start", name)
 	}
+	s.logger.Info("Runner started",
+		slog.String("name", name),
+		slog.String("instanceID", instanceID),
+		slog.Duration("startupTime", time.Since(started)),
+	)
 	if removeNow && !s.draining.Load() {
 		// The background worker will observe the removing phase on its next
 		// reconcile pass and perform provider cleanup.
@@ -361,7 +367,7 @@ func (s *ScaleSetController) startInstanceWithLease(ctx context.Context, lease *
 	}
 	if s.draining.Load() {
 		if !removeNow {
-			_, _, _ = s.instances.markDone(name)
+			_, _, _ = s.instances.markDone(name, reasonDrain, "")
 		}
 		cleanCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 		err := s.provider.RemoveInstance(cleanCtx, instanceID)
@@ -443,7 +449,7 @@ func (s *ScaleSetController) watchInstance(ctx context.Context, watcher provider
 	s.desiredMu.Lock()
 	crashRevision := s.desiredRevision
 	s.desiredMu.Unlock()
-	lease, removed := s.instances.markDead(name, instanceID)
+	dead, removed := s.instances.markDead(name, instanceID)
 	if !removed {
 		return // normal JobCompleted path already removed it from state
 	}
@@ -455,11 +461,13 @@ func (s *ScaleSetController) watchInstance(ctx context.Context, watcher provider
 		s.demandStale = true
 	}
 	s.desiredMu.Unlock()
-	lease.Release()
+	dead.lease.Release()
 	s.logger.Warn("Runner exited before job completion; removing stale capacity", slog.String("name", name))
 	cleanCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	if err := s.provider.RemoveInstance(cleanCtx, instanceID); err != nil {
 		s.logger.Warn("Failed to clean up exited runner", slog.String("name", name), slog.Any("error", err))
+	} else {
+		s.logRemoved(name, instanceID, dead.reason, dead.job)
 	}
 	cancel()
 
@@ -552,24 +560,26 @@ func (s *ScaleSetController) Shutdown(ctx context.Context) {
 	_ = s.waitWorker(shutdownCtx)
 
 	var wg sync.WaitGroup
-	removeRunner := func(name, instanceID string, lease *capacity.Lease) {
-		if instanceID == "" {
-			lease.Release()
+	removeRunner := func(name string, instance managedInstance) {
+		if instance.id == "" {
+			instance.lease.Release()
 			return
 		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			defer lease.Release()
+			defer instance.lease.Release()
 			s.logger.Debug("Removing runner", slog.String("name", name))
-			if err := s.provider.RemoveInstance(shutdownCtx, instanceID); err != nil {
+			if err := s.provider.RemoveInstance(shutdownCtx, instance.id); err != nil {
 				s.logger.Error("Failed to remove runner", slog.String("name", name), slog.Any("error", err))
+				return
 			}
+			s.logRemoved(name, instance.id, reasonShutdown, instance.job)
 		}()
 	}
 
 	for name, instance := range s.instances.detachAll() {
-		removeRunner(name, instance.id, instance.lease)
+		removeRunner(name, instance)
 	}
 
 	wg.Wait()
@@ -597,12 +607,46 @@ func (s *ScaleSetController) waitWorker(ctx context.Context) error {
 }
 
 func (s *ScaleSetController) finishRemoval(name, instanceID string) {
-	lease, ok := s.instances.finishRemoval(name, instanceID)
+	removed, ok := s.instances.finishRemoval(name, instanceID)
 	if !ok {
 		return
 	}
-	lease.Release()
+	removed.lease.Release()
+	s.logRemoved(name, instanceID, removed.reason, removed.job)
 	s.signalReconcile()
+}
+
+// logRemoved is the one "Runner removed" line every departure emits. It names
+// the job the runner served when it had one, so an operator can tie the
+// instance back to a workflow run without cross-referencing debug output.
+func (s *ScaleSetController) logRemoved(name, instanceID, reason string, job jobRef) {
+	attrs := []any{
+		slog.String("name", name),
+		slog.String("instanceID", instanceID),
+		slog.String("reason", reason),
+	}
+	if job.id != "" {
+		attrs = append(attrs,
+			slog.String("jobId", job.id),
+			slog.String("repo", job.repo),
+			slog.Int64("workflowRunId", job.runID),
+			slog.String("job", job.name),
+		)
+		if job.result != "" {
+			attrs = append(attrs, slog.String("result", job.result))
+		}
+	}
+	s.logger.Info("Runner removed", attrs...)
+}
+
+// jobRefFrom keeps the fields of a scale set job message that identify the
+// job to a human: which repository and run it belongs to and what it is called.
+func jobRefFrom(m *scaleset.JobMessageBase) jobRef {
+	repo := m.RepositoryName
+	if m.OwnerName != "" {
+		repo = m.OwnerName + "/" + repo
+	}
+	return jobRef{id: m.JobID, name: m.JobDisplayName, repo: repo, runID: m.WorkflowRunID}
 }
 
 // InstanceCounts returns the number of idle and busy runners.

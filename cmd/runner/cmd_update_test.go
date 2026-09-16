@@ -3,9 +3,12 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -68,5 +71,16 @@ func TestFetchRunningVersion_FailuresAreQuiet(t *testing.T) {
 	}
 	if got := fetchRunningVersion(context.Background(), "127.0.0.1", 0, client); got != "" {
 		t.Errorf("disabled health endpoint returned %q", got)
+	}
+}
+
+func TestUpdateFailureSuggestsSudoOnPermissionErrors(t *testing.T) {
+	denied := fmt.Errorf("failed to create temp file in /usr/local/bin: %w",
+		&fs.PathError{Op: "open", Path: "/usr/local/bin/.runner-update-1", Err: syscall.EACCES})
+	if err := updateFailure(denied, "/usr/local/bin/runner"); !strings.Contains(err.Error(), "sudo runner update") || !errors.Is(err, fs.ErrPermission) {
+		t.Errorf("permission failure = %v", err)
+	}
+	if err := updateFailure(errors.New("checksum mismatch"), "/usr/local/bin/runner"); strings.Contains(err.Error(), "sudo") {
+		t.Errorf("unrelated failure suggested sudo: %v", err)
 	}
 }

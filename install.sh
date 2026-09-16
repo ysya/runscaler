@@ -3,7 +3,13 @@ set -eu
 
 REPO="ysya/runscaler"
 BINARY="runner"
-INSTALL_DIR="${INSTALL_DIR:-${HOME}/.local/bin}"
+if [ "$(id -u)" -eq 0 ]; then
+    # A binary run by a root service must be writable only by root.
+    DEFAULT_INSTALL_DIR="/usr/local/bin"
+else
+    DEFAULT_INSTALL_DIR="${HOME}/.local/bin"
+fi
+INSTALL_DIR="${INSTALL_DIR:-${DEFAULT_INSTALL_DIR}}"
 
 fail() { echo "Error: $1" >&2; exit 1; }
 
@@ -77,6 +83,6 @@ case ":${PATH}:" in
     *)
         echo ""
         echo "NOTE: ${INSTALL_DIR} is not in your PATH. Add this to your shell profile:"
-        echo "  export PATH=\"\${HOME}/.local/bin:\${PATH}\""
+        echo "  export PATH=\"${INSTALL_DIR}:\${PATH}\""
         ;;
 esac

@@ -3,10 +3,13 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -66,7 +69,7 @@ func runUpdate(cmd *cobra.Command, _ []string) error {
 	fmt.Fprintf(cmd.OutOrStdout(), "Downloading %s...\n", release.TagName)
 
 	if err := versioncheck.Update(cmd.Context(), release.TagName, execPath); err != nil {
-		return fmt.Errorf("update failed: %w", err)
+		return updateFailure(err, execPath)
 	}
 
 	fmt.Fprintf(cmd.OutOrStdout(), "Updated to %s.\n", release.TagName)
@@ -84,6 +87,15 @@ func runUpdate(cmd *cobra.Command, _ []string) error {
 		fmt.Fprintln(cmd.OutOrStdout(), notice)
 	}
 	return nil
+}
+
+// updateFailure adds a sudo hint when the binary lives in a directory only
+// root can write, as a system service's binary must.
+func updateFailure(err error, execPath string) error {
+	if errors.Is(err, fs.ErrPermission) {
+		return fmt.Errorf("update failed: %w\n\n  %s is not writable by this user; run: sudo runner update", err, filepath.Dir(execPath))
+	}
+	return fmt.Errorf("update failed: %w", err)
 }
 
 // updateRestartNotice returns the actionable message shown after a successful

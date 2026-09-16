@@ -796,6 +796,7 @@ func NewLoggerWithWriter(level, format string, file io.Writer) *slog.Logger {
 	}
 
 	handler := charmlog.NewWithOptions(outputWriter(file), opts)
+	handler.SetColorProfile(stdoutColorProfile())
 	logger := slog.New(&demoteHandler{inner: handler, demote: demoteMessages})
 	slog.SetDefault(logger)
 	return logger
@@ -831,6 +832,7 @@ func NewScaleSetLoggerWithWriter(level, format string, name string, index int, f
 	}
 
 	handler := charmlog.NewWithOptions(outputWriter(file), opts)
+	handler.SetColorProfile(stdoutColorProfile())
 
 	// Apply color only for text format (not JSON)
 	if strings.ToLower(format) != "json" {

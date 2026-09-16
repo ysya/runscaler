@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+
+	"github.com/charmbracelet/colorprofile"
 )
 
 const (
@@ -92,9 +94,20 @@ func (w *LogFileWriter) Close() error {
 	return err
 }
 
+// outputWriter tees log output to stdout and, when enabled, the log file. The
+// file copy is stripped of styling so runner.log stays plain text.
 func outputWriter(file io.Writer) io.Writer {
 	if file == nil {
 		return os.Stdout
 	}
-	return io.MultiWriter(os.Stdout, file)
+	return io.MultiWriter(os.Stdout, &colorprofile.Writer{Forward: file, Profile: colorprofile.NoTTY})
+}
+
+// stdoutColorProfile picks log styling from stdout itself: color on an
+// interactive terminal, plain text on the pipes, sockets and files that
+// systemd, launchd, docker run without -t and CI provide. charmlog would
+// otherwise probe its writer, and the tee outputWriter builds for a log file
+// is never a terminal. NO_COLOR, CLICOLOR_FORCE and TERM=dumb are honored.
+func stdoutColorProfile() colorprofile.Profile {
+	return colorprofile.Detect(os.Stdout, os.Environ())
 }

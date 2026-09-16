@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -11,6 +12,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/ysya/runscaler/internal/config"
+	"github.com/ysya/runscaler/internal/layout"
 )
 
 var initCmd = &cobra.Command{
@@ -37,11 +39,19 @@ func init() {
 	flags.String("runner-image", "", "Runner container or Tart VM image")
 	flags.Bool("dind", config.DefaultDinD, "Enable Docker-in-Docker")
 	flags.String("shared-volume", "", "Shared volume path (e.g. /shared)")
-	flags.String("output", "config.toml", "Output file path")
+	flags.String("output", "", "Output file path (default: /etc/runner/config.toml as root, $XDG_CONFIG_HOME/runner/config.toml otherwise)")
 }
 
 func runInit(cmd *cobra.Command, args []string) error {
 	output, _ := cmd.Flags().GetString("output")
+	id := layout.CurrentIdentity()
+	if output == "" {
+		lay, err := layout.For(id)
+		if err != nil {
+			return fmt.Errorf("resolve default config path: %w", err)
+		}
+		output = lay.ConfigFile
+	}
 
 	// Check if file exists
 	if _, err := os.Stat(output); err == nil {
@@ -163,7 +173,7 @@ min-runners = 0
 concurrent = %d
 log-level = %q
 log-format = %q
-# log-file defaults to runner.log beside this config; set log-file = "" to disable
+# log-file defaults to /var/log/runner/runner.log (root), ~/.local/state/runner/runner.log (Linux) or ~/Library/Logs/runner/runner.log (macOS); set log-file = "" to disable
 
 # Health check server (localhost-only by default; use 0.0.0.0 explicitly to expose)
 # health-address = %q
@@ -242,7 +252,7 @@ min-runners = 0
 concurrent = %d
 log-level = %q
 log-format = %q
-# log-file defaults to runner.log beside this config; set log-file = "" to disable
+# log-file defaults to /var/log/runner/runner.log (root), ~/.local/state/runner/runner.log (Linux) or ~/Library/Logs/runner/runner.log (macOS); set log-file = "" to disable
 
 # Health check server (localhost-only by default; use 0.0.0.0 explicitly to expose)
 # health-address = %q
@@ -300,11 +310,19 @@ shared-volume = %q
 		)
 	}
 
-	if err := os.WriteFile(output, []byte(configContent), 0600); err != nil {
+	if err := os.MkdirAll(filepath.Dir(output), id.DirPerm()); err != nil {
+		return fmt.Errorf("failed to create %s: %w", filepath.Dir(output), err)
+	}
+	// Atomic replace creates a new 0600 file: WriteFile would keep an existing
+	// file's looser mode and follow a symlink at the destination.
+	if err := writeFileAtomic(output, []byte(configContent), 0o600); err != nil {
 		return fmt.Errorf("failed to write %s: %w", output, err)
 	}
 
 	fmt.Printf("\nCreated %s\n", output)
+	if warning := initShadowWarning(output); warning != "" {
+		fmt.Fprintln(os.Stderr, warning)
+	}
 	fmt.Println("\nNext steps:")
 	fmt.Printf("  runner validate --config %s   # Verify configuration\n", output)
 	fmt.Printf("  runner run --config %s        # Start scaling\n", output)
@@ -380,4 +398,19 @@ func promptYN(label string, defaultVal bool) (bool, error) {
 	default:
 		return false, fmt.Errorf("invalid input: %s", input)
 	}
+}
+
+// initShadowWarning explains when ./config.toml would be read instead of the
+// file init just wrote, because config search checks the working directory
+// first.
+func initShadowWarning(output string) string {
+	local, err := filepath.Abs("config.toml")
+	if err != nil || sameFilePath(local, output) {
+		return ""
+	}
+	if _, err := os.Stat(local); err != nil {
+		return ""
+	}
+	written, _ := filepath.Abs(output)
+	return fmt.Sprintf("  ⚠ %s is found before %s when --config is omitted; pass --config %s or remove the local file", local, written, written)
 }

@@ -16,6 +16,7 @@ var (
 	legacySystemdUnit  = "runscaler.service"
 	legacyServiceName  = "runscaler"
 	legacyLaunchdPlist = "com.runscaler.agent.plist"
+	legacyLaunchdLabel = "com.runscaler.agent"
 	legacySharedVolume = "runscaler-shared"
 	legacyTokenEnv     = "RUNSCALER_TOKEN"
 )

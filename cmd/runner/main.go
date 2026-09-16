@@ -146,7 +146,7 @@ var startManager = func(cmd *cobra.Command) error {
 		ConfigPath: viper.ConfigFileUsed(),
 	})
 	if err != nil {
-		return explainLockError(err)
+		return explainLockError(err, serviceReinstallCommand(os.Geteuid() == 0, absConfigPath(viper.ConfigFileUsed()), currentBinaryPath()))
 	}
 	defer releaseLock()
 
@@ -169,14 +169,14 @@ var startManager = func(cmd *cobra.Command) error {
 }
 
 // explainLockError adds the operator action to lock failures that have one.
-func explainLockError(err error) error {
+func explainLockError(err error, fix string) error {
 	switch {
 	case errors.Is(err, runnerlock.ErrAlreadyRunning):
 		return fmt.Errorf("%w\n\n  Only one runner may run per machine.\n  To manage multiple organizations, use multiple [[scaleset]] entries in one config", err)
 	case errors.Is(err, syscall.EROFS):
 		// A binary update cannot rewrite an installed unit, and system units
 		// from older releases keep /tmp read-only under ProtectSystem=strict.
-		return fmt.Errorf("%w\n\n  If this is a systemd service installed by an older runner, reinstall it:\n    sudo runner service uninstall --user=false\n    sudo runner service install --user=false", err)
+		return fmt.Errorf("%w\n\n  The service sandbox keeps /tmp read-only (a unit from an older release). Regenerate it:\n    %s", err, fix)
 	default:
 		return err
 	}
@@ -285,7 +285,7 @@ func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) e
 	for _, w := range cfg.Warnings {
 		logger.Warn(w)
 	}
-	logServiceDrainTimeoutReminder(cfg.EffectiveDrainTimeout(), logger)
+	warnOutdatedService(logger, cfg.EffectiveDrainTimeout())
 
 	scaleSets := cfg.ResolveScaleSets()
 	for i := range scaleSets {
@@ -575,31 +575,6 @@ func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) e
 		return errors.Join(errsSlice...)
 	}
 	return nil
-}
-
-// logServiceDrainTimeoutReminder tells service-managed deployments about the
-// one manual upgrade step this release cannot perform itself: existing unit
-// files are not rewritten by a binary update, so an older supervisor timeout
-// can still cut a two-hour drain short. It intentionally does not inspect or
-// modify service-manager state; startup reconciliation handles any leftovers
-// if the reminder is ignored.
-func logServiceDrainTimeoutReminder(drainTimeout time.Duration, logger *slog.Logger) {
-	if drainTimeout <= 0 {
-		return
-	}
-	manager := ""
-	switch {
-	case os.Getenv("INVOCATION_ID") != "":
-		manager = "systemd"
-	case os.Getenv("XPC_SERVICE_NAME") != "":
-		manager = "launchd"
-	default:
-		return
-	}
-	logger.Info("Service stop timeout may predate drain support; reinstall the service so restarts can wait for in-flight jobs",
-		slog.String("serviceManager", manager),
-		slog.Duration("drainTimeout", drainTimeout),
-		slog.String("action", "runner service uninstall, then runner service install"))
 }
 
 // runScaleSetController manages the lifecycle of a single scale set. guard is the

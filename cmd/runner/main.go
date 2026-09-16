@@ -267,14 +267,14 @@ func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) e
 	var logFile *config.LogFileWriter
 	if path, enabled := resolveLogFilePath(cfg); enabled {
 		var err error
-		logFile, err = config.OpenLogFile(path)
+		logFile, err = config.OpenLogFile(path, 0o755)
 		if err != nil {
 			fmt.Fprintf(os.Stdout, "Warning: cannot open log file %s; continuing with stdout only: %v\n", path, err)
 		} else {
 			defer func() { _ = logFile.Close() }()
 		}
 	}
-	logger := config.NewLoggerWithWriter(cfg.LogLevel, cfg.LogFormat, logFile)
+	logger := config.NewLoggerWithWriter(cfg.LogLevel, cfg.LogFormat, os.Stdout, logWriter(logFile))
 
 	// Non-fatal config diagnostics (unknown keys, mixed single/multi mode).
 	// Warn only — a self-updated deployment with an older config must keep
@@ -544,7 +544,7 @@ func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) e
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			ssLogger := config.NewScaleSetLoggerWithWriter(cfg.LogLevel, cfg.LogFormat, ss.ScaleSetName, i, logFile)
+			ssLogger := config.NewScaleSetLoggerWithWriter(cfg.LogLevel, cfg.LogFormat, ss.ScaleSetName, i, os.Stdout, logWriter(logFile))
 			if err := runScaleSetController(runCtx, drain, cfg.EffectiveDrainTimeout(), ss, dockerClients[ss.Docker.Socket], ssLogger, healthServer, tartCoordinator, guard, capacityAllocators[i]); err != nil {
 				errs <- fmt.Errorf("scaleset %q: %w", ss.ScaleSetName, err)
 				cancelRun()

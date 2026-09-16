@@ -580,6 +580,48 @@ func TestInstallServiceValidatesBeforeTouchingExistingDefinition(t *testing.T) {
 	}
 }
 
+func TestInstallRetryCommand(t *testing.T) {
+	tests := []struct {
+		name string
+		opts installOpts
+		want string
+	}{
+		{
+			name: "system scope",
+			opts: installOpts{configPath: "/etc/runner/config.toml"},
+			want: "sudo /usr/local/bin/runner service install --user=false --config-path '/etc/runner/config.toml' --binary-path /usr/local/bin/runner",
+		},
+		{
+			name: "system scope with --force",
+			opts: installOpts{configPath: "/etc/runner/config.toml", force: true},
+			want: "sudo /usr/local/bin/runner service install --user=false --force --config-path '/etc/runner/config.toml' --binary-path /usr/local/bin/runner",
+		},
+		{
+			name: "user scope with --force and --no-start",
+			opts: installOpts{user: true, configPath: "/root/my runner/config.toml", force: true, noStart: true},
+			want: "sudo /usr/local/bin/runner service install --user --force --no-start --config-path '/root/my runner/config.toml' --binary-path /usr/local/bin/runner",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := installRetryCommand(tt.opts); got != tt.want {
+				t.Errorf("installRetryCommand() = %q\nwant %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestUntrustedBinaryHint(t *testing.T) {
+	retry := "sudo /usr/local/bin/runner service install --user=false --force --config-path '/etc/runner/config.toml' --binary-path /usr/local/bin/runner"
+	got := untrustedBinaryHint("/home/ada/.local/bin/runner", retry)
+	want := "\n\n  Install a copy only root can modify, then retry:\n" +
+		"    sudo install -m 0755 '/home/ada/.local/bin/runner' /usr/local/bin/runner\n" +
+		"    " + retry
+	if got != want {
+		t.Errorf("untrustedBinaryHint() = %q\nwant %q", got, want)
+	}
+}
+
 func TestUninstallServicesRemovesLegacyDefinitions(t *testing.T) {
 	notInstalled := func(bool) error { return fmt.Errorf("%w (no unit file)", errServiceNotInstalled) }
 	removed := func(bool) error { return nil }

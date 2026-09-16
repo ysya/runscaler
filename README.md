@@ -768,7 +768,7 @@ moves existing files.
 
 | Existing setup | After upgrading the binary | What to do |
 | --- | --- | --- |
-| Linux system service | Fails to take the lock and prints a fix | Put the binary in `/usr/local/bin` (root-owned), then run the printed `service install --user=false --force` command |
+| Linux system service | Fails to take the lock and prints a fix | Run the printed command; when the binary is not root-owned, it first installs a copy to `/usr/local/bin` |
 | Linux user service | Runs; logs move; warns | Run the printed `service install --force` command |
 | macOS LaunchAgent | Runs; logs move; warns | Run the printed `service install --force` command |
 | macOS LaunchDaemon | Refuses to run as root | Convert it as below |

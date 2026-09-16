@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -102,6 +103,30 @@ func absConfigPath(path string) string {
 	return path
 }
 
+// serviceFixCommand is the command that regenerates the definition of the
+// service this process runs under. A pre-rename definition is migrated
+// rather than reinstalled beside it, and a root service whose binary others
+// could replace is first given a root-only copy.
+func serviceFixCommand(goos string, root bool, configPath, binaryPath string, legacyInstalled bool, stat statFunc) string {
+	switch {
+	case legacyInstalled && root:
+		return "sudo " + shellQuotePath(binaryPath) + " migrate --user=false"
+	case legacyInstalled:
+		return shellQuotePath(binaryPath) + " migrate --user"
+	case goos == "linux" && root && checkRootOnlyChain(binaryPath, stat) != nil:
+		// One line, so it works in a log attribute and a terminal alike.
+		return "sudo install -m 0755 " + shellQuotePath(binaryPath) + " " + rootBinaryPath + " && " +
+			serviceReinstallCommand(true, configPath, rootBinaryPath)
+	default:
+		return serviceReinstallCommand(root, configPath, binaryPath)
+	}
+}
+
+// currentServiceFixCommand is serviceFixCommand for this process.
+func currentServiceFixCommand() string {
+	return serviceFixCommand(runtime.GOOS, os.Geteuid() == 0, absConfigPath(viper.ConfigFileUsed()), currentBinaryPath(), legacyServiceInstalled(os.Geteuid() != 0), lstatFile)
+}
+
 // warnOutdatedService logs each reason to regenerate the service together
 // with the single command that does it.
 func warnOutdatedService(logger *slog.Logger, drainTimeout time.Duration) {
@@ -109,7 +134,7 @@ func warnOutdatedService(logger *slog.Logger, drainTimeout time.Duration) {
 	if len(warnings) == 0 {
 		return
 	}
-	fix := serviceReinstallCommand(os.Geteuid() == 0, absConfigPath(viper.ConfigFileUsed()), currentBinaryPath())
+	fix := currentServiceFixCommand()
 	for _, w := range warnings {
 		logger.Warn(w, slog.String("fix", fix))
 	}

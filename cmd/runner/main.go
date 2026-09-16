@@ -154,7 +154,7 @@ var startManager = func(cmd *cobra.Command) error {
 		ConfigPath: viper.ConfigFileUsed(),
 	})
 	if err != nil {
-		return explainLockError(err, serviceReinstallCommand(os.Geteuid() == 0, absConfigPath(viper.ConfigFileUsed()), currentBinaryPath()))
+		return explainLockError(err, currentServiceFixCommand())
 	}
 	defer releaseLock()
 

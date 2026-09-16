@@ -31,6 +31,10 @@ const (
 
 	defaultConfigPath = layout.SystemConfigFile
 
+	// rootBinaryPath is where printed fixes install a copy of runner that only
+	// root can modify.
+	rootBinaryPath = "/usr/local/bin/runner"
+
 	// systemd
 	systemdSystemDir = "/etc/systemd/system"
 	systemdUnitFile  = "runner.service"
@@ -285,7 +289,33 @@ func runServiceInstall(cmd *cobra.Command, _ []string) error {
 	}
 	opts.noStart = noStart
 	opts.force = force
-	return installService(mgr, opts, validateServiceBinaryFor)
+	if err := installService(mgr, opts, validateServiceBinaryFor); err != nil {
+		var ub *untrustedBinaryError
+		if errors.As(err, &ub) {
+			return fmt.Errorf("%w%s", err, untrustedBinaryHint(ub.Path, installRetryCommand(opts)))
+		}
+		return err
+	}
+	return nil
+}
+
+// installRetryCommand repeats a service install with the root-only copy of
+// the binary, keeping the scope, config and flags of the failed attempt.
+func installRetryCommand(opts installOpts) string {
+	parts := []string{"sudo", rootBinaryPath, "service", "install"}
+	if opts.user {
+		parts = append(parts, "--user")
+	} else {
+		parts = append(parts, "--user=false")
+	}
+	if opts.force {
+		parts = append(parts, "--force")
+	}
+	if opts.noStart {
+		parts = append(parts, "--no-start")
+	}
+	parts = append(parts, "--config-path", shellQuotePath(opts.configPath), "--binary-path", rootBinaryPath)
+	return strings.Join(parts, " ")
 }
 
 // renderServiceDefinition renders what install would write, so every render
@@ -323,6 +353,14 @@ func (e *untrustedBinaryError) Error() string {
 	return "a service that runs as root must run a binary only root can modify: " + e.Err.Error()
 }
 func (e *untrustedBinaryError) Unwrap() error { return e.Err }
+
+// untrustedBinaryHint shows how to give a root service a binary only root
+// can modify and repeat the command with it.
+func untrustedBinaryHint(binary, retry string) string {
+	return "\n\n  Install a copy only root can modify, then retry:\n" +
+		"    sudo install -m 0755 " + shellQuotePath(binary) + " " + rootBinaryPath + "\n" +
+		"    " + retry
+}
 
 // validateServiceBinary resolves the binary a service will run. On Linux, a
 // service that runs as root (system scope, or a user service installed by

@@ -112,3 +112,36 @@ func TestExplainLogReadError(t *testing.T) {
 		t.Errorf("unrelated error = %v, want it unchanged", got)
 	}
 }
+
+func TestExplainLogReadErrorSuggestsSudoWhenOnlyTheSystemLogExists(t *testing.T) {
+	original := statSystemLog
+	t.Cleanup(func() { statSystemLog = original })
+
+	const userPath = "/home/ada/.local/state/runner/runner.log"
+	notFound := &fs.PathError{Op: "open", Path: userPath, Err: fs.ErrNotExist}
+	nonRoot := layout.Identity{Home: "/home/ada"}
+
+	statSystemLog = func(string) (os.FileInfo, error) { return nil, nil }
+	present := explainLogReadError(notFound, userPath, nonRoot)
+	if !strings.Contains(present.Error(), userPath) || !strings.Contains(present.Error(), "sudo runner logs") {
+		t.Errorf("system log present: error = %v, want user path and sudo hint", present)
+	}
+
+	statSystemLog = func(string) (os.FileInfo, error) { return nil, fs.ErrPermission }
+	unreadable := explainLogReadError(notFound, userPath, nonRoot)
+	if !strings.Contains(unreadable.Error(), "sudo runner logs") {
+		t.Errorf("system log exists but unreadable: error = %v, want sudo hint", unreadable)
+	}
+
+	statSystemLog = func(string) (os.FileInfo, error) { return nil, fs.ErrNotExist }
+	absent := explainLogReadError(notFound, userPath, nonRoot)
+	if !strings.Contains(absent.Error(), userPath) || strings.Contains(absent.Error(), "sudo") {
+		t.Errorf("no system log: error = %v, want user path and no sudo hint", absent)
+	}
+
+	statSystemLog = func(string) (os.FileInfo, error) { return nil, nil }
+	root := explainLogReadError(notFound, userPath, layout.Identity{Root: true})
+	if strings.Contains(root.Error(), "sudo") {
+		t.Errorf("root identity: error = %v, want no sudo hint", root)
+	}
+}

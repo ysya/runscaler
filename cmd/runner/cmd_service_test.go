@@ -512,20 +512,35 @@ func TestValidateServiceBinary(t *testing.T) {
 		name    string
 		goos    string
 		user    bool
+		euid    int
 		path    string
 		stat    map[string]fileStat
 		want    string
 		wantErr string
+		// wantUntrusted is the resolved binary an *untrustedBinaryError must name.
+		wantUntrusted string
 	}{
-		{name: "linux system resolves the symlink then passes", goos: "linux", path: "/usr/local/bin/link", stat: safe, want: "/usr/local/bin/runner"},
-		{name: "linux system user-owned binary", goos: "linux", path: "/home/ada/runner", stat: unsafe, wantErr: "sudo install -m 0755"},
-		{name: "linux user service skips the check", goos: "linux", user: true, path: "/home/ada/runner", stat: unsafe, want: "/home/ada/runner"},
-		{name: "unresolvable binary", goos: "linux", path: "/missing", stat: safe, wantErr: "resolve binary"},
-		{name: "system binary that is a directory", goos: "linux", path: "/usr/local/bin", stat: safe, wantErr: "not a regular file"},
+		{name: "linux system resolves the symlink then passes", goos: "linux", euid: 0, path: "/usr/local/bin/link", stat: safe, want: "/usr/local/bin/runner"},
+		{name: "linux system user-owned binary", goos: "linux", euid: 0, path: "/home/ada/runner", stat: unsafe, wantUntrusted: "/home/ada/runner"},
+		{name: "linux user service skips the check", goos: "linux", user: true, euid: 1000, path: "/home/ada/runner", stat: unsafe, want: "/home/ada/runner"},
+		{name: "linux user service installed by root is checked", goos: "linux", user: true, euid: 0, path: "/home/ada/runner", stat: unsafe, wantUntrusted: "/home/ada/runner"},
+		{name: "darwin system scope skips the check", goos: "darwin", euid: 0, path: "/home/ada/runner", stat: unsafe, want: "/home/ada/runner"},
+		{name: "unresolvable binary", goos: "linux", euid: 0, path: "/missing", stat: safe, wantErr: "resolve binary"},
+		{name: "system binary that is a directory", goos: "linux", euid: 0, path: "/usr/local/bin", stat: safe, wantErr: "not a regular file"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := validateServiceBinary(tt.goos, tt.user, tt.path, resolve, fakeStat(tt.stat))
+			got, err := validateServiceBinary(tt.goos, tt.user, tt.euid, tt.path, resolve, fakeStat(tt.stat))
+			if tt.wantUntrusted != "" {
+				var untrusted *untrustedBinaryError
+				if !errors.As(err, &untrusted) || untrusted.Path != tt.wantUntrusted {
+					t.Fatalf("validateServiceBinary() error = %v, want an untrusted binary error for %s", err, tt.wantUntrusted)
+				}
+				if strings.Contains(err.Error(), "sudo") {
+					t.Fatalf("validateServiceBinary() error = %v, want no hint text", err)
+				}
+				return
+			}
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 					t.Fatalf("validateServiceBinary() error = %v, want %q", err, tt.wantErr)

@@ -75,7 +75,7 @@ flowchart LR
 - **Tart provider (macOS):** Apple Silicon Mac with [Tart](https://tart.run/) installed:
 
   ```bash
-  brew install cirruslabs/cli/tart
+  brew install openai/tools/tart
 
   # Pull a macOS runner image (pre-installed with Xcode and runner dependencies)
   tart pull ghcr.io/cirruslabs/macos-tahoe-xcode:latest

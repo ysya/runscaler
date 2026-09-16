@@ -31,11 +31,16 @@ func init() {
 }
 
 func runLogs(cmd *cobra.Command, _ []string) error {
+	id := layout.CurrentIdentity()
 	cfg, err := loadConfig(cmd)
 	if err != nil {
+		// A root-owned 0600 config, such as /etc/runner/config.toml found
+		// during config search, is readable only with sudo.
+		if !id.Root && errors.Is(err, fs.ErrPermission) {
+			return fmt.Errorf("%w\n\n  run: sudo runner logs", err)
+		}
 		return err
 	}
-	id := layout.CurrentIdentity()
 	decision := resolveLogFile(cfg, id)
 	if !decision.Enabled {
 		if decision.Warning != "" {

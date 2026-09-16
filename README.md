@@ -251,6 +251,11 @@ With a config file, the default is `runner.log` next to that config; without
 one, it is `runner.log` in the working directory. Set `log-file` to an explicit
 path, or set `log-file = ""` to disable file logging.
 
+Log output on stdout is colored only when stdout is a terminal; under systemd,
+launchd, `docker run` without `-t`, CI or a pipe it stays plain. The log file
+never contains color codes. Set `NO_COLOR=1` to turn color off or
+`CLICOLOR_FORCE=1` to force it on.
+
 ```bash
 runner logs --config config.toml          # last 100 lines
 runner logs -n 500 -f --config config.toml

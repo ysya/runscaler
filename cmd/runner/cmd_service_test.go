@@ -166,13 +166,37 @@ func TestSystemdUnitUsesCustomLogsDirectory(t *testing.T) {
 }
 
 func TestSystemdUnitEscapesExecStartArguments(t *testing.T) {
-	unit, err := renderSystemdUnit(installOpts{binaryPath: `/opt/my runner/100%/$HOME/run"er`, configPath: "/etc/runner/config.toml"})
+	unit, err := renderSystemdUnit(installOpts{
+		binaryPath: `/opt/my runner/100%/$HOME/runner`,
+		configPath: `/data/100%/$HOME/c\fg "x".toml`,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `ExecStart="/opt/my runner/100%%/$$HOME/run\"er" run --config "/etc/runner/config.toml"`
+	want := `ExecStart="/opt/my runner/100%%/$HOME/runner" run --config "/data/100%%/$$HOME/c\\fg \"x\".toml"`
 	if !strings.Contains(unit, want) {
 		t.Errorf("unit missing %q:\n%s", want, unit)
+	}
+}
+
+func TestSystemdUnitRejectsUnsafeExecutablePaths(t *testing.T) {
+	for _, binaryPath := range []string{
+		`/opt/run"ner`,
+		`/opt/run'ner`,
+		`/opt/run\ner`,
+		`/opt/run*ner`,
+		`/opt/run?ner`,
+		`/opt/run[ner`,
+		"/opt/run\xffner",
+	} {
+		_, err := renderSystemdUnit(installOpts{binaryPath: binaryPath, configPath: "/etc/runner/config.toml"})
+		if err == nil {
+			t.Errorf("binaryPath %q: want error, got nil", binaryPath)
+			continue
+		}
+		if !strings.Contains(err.Error(), "executable path") {
+			t.Errorf("binaryPath %q: error %q does not mention the executable path restriction", binaryPath, err)
+		}
 	}
 }
 
@@ -188,7 +212,7 @@ func TestSystemdUnitRejectsControlCharacters(t *testing.T) {
 func TestSystemdExecStartRoundTrip(t *testing.T) {
 	for _, tc := range []struct{ binary, config string }{
 		{"/usr/local/bin/runner", "/etc/runner/config.toml"},
-		{`/opt/my runner/run"er`, `/data/100%/$HOME/c\fg.toml`},
+		{"/opt/my runner/100%/$HOME/runner", "/data/100%/$HOME/c\\fg \"x\".toml"},
 	} {
 		unit, err := renderSystemdUnit(installOpts{binaryPath: tc.binary, configPath: tc.config})
 		if err != nil {
@@ -207,6 +231,17 @@ func TestSystemdExecStartRoundTrip(t *testing.T) {
 func TestSplitSystemdCommandRejectsUnterminatedQuote(t *testing.T) {
 	if _, err := splitSystemdCommand(`"/usr/local/bin/runner run`); err == nil {
 		t.Fatal("unterminated quote accepted")
+	}
+}
+
+func TestSplitSystemdCommandKeepsDollarsInExecutable(t *testing.T) {
+	got, err := splitSystemdCommand(`"/opt/a$$b/runner" run --config "/x/$$y"`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"/opt/a$$b/runner", "run", "--config", "/x/$y"}
+	if !slices.Equal(got, want) {
+		t.Errorf("splitSystemdCommand() = %q, want %q", got, want)
 	}
 }
 

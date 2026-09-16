@@ -14,23 +14,23 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/ysya/runscaler/internal/config"
 	runnerlock "github.com/ysya/runscaler/internal/lock"
 )
 
 func TestExplainLockError(t *testing.T) {
-	readOnly := explainLockError(fmt.Errorf("open runner lock /tmp/runner.lock: %w", syscall.EROFS))
-	if !errors.Is(readOnly, syscall.EROFS) || !strings.Contains(readOnly.Error(), "sudo runner service install --user=false") {
-		t.Errorf("read-only lock error should keep its cause and point at a service reinstall:\n%v", readOnly)
+	const fix = "sudo /usr/local/bin/runner service install --user=false --force"
+	readOnly := explainLockError(fmt.Errorf("open runner lock /tmp/runner.lock: %w", syscall.EROFS), fix)
+	if !errors.Is(readOnly, syscall.EROFS) || !strings.Contains(readOnly.Error(), fix) {
+		t.Errorf("read-only lock error should keep its cause and include the fix:\n%v", readOnly)
 	}
 
-	held := explainLockError(&runnerlock.AlreadyRunningError{Path: "/tmp/runner.lock"})
+	held := explainLockError(&runnerlock.AlreadyRunningError{Path: "/tmp/runner.lock"}, fix)
 	if !errors.Is(held, runnerlock.ErrAlreadyRunning) || !strings.Contains(held.Error(), "Only one runner may run per machine") {
 		t.Errorf("held lock error should keep its cause and explain the single-instance rule:\n%v", held)
 	}
 
 	other := errors.New("permission denied")
-	if got := explainLockError(other); got != other {
+	if got := explainLockError(other, fix); got != other {
 		t.Errorf("unrelated lock error = %v, want it unchanged", got)
 	}
 }
@@ -140,38 +140,6 @@ func assertOpen(t *testing.T, ch <-chan struct{}, failure string) {
 	case <-ch:
 		t.Fatal(failure)
 	default:
-	}
-}
-
-func TestLogServiceDrainTimeoutReminder(t *testing.T) {
-	t.Setenv("INVOCATION_ID", "test-invocation")
-	t.Setenv("XPC_SERVICE_NAME", "")
-	var logs strings.Builder
-	logger := slog.New(slog.NewTextHandler(&logs, nil))
-
-	logServiceDrainTimeoutReminder(config.DefaultDrainTimeout, logger)
-	for _, want := range []string{"systemd", "runner service install", "drainTimeout"} {
-		if !strings.Contains(logs.String(), want) {
-			t.Errorf("service timeout reminder missing %q:\n%s", want, logs.String())
-		}
-	}
-}
-
-func TestLogServiceDrainTimeoutReminder_SkipsInteractiveOrDisabled(t *testing.T) {
-	t.Setenv("INVOCATION_ID", "")
-	t.Setenv("XPC_SERVICE_NAME", "")
-	var logs strings.Builder
-	logger := slog.New(slog.NewTextHandler(&logs, nil))
-
-	logServiceDrainTimeoutReminder(config.DefaultDrainTimeout, logger)
-	if logs.Len() != 0 {
-		t.Errorf("interactive run got a service reminder:\n%s", logs.String())
-	}
-
-	t.Setenv("INVOCATION_ID", "test-invocation")
-	logServiceDrainTimeoutReminder(0, logger)
-	if logs.Len() != 0 {
-		t.Errorf("disabled drain got a service reminder:\n%s", logs.String())
 	}
 }
 

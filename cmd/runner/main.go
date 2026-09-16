@@ -34,6 +34,7 @@ import (
 	"github.com/ysya/runscaler/internal/controller"
 	"github.com/ysya/runscaler/internal/diskguard"
 	"github.com/ysya/runscaler/internal/health"
+	"github.com/ysya/runscaler/internal/layout"
 	runnerlock "github.com/ysya/runscaler/internal/lock"
 	"github.com/ysya/runscaler/internal/metrics"
 	"github.com/ysya/runscaler/internal/provider"
@@ -264,17 +265,19 @@ func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) e
 	if err := cfg.ValidateGlobal(); err != nil {
 		return fmt.Errorf("invalid global configuration: %w", err)
 	}
-	var logFile *config.LogFileWriter
-	if path, enabled := resolveLogFilePath(cfg); enabled {
-		var err error
-		logFile, err = config.OpenLogFile(path, 0o755)
-		if err != nil {
-			fmt.Fprintf(os.Stdout, "Warning: cannot open log file %s; continuing with stdout only: %v\n", path, err)
-		} else {
-			defer func() { _ = logFile.Close() }()
-		}
+	id := layout.CurrentIdentity()
+	logFile, logPath, logWarnings := openRunLog(id, resolveLogFile(cfg, id))
+	for _, w := range logWarnings {
+		fmt.Fprintln(os.Stderr, "Warning: "+w)
+	}
+	if logFile != nil {
+		defer func() { _ = logFile.Close() }()
 	}
 	logger := config.NewLoggerWithWriter(cfg.LogLevel, cfg.LogFormat, os.Stdout, logWriter(logFile))
+	if old := oldDefaultLogFile(cfg, viper.ConfigFileUsed(), logPath); old != "" {
+		logger.Info("Log file location changed; the old file is left in place",
+			slog.String("path", logPath), slog.String("old", old))
+	}
 
 	// Non-fatal config diagnostics (unknown keys, mixed single/multi mode).
 	// Warn only — a self-updated deployment with an older config must keep

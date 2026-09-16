@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+
+	"github.com/ysya/runscaler/internal/layout"
 )
 
 var logsCmd = &cobra.Command{
@@ -31,10 +33,15 @@ func runLogs(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	path, enabled := resolveLogFilePath(cfg)
-	if !enabled {
+	id := layout.CurrentIdentity()
+	decision := resolveLogFile(cfg, id)
+	if !decision.Enabled {
+		if decision.Warning != "" {
+			return errors.New(decision.Warning)
+		}
 		return fmt.Errorf("runner file logging is disabled by log-file = \"\"")
 	}
+	path := decision.Path
 	lines, _ := cmd.Flags().GetInt("lines")
 	if lines < 0 {
 		return fmt.Errorf("lines must be >= 0")

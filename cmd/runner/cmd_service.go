@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/viper"
 
 	"github.com/ysya/runscaler/internal/config"
+	"github.com/ysya/runscaler/internal/layout"
 	runnerlock "github.com/ysya/runscaler/internal/lock"
 )
 
@@ -22,7 +23,7 @@ const (
 	serviceName        = "runner"
 	serviceDescription = "GitHub Actions Runner Manager"
 
-	defaultConfigPath = "/etc/runner/config.toml"
+	defaultConfigPath = layout.SystemConfigFile
 
 	// systemd
 	systemdSystemDir = "/etc/systemd/system"

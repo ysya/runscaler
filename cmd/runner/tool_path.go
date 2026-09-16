@@ -16,13 +16,18 @@ var homebrewBinDirs = []string{"/opt/homebrew/bin", "/usr/local/bin"}
 // own configuration. Interactive shells already carry these directories, so
 // they see no change.
 func ensureHomebrewPath() {
-	if runtime.GOOS != "darwin" {
-		return
-	}
 	path := os.Getenv("PATH")
-	if extended := appendMissingDirs(path, homebrewBinDirs); extended != path {
+	if extended := homebrewPath(runtime.GOOS, path); extended != path {
 		_ = os.Setenv("PATH", extended)
 	}
+}
+
+// homebrewPath returns path with Homebrew's bin directories appended on macOS.
+func homebrewPath(goos, path string) string {
+	if goos != "darwin" {
+		return path
+	}
+	return appendMissingDirs(path, homebrewBinDirs)
 }
 
 // appendMissingDirs appends each existing directory in dirs that path lacks.

@@ -122,3 +122,46 @@ func TestOldDefaultLogFile(t *testing.T) {
 		t.Fatalf("run without a log file reported an old log: %q", got)
 	}
 }
+
+func TestLogConsole(t *testing.T) {
+	tests := []struct {
+		discarded, fileOpen bool
+		want                *os.File
+	}{
+		{false, false, os.Stdout},
+		{false, true, os.Stdout},
+		{true, true, os.Stdout},
+		{true, false, os.Stderr},
+	}
+	for _, tt := range tests {
+		if got := logConsole(tt.discarded, tt.fileOpen); got != tt.want {
+			t.Errorf("logConsole(%v, %v) = %s, want %s", tt.discarded, tt.fileOpen, got.Name(), tt.want.Name())
+		}
+	}
+}
+
+func TestStdoutIsDevNull(t *testing.T) {
+	saved := os.Stdout
+	t.Cleanup(func() { os.Stdout = saved })
+
+	null, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer null.Close()
+	os.Stdout = null
+	if !stdoutIsDevNull() {
+		t.Error("stdout on /dev/null not detected")
+	}
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	defer w.Close()
+	os.Stdout = w
+	if stdoutIsDevNull() {
+		t.Error("a pipe was reported as /dev/null")
+	}
+}

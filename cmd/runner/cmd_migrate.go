@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strings"
 	"time"
+	"unicode"
 
 	dockerclient "github.com/moby/moby/client"
 	"github.com/spf13/cobra"
@@ -245,13 +246,61 @@ func parseSystemdServiceInvocation(data []byte) (legacyServiceInvocation, error)
 		if !strings.HasPrefix(line, "ExecStart=") {
 			continue
 		}
-		args := strings.Fields(strings.TrimPrefix(line, "ExecStart="))
-		for i := range args {
-			args[i] = strings.Trim(args[i], "\"'")
+		args, err := splitSystemdCommand(strings.TrimPrefix(line, "ExecStart="))
+		if err != nil {
+			return legacyServiceInvocation{}, err
 		}
 		return invocationFromArgs(args)
 	}
 	return legacyServiceInvocation{}, errors.New("legacy systemd unit has no ExecStart")
+}
+
+// splitSystemdCommand splits an ExecStart value into words, undoing the
+// quoting systemdExecArg applies and accepting the unquoted form older
+// releases wrote.
+func splitSystemdCommand(s string) ([]string, error) {
+	var (
+		words   []string
+		current strings.Builder
+		quote   rune
+		inWord  bool
+	)
+	runes := []rune(s)
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
+		switch {
+		case quote != 0 && r == '\\':
+			if i+1 >= len(runes) {
+				return nil, errors.New("ExecStart ends with a dangling backslash")
+			}
+			i++
+			current.WriteRune(runes[i])
+		case quote != 0 && r == quote:
+			quote = 0
+		case quote == 0 && (r == '"' || r == '\''):
+			quote, inWord = r, true
+		case quote == 0 && unicode.IsSpace(r):
+			if inWord {
+				words = append(words, current.String())
+				current.Reset()
+				inWord = false
+			}
+		default:
+			current.WriteRune(r)
+			inWord = true
+		}
+	}
+	if quote != 0 {
+		return nil, errors.New("ExecStart has an unterminated quote")
+	}
+	if inWord {
+		words = append(words, current.String())
+	}
+	unescape := strings.NewReplacer("%%", "%", "$$", "$")
+	for i, word := range words {
+		words[i] = unescape.Replace(word)
+	}
+	return words, nil
 }
 
 func parseLaunchdServiceInvocation(data []byte) (legacyServiceInvocation, error) {

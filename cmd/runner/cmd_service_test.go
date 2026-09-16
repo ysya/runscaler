@@ -1,9 +1,13 @@
 package main
 
 import (
+	"encoding/xml"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -86,35 +90,208 @@ func TestSystemdUnitSystemModeKeepsDockerDependency(t *testing.T) {
 	}
 }
 
-func TestSystemdUnitSystemModeKeepsLockDirWritable(t *testing.T) {
-	// ProtectSystem=strict mounts /tmp read-only; without an exception runner
-	// run fails with "open runner lock /tmp/runner.lock: read-only file system"
-	// and systemd restarts it forever.
-	for _, provider := range []string{"docker", "tart"} {
-		unit, err := renderSystemdUnit(installOpts{
-			binaryPath: "/usr/local/bin/runner",
-			configPath: "/etc/runner/config.toml",
-			provider:   provider,
-		})
-		if err != nil {
-			t.Fatal(err)
+func unitValues(unit, key string) []string {
+	var values []string
+	for line := range strings.SplitSeq(unit, "\n") {
+		if value, ok := strings.CutPrefix(line, key+"="); ok {
+			values = append(values, strings.Fields(value)...)
 		}
-		paths := readWritePaths(unit)
-		for _, want := range []string{"/etc/runner", "/tmp"} {
-			if !slices.Contains(paths, want) {
-				t.Errorf("%s unit ReadWritePaths = %q, missing %q", provider, paths, want)
-			}
+	}
+	return values
+}
+
+func TestSystemdUnitSystemModeSandbox(t *testing.T) {
+	unit, err := renderSystemdUnit(installOpts{
+		binaryPath: "/usr/local/bin/runner",
+		configPath: "/etc/runner/config.toml",
+		provider:   "docker",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := unitValues(unit, "ReadWritePaths"); !slices.Equal(got, []string{"/tmp"}) {
+		t.Errorf("ReadWritePaths = %q, want only /tmp (lock); config and socket stay read-only", got)
+	}
+	if got := unitValues(unit, "LogsDirectory"); !slices.Equal(got, []string{"runner"}) {
+		t.Errorf("LogsDirectory = %q, want runner", got)
+	}
+	for _, want := range []string{
+		"ProtectSystem=strict",
+		"NoNewPrivileges=true",
+		`Environment="RUNNER_SERVICE_VERSION=2"`,
+		`Environment="RUNNER_SERVICE_STOP_TIMEOUT=7260"`,
+		`ExecStart="/usr/local/bin/runner" run --config "/etc/runner/config.toml"`,
+	} {
+		if !strings.Contains(unit, want) {
+			t.Errorf("system unit missing %q:\n%s", want, unit)
 		}
 	}
 }
 
-func readWritePaths(unit string) []string {
-	for line := range strings.SplitSeq(unit, "\n") {
-		if value, ok := strings.CutPrefix(line, "ReadWritePaths="); ok {
-			return strings.Fields(value)
+func TestSystemdLogsDirectory(t *testing.T) {
+	str := func(s string) *string { return &s }
+	tests := []struct {
+		name        string
+		logFile     *string
+		wantDir     string
+		wantWarning bool
+	}{
+		{name: "unset", wantDir: "runner"},
+		{name: "subdirectory", logFile: str("/var/log/custom/runner.log"), wantDir: "custom"},
+		{name: "nested subdirectory", logFile: str("/var/log/ci/runner/runner.log"), wantDir: "ci/runner"},
+		{name: "directly in var log", logFile: str("/var/log/runner.log"), wantDir: "runner", wantWarning: true},
+		{name: "outside var log", logFile: str("/home/ada/runner/runner.log"), wantDir: "runner", wantWarning: true},
+		{name: "relative", logFile: str("logs/runner.log"), wantDir: "runner", wantWarning: true},
+		{name: "unsafe characters", logFile: str("/var/log/has space/runner.log"), wantDir: "runner", wantWarning: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir, warning := systemdLogsDirectory(tt.logFile)
+			if dir != tt.wantDir || (warning != "") != tt.wantWarning {
+				t.Errorf("systemdLogsDirectory() = %q, %q; want %q, warning %v", dir, warning, tt.wantDir, tt.wantWarning)
+			}
+		})
+	}
+}
+
+func TestSystemdUnitUsesCustomLogsDirectory(t *testing.T) {
+	logFile := "/var/log/custom/runner.log"
+	unit, err := renderSystemdUnit(installOpts{binaryPath: "/usr/local/bin/runner", configPath: "/etc/runner/config.toml", logFile: &logFile})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := unitValues(unit, "LogsDirectory"); !slices.Equal(got, []string{"custom"}) {
+		t.Errorf("LogsDirectory = %q, want custom", got)
+	}
+}
+
+func TestSystemdUnitEscapesExecStartArguments(t *testing.T) {
+	unit, err := renderSystemdUnit(installOpts{binaryPath: `/opt/my runner/100%/$HOME/run"er`, configPath: "/etc/runner/config.toml"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `ExecStart="/opt/my runner/100%%/$$HOME/run\"er" run --config "/etc/runner/config.toml"`
+	if !strings.Contains(unit, want) {
+		t.Errorf("unit missing %q:\n%s", want, unit)
+	}
+}
+
+func TestSystemdUnitRejectsControlCharacters(t *testing.T) {
+	if _, err := renderSystemdUnit(installOpts{binaryPath: "/opt/run\nner", configPath: "/etc/runner/config.toml"}); err == nil {
+		t.Fatal("a newline in the binary path was written into the unit")
+	}
+	if _, err := renderSystemdUnit(installOpts{user: true, binaryPath: "/opt/runner", configPath: "/etc/runner/config.toml", xdgStateHome: "/xdg/\tstate"}); err == nil {
+		t.Fatal("a tab in an environment value was written into the unit")
+	}
+}
+
+func TestSystemdExecStartRoundTrip(t *testing.T) {
+	for _, tc := range []struct{ binary, config string }{
+		{"/usr/local/bin/runner", "/etc/runner/config.toml"},
+		{`/opt/my runner/run"er`, `/data/100%/$HOME/c\fg.toml`},
+	} {
+		unit, err := renderSystemdUnit(installOpts{binaryPath: tc.binary, configPath: tc.config})
+		if err != nil {
+			t.Fatal(err)
+		}
+		invocation, err := parseSystemdServiceInvocation([]byte(unit))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if invocation.BinaryPath != tc.binary || invocation.ConfigPath != tc.config {
+			t.Errorf("round trip = %+v, want binary %q config %q", invocation, tc.binary, tc.config)
 		}
 	}
-	return nil
+}
+
+func TestSplitSystemdCommandRejectsUnterminatedQuote(t *testing.T) {
+	if _, err := splitSystemdCommand(`"/usr/local/bin/runner run`); err == nil {
+		t.Fatal("unterminated quote accepted")
+	}
+}
+
+func TestSystemdUserUnitRecordsAbsoluteXDG(t *testing.T) {
+	unit, err := renderSystemdUnit(installOpts{
+		user: true, binaryPath: "/home/ada/.local/bin/runner", configPath: "/home/ada/.config/runner/config.toml",
+		xdgStateHome: "/xdg/state", xdgConfigHome: "relative/config",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(unit, `Environment="XDG_STATE_HOME=/xdg/state"`) || strings.Contains(unit, "XDG_CONFIG_HOME") {
+		t.Errorf("user unit XDG environment wrong:\n%s", unit)
+	}
+	if strings.Contains(unit, "LogsDirectory=") || strings.Contains(unit, "ReadWritePaths=") {
+		t.Errorf("user unit must not carry the system sandbox:\n%s", unit)
+	}
+}
+
+func TestLaunchdPlistDiscardsStdoutAndRecordsEnvironment(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	plist, err := renderLaunchdPlist(installOpts{
+		user: true, binaryPath: "/Users/ada/.local/bin/runner", configPath: "/Users/ada/.config/runner/config.toml",
+		xdgStateHome: "/xdg/state",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"<key>StandardOutPath</key>\n    <string>/dev/null</string>",
+		"<key>StandardErrorPath</key>\n    <string>" + filepath.Join(home, "Library", "Logs", "runner", "stderr.log") + "</string>",
+		"<key>RUNNER_SERVICE_VERSION</key>\n        <string>2</string>",
+		"<key>RUNNER_SERVICE_STOP_TIMEOUT</key>\n        <string>7260</string>",
+		"<key>XDG_STATE_HOME</key>\n        <string>/xdg/state</string>",
+	} {
+		if !strings.Contains(plist, want) {
+			t.Errorf("plist missing %q:\n%s", want, plist)
+		}
+	}
+}
+
+func TestLaunchdPlistEscapesXML(t *testing.T) {
+	binary := "/Users/a&b/<bin>/runner"
+	plist, err := renderLaunchdPlist(installOpts{user: true, binaryPath: binary, configPath: "/Users/a&b/config.toml"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	invocation, err := parseLaunchdServiceInvocation([]byte(plist))
+	if err != nil {
+		t.Fatalf("plist is not parseable: %v\n%s", err, plist)
+	}
+	if invocation.BinaryPath != binary || invocation.ConfigPath != "/Users/a&b/config.toml" {
+		t.Errorf("XML round trip = %+v", invocation)
+	}
+	decoder := xml.NewDecoder(strings.NewReader(plist))
+	decoder.Strict = false // the DOCTYPE is not resolved
+	for {
+		if _, err := decoder.Token(); err == io.EOF {
+			break
+		} else if err != nil {
+			t.Fatalf("plist is not well-formed: %v", err)
+		}
+	}
+}
+
+func TestLaunchdPlistPassesPlutil(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("plutil is macOS-only")
+	}
+	plutil, err := exec.LookPath("plutil")
+	if err != nil {
+		t.Skip("plutil not found")
+	}
+	plist, err := renderLaunchdPlist(installOpts{user: true, binaryPath: "/Users/a&b/runner", configPath: "/Users/a b/config.toml"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "runner.plist")
+	if err := os.WriteFile(path, []byte(plist), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(plutil, "-lint", path).CombinedOutput(); err != nil {
+		t.Fatalf("plutil -lint: %v\n%s", err, out)
+	}
 }
 
 func TestLaunchdPlistInvokesRunSubcommand(t *testing.T) {

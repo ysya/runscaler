@@ -5,11 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/sys/unix"
 
 	"github.com/ysya/runscaler/internal/layout"
 )
@@ -48,16 +50,18 @@ func runLogs(cmd *cobra.Command, _ []string) error {
 	}
 	follow, _ := cmd.Flags().GetBool("follow")
 	if err := tailFile(cmd, path, lines, follow); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("log file %s does not exist — runner may not have started with this config yet", path)
-		}
-		return err
+		return explainLogReadError(err, path, id)
 	}
 	return nil
 }
 
 func tailFile(cmd *cobra.Command, path string, lines int, follow bool) error {
-	data, err := os.ReadFile(path)
+	f, err := openRegularFile(path)
+	if err != nil {
+		return err
+	}
+	data, err := io.ReadAll(f)
+	_ = f.Close()
 	if err != nil {
 		return err
 	}
@@ -74,8 +78,8 @@ func tailFile(cmd *cobra.Command, path string, lines int, follow bool) error {
 	}
 
 	offset := int64(len(data))
-	var identity os.FileInfo
-	if identity, err = os.Stat(path); err != nil {
+	identity, err := os.Stat(path)
+	if err != nil {
 		return err
 	}
 	for {
@@ -91,6 +95,9 @@ func tailFile(cmd *cobra.Command, path string, lines int, follow bool) error {
 			}
 			return err
 		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("%s is not a regular file; refusing to read it", path)
+		}
 		if !os.SameFile(identity, info) || info.Size() < offset {
 			offset = 0
 			identity = info
@@ -98,12 +105,15 @@ func tailFile(cmd *cobra.Command, path string, lines int, follow bool) error {
 		if info.Size() == offset {
 			continue
 		}
-		f, err := os.Open(path)
-		if err != nil {
+		f, err := openRegularFile(path)
+		if errors.Is(err, fs.ErrNotExist) {
 			continue
 		}
+		if err != nil {
+			return err
+		}
 		if _, err := f.Seek(offset, io.SeekStart); err != nil {
-			f.Close()
+			_ = f.Close()
 			return err
 		}
 		scanner := bufio.NewScanner(f)
@@ -113,9 +123,47 @@ func tailFile(cmd *cobra.Command, path string, lines int, follow bool) error {
 		}
 		offset, _ = f.Seek(0, io.SeekCurrent)
 		scanErr := scanner.Err()
-		f.Close()
+		_ = f.Close()
 		if scanErr != nil {
 			return scanErr
 		}
 	}
+}
+
+// openRegularFile opens path for reading and refuses anything but a regular
+// file, checked on the opened descriptor so a swapped path cannot slip in.
+// O_NONBLOCK keeps a FIFO from blocking the open itself.
+func openRegularFile(path string) (*os.File, error) {
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, &fs.PathError{Op: "open", Path: path, Err: err}
+	}
+	f := os.NewFile(uintptr(fd), path)
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		_ = f.Close()
+		return nil, fmt.Errorf("%s is not a regular file; refusing to read it", path)
+	}
+	return f, nil
+}
+
+// explainLogReadError turns the common failures into the next command to try.
+func explainLogReadError(err error, path string, id layout.Identity) error {
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		msg := fmt.Sprintf("log file %s does not exist — runner may not have started as this user yet", path)
+		if !id.Root && path != layout.SystemLogFile {
+			if _, sysErr := os.Stat(layout.SystemLogFile); sysErr == nil || errors.Is(sysErr, fs.ErrPermission) {
+				msg += fmt.Sprintf("\n\n  A system service logs to %s; run: sudo runner logs", layout.SystemLogFile)
+			}
+		}
+		return errors.New(msg)
+	case errors.Is(err, fs.ErrPermission):
+		return fmt.Errorf("%w\n\n  run: sudo runner logs", err)
+	}
+	return err
 }

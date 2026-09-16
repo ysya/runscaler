@@ -9,7 +9,7 @@ concurrent = 0                          # host-wide limit; 0 = sum of all max-ru
 health-address = "127.0.0.1"              # set 0.0.0.0 explicitly for remote monitoring
 health-port = 8080
 # drain-timeout = "2h"                    # SIGTERM/SIGQUIT wait for busy jobs; "0s" disables drain
-# log-file = "/var/log/runner/runner.log" # default: runner.log beside this config; "" disables
+# log-file = "/var/log/runner/runner.log" # default: /var/log/runner/runner.log (root), ~/.local/state/runner/runner.log (Linux), ~/Library/Logs/runner/runner.log (macOS); "" disables
 
 # --- Defaults (inherited by all scale sets unless overridden) ---
 # A key set in a [[scaleset]] always wins, even with a zero/empty value:

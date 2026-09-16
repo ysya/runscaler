@@ -33,6 +33,7 @@ Runners are **ephemeral** — each container/VM handles exactly one job and is r
   - [Graceful Shutdown](#graceful-shutdown)
 - [Building](#building)
 - [Architecture](#architecture)
+- [Upgrading to v0.10](#upgrading-to-v010)
 - [Upgrading from runscaler](#upgrading-from-runscaler)
 - [License](#license)
 
@@ -109,7 +110,7 @@ flowchart LR
 curl -fsSL https://raw.githubusercontent.com/ysya/runscaler/main/install.sh | sh
 ```
 
-Installs to `~/.local/bin` by default (no sudo required). Set `INSTALL_DIR` to customize, or `RUNNER_VERSION` to pin a version:
+Installs to `~/.local/bin` by default (no sudo required); run as root (for example `curl -fsSL https://raw.githubusercontent.com/ysya/runscaler/main/install.sh | sudo sh`) it installs to `/usr/local/bin`, where a system service's binary must live. Set `INSTALL_DIR` to customize, or `RUNNER_VERSION` to pin a version:
 
 ```bash
 # Install to a custom location (e.g. system-wide)
@@ -133,13 +134,14 @@ Download from [Releases](https://github.com/ysya/runscaler/releases) and add to 
 
 ```bash
 # Generate config interactively
+# (writes ~/.config/runner/config.toml, or /etc/runner/config.toml as root)
 runner init
 
-# Validate everything before starting
-runner validate --config config.toml
+# Validate everything before starting (the standard config path is found automatically)
+runner validate
 
 # Start scaling
-runner run --config config.toml
+runner run
 
 # Or using CLI flags directly
 runner run \
@@ -149,7 +151,7 @@ runner run \
   --max-runners 10
 
 # Dry run — validate config, Docker, and images without starting listeners
-runner run --dry-run --config config.toml
+runner run --dry-run
 ```
 
 Then in your workflow:
@@ -174,6 +176,7 @@ jobs:
 | `runner doctor`          | Diagnose and clean up orphaned containers/VMs          |
 | `runner cache`           | Show disk usage and retention policy for every cache store |
 | `runner logs`            | Show/follow runner's rotating log file                  |
+| `runner service`         | Install, regenerate (`--force`), start, stop, and inspect the service |
 | `runner version`         | Show version, commit, build date, and runtime info     |
 | `runner update`          | Update runner to the latest release                    |
 | `runner update --check`  | Check for updates without installing                   |
@@ -246,10 +249,20 @@ later job in an in-flight workflow.
 
 ### Logs
 
-`runner run` writes to stdout and a rotating file (10 MB plus one backup).
-With a config file, the default is `runner.log` next to that config; without
-one, it is `runner.log` in the working directory. Set `log-file` to an explicit
-path, or set `log-file = ""` to disable file logging.
+`runner run` writes to stdout and a rotating file (10 MB plus one backup). The
+file's default location depends on who runs it:
+
+| Runs as | Log file |
+| --- | --- |
+| root (system service or `sudo runner run`) | `/var/log/runner/runner.log` |
+| a user on Linux | `$XDG_STATE_HOME/runner/runner.log` (`~/.local/state/runner/runner.log`) |
+| a user on macOS | `~/Library/Logs/runner/runner.log` |
+
+Set `log-file` to an explicit path, or `log-file = ""` to disable file logging.
+As root, `log-file` must be in a directory under `/var/log` whose name uses only
+letters, digits, `.`, `_` or `-`; anything else falls back to the default with a
+warning. Releases before v0.10 wrote `runner.log` beside the config; that file is
+left in place.
 
 Log output on stdout is colored only when stdout is a terminal; under systemd,
 launchd, `docker run` without `-t`, CI or a pipe it stays plain. The log file
@@ -257,8 +270,8 @@ never contains color codes. Set `NO_COLOR=1` to turn color off or
 `CLICOLOR_FORCE=1` to force it on.
 
 ```bash
-runner logs --config config.toml          # last 100 lines
-runner logs -n 500 -f --config config.toml
+runner logs                 # last 100 lines (add sudo for a system service)
+runner logs -n 500 -f
 ```
 
 Only one `runner run` process may be active on a host. Put every organization
@@ -291,7 +304,7 @@ runner-group = "default"
 log-level = "info"
 log-format = "text"
 concurrent = 10                          # host-wide across all scale sets; 0 = automatic sum
-# log-file = "/var/log/runner/runner.log" # default: runner.log beside config
+# log-file = "/var/log/runner/runner.log" # default: /var/log/runner/runner.log (root), ~/.local/state/runner/runner.log (Linux), ~/Library/Logs/runner/runner.log (macOS); "" disables
 health-address = "127.0.0.1"              # localhost-only by default
 health-port = 8080
 # drain-timeout = "2h"                    # 0s disables graceful drain
@@ -639,47 +652,70 @@ kill -TERM <pid>
 ```
 
 `runner service install` generates a systemd `TimeoutStopSec` or launchd
-`ExitTimeOut` one minute longer than the configured drain budget. A binary
-update cannot rewrite an already-installed service file, so services installed
-before drain support should be refreshed once:
+`ExitTimeOut` one minute longer than the configured drain budget and records
+it, so runner warns when a later `drain-timeout` outgrows it. A binary update
+does not rewrite an installed service definition; regenerate it in place:
 
 ```bash
-sudo runner service uninstall --user=false
-sudo runner service install --user=false
+sudo runner service install --user=false --force --config-path /etc/runner/config.toml   # Linux system service
+runner service install --user --force --config-path ~/.config/runner/config.toml               # user service
 ```
 
-For a user-level service, omit `sudo` and use `--user` instead of `--user=false`.
-User scope is the default on macOS.
-
-The same reinstall fixes a system-level systemd service from an older release
-that fails with `open runner lock /tmp/runner.lock: read-only file system`: its
-`ProtectSystem=strict` sandbox kept `/tmp` read-only.
+`--force` validates the config and binary and renders the new definition before
+touching the installed one. When a definition is outdated, runner logs this
+command with the exact config and binary paths it is running with.
 
 After that, the normal upgrade flow is:
 
 ```bash
-runner update
+runner update              # add sudo when the binary is in /usr/local/bin
 runner service restart     # waits for active jobs automatically
 ```
 
-On macOS, launchd starts services with a minimal `PATH`. runner appends
-`/opt/homebrew/bin` and `/usr/local/bin` when they exist, so a Homebrew-installed
-`tart` is found without editing the plist.
+### Service layout
+
+- **Linux system service** runs as root and must execute a binary only root can
+  modify, such as `/usr/local/bin/runner`; `runner service install --user=false`
+  refuses anything else. The unit sets `ProtectSystem=strict`: `/etc/runner`
+  stays read-only, logs go to `LogsDirectory=runner` (`/var/log/runner`), and
+  only `/tmp` is writable, for the run lock.
+- **macOS** supports only a LaunchAgent for the logged-in user. It starts at
+  login, so enable automatic login on unattended hosts, and install it from a
+  local GUI session rather than SSH. runner refuses to run, install or migrate
+  as root on macOS. launchd starts agents with a minimal `PATH`; runner appends
+  `/opt/homebrew/bin` and `/usr/local/bin` when present so a Homebrew-installed
+  `tart` is found. The agent discards stdout (runner writes its own rotated log)
+  and keeps stderr in `~/Library/Logs/runner/stderr.log`, which is not rotated.
+- The run lock at `/tmp/runner.lock` prevents accidentally starting a second
+  runner; it is not a security boundary against local users.
 
 ### Systemd
+
+This is the unit `sudo runner service install --user=false` generates for a
+Docker configuration with the default drain timeout. Prefer the command, so
+the unit stays in sync with the binary.
 
 ```ini
 [Unit]
 Description=GitHub Actions Runner Manager
 After=docker.service
 Requires=docker.service
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/runner run --config /etc/runner/config.toml
+ExecStart="/usr/local/bin/runner" run --config "/etc/runner/config.toml"
 Restart=on-failure
 RestartSec=10s
+# Must exceed runner's drain budget so systemd does not SIGKILL an in-flight job.
 TimeoutStopSec=7260
+Environment="RUNNER_SERVICE_VERSION=2"
+Environment="RUNNER_SERVICE_STOP_TIMEOUT=7260"
+NoNewPrivileges=true
+ProtectSystem=strict
+LogsDirectory=runner
+ReadWritePaths=/tmp
 
 [Install]
 WantedBy=multi-user.target
@@ -725,6 +761,37 @@ an `InstanceProvider` lifecycle:
 - `HandleJobStarted` — Marks runners as busy
 - `HandleJobCompleted` — Removes finished runners
 
+## Upgrading to v0.10
+
+v0.10 moves runner's own files to the platform's standard locations and never
+moves existing files.
+
+| Existing setup | After upgrading the binary | What to do |
+| --- | --- | --- |
+| Linux system service | Fails to take the lock and prints a fix | Put the binary in `/usr/local/bin` (root-owned), then run the printed `service install --user=false --force` command |
+| Linux user service | Runs; logs move; warns | Run the printed `service install --force` command |
+| macOS LaunchAgent | Runs; logs move; warns | Run the printed `service install --force` command |
+| macOS LaunchDaemon | Refuses to run as root | Convert it as below |
+| tmux / foreground | Logs move; notes the old file | Nothing; delete the old `runner.log` to silence the note |
+
+### macOS LaunchDaemon to LaunchAgent
+
+1. Record the old definition: `sudo cat /Library/LaunchDaemons/io.github.ysya.runner.plist`
+   (or `com.runscaler.agent.plist`) and note the binary and config paths in
+   `ProgramArguments`.
+2. Remove it: `sudo runner service uninstall --user=false` (this also removes
+   the legacy plist).
+3. Hand the config to your user:
+   `mkdir -p ~/.config/runner && chmod 700 ~/.config/runner`, then
+   `sudo install -o "$USER" -m 0600 <old config> ~/.config/runner/config.toml`
+4. Tart images used by root live in `/var/root/.tart`; pull them again as your
+   user (and update `[tart] home` if it pointed at root's directory).
+5. Keep the binary where your user can run it (`~/.local/bin`, or
+   `/usr/local/bin` with `sudo runner update`).
+6. Install as your user from a local GUI session:
+   `runner service install --config-path ~/.config/runner/config.toml`
+7. Enable automatic login so the agent starts after a reboot.
+
 ## Upgrading from runscaler
 
 The `runscaler` binary is now `runner` (start is a subcommand: `runner run`).
@@ -735,18 +802,19 @@ After installing the new binary, run:
     runner migrate --user --dry-run        # inspect user-level changes
     runner migrate --user                  # no sudo; uses ~/.config/runner
 
-On macOS, `runner migrate` and all `runner service` commands default to
-user scope (no sudo). Services use `~/Library/LaunchAgents` and start at login;
-they do not provide pre-login startup. Use `--user=false` explicitly to manage
-an existing system service. Linux retains its system-level default. User
-migration does not stop or uninstall a system-level service.
+On macOS, `runner migrate` and all `runner service` commands default to user
+scope (no sudo). On macOS, `runner migrate` refuses system scope and refuses to
+run as root; migrate with `--user`. Services use `~/Library/LaunchAgents` and
+start at login; they do not provide pre-login startup. Use `--user=false`
+explicitly to manage an existing system service. Linux retains its system-level
+default. User migration does not stop or uninstall a system-level service.
 
 `migrate` creates a `0600` backup before changing config. Backup filenames
 include the runner version, a UTC timestamp, the config SHA-256 prefix, and an
 original-path fingerprint; an adjacent JSON manifest records provenance and a
 restore command without copying config values or tokens into the manifest.
-System backups live under `/etc/runner/backups`; `--user` backups live under
-`~/.config/runner/backups`.
+System backups live under `/var/lib/runner/backups`; `--user` backups live under
+`$XDG_STATE_HOME/runner/backups` (`~/.local/state/runner/backups`).
 
 The migrated copy preserves comments, ordering, whitespace, and values while
 canonicalizing deprecated keys (`backend` → `provider`,
@@ -766,13 +834,17 @@ are never removed. If no user config exists, `/etc/runscaler/config.toml` or
 removes these system sources. Use `--backup-dir` to override the backup location.
 
 On both Linux and macOS, an absolute, nonempty `XDG_CONFIG_HOME` replaces
-`~/.config` for user config and its default backups. Relative values are ignored.
-Config loading searches the current directory, user runner directory,
-`/etc/runner`, user runscaler directory, then `/etc/runscaler`. An explicit
-`--config` takes precedence. `init` continues to write `./config.toml` unless
-`--output` is supplied. User service installation selects that local file if
-present, otherwise the user runner config; it stores an absolute path in the
-service definition. `--config-path` overrides `--config` for service installation.
+`~/.config` for user config, and `XDG_STATE_HOME` replaces `~/.local/state` for
+user logs (Linux) and backups. Relative values are ignored. Installing a user
+service records these variables in the service definition so the service and
+the CLI agree. Config loading searches the current directory, user runner
+directory, `/etc/runner`, user runscaler directory, then `/etc/runscaler`. An
+explicit `--config` takes precedence. `init` writes the standard config path
+for the current user unless `--output` is supplied, and warns when a
+`config.toml` in the current directory would be found first. User service
+installation selects that local file if present, otherwise the user runner
+config; it stores an absolute path in the service definition. `--config-path`
+overrides `--config` for service installation.
 
 The legacy Docker volume is intentionally left untouched by default. Remove it
 only after reviewing the migration with `runner migrate --cleanup` (or add

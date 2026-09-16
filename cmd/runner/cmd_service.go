@@ -1004,52 +1004,6 @@ func resolveConfigPath(cmd *cobra.Command) (string, error) {
 	return path, nil
 }
 
-func detectProvider(configPath string) string {
-	if configPath == "" {
-		return platformDefaultProvider()
-	}
-	v := viper.New()
-	v.SetConfigFile(configPath)
-	if err := v.ReadInConfig(); err != nil {
-		return platformDefaultProvider()
-	}
-	cfg, err := config.Load(v)
-	if err != nil {
-		return platformDefaultProvider()
-	}
-	sets := cfg.ResolveScaleSets()
-	for _, ss := range sets {
-		if !ss.IsTart() {
-			return config.DefaultProvider
-		}
-	}
-	if len(sets) > 0 {
-		return "tart"
-	}
-	return platformDefaultProvider()
-}
-
-// detectDrainTimeout reads only enough configuration to preserve the
-// distinction between an omitted value (nil, inherit the default) and an
-// explicit zero (disable drain). Missing config keeps the existing install
-// behavior: runServiceInstall has already warned and the generated service
-// uses the compiled-in default.
-func detectDrainTimeout(configPath string) (*time.Duration, error) {
-	if configPath == "" {
-		return nil, nil
-	}
-	v := viper.New()
-	v.SetConfigFile(configPath)
-	if err := v.ReadInConfig(); err != nil {
-		return nil, nil
-	}
-	cfg, err := config.Load(v)
-	if err != nil {
-		return nil, fmt.Errorf("read drain-timeout from %s: %w", configPath, err)
-	}
-	return cfg.DrainTimeout, nil
-}
-
 // serviceStopTimeout gives the service manager one minute beyond runner's
 // own drain deadline. When drain is disabled, that minute still covers the
 // normal 30-second forced cleanup and scale-set deletion.

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 
 	"github.com/ysya/runscaler/internal/layout"
 )
@@ -95,6 +96,33 @@ func TestTailFileFollowStopsWhenLogBecomesFIFO(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("follow kept waiting on a FIFO")
+	}
+}
+
+func TestRunLogsSuggestsSudoForUnreadableConfig(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a mode 0000 file")
+	}
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte("log-level = \"info\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+	c := &cobra.Command{Use: "logs"}
+	c.Flags().String("config", "", "")
+	c.Flags().Int("lines", 100, "")
+	c.Flags().Bool("follow", false, "")
+	if err := c.Flags().Set("config", path); err != nil {
+		t.Fatal(err)
+	}
+
+	err := runLogs(c, nil)
+	if err == nil || !strings.Contains(err.Error(), "sudo runner logs") || !errors.Is(err, fs.ErrPermission) {
+		t.Fatalf("runLogs() = %v, want a permission error with the sudo hint", err)
 	}
 }
 

@@ -146,7 +146,7 @@ ReadWritePaths=/tmp
 
 - `ReadWritePaths` 只剩 `/tmp`（由 `filepath.Dir(lock.DefaultPath)` 推得，供 lock）。移除 docker socket：kernel 檢查 AF_UNIX `connect` 的寫入權限時不受唯讀 bind mount 影響，此點須於 E2E 實測；若不成立，改回並加 `-` 前綴
 - `LogsDirectory`：預設 `runner`。config 明確設定的 `log-file` 通過 `layout.SystemLogsDirectory` 時改用其相對目錄；不通過時安裝階段警告並維持 `runner`，runner 執行時也依同一規則改寫預設位置（D.1），兩者一致。config 目錄永遠維持唯讀
-- **跳脫**：`ExecStart` 的每個參數以雙引號包住，跳脫 `\`、`"`，並把 `%`、`$` 寫成 `%%`、`$$`；`Environment=` 的值只跳脫 `\`、`"`、`%`。任何路徑或值含控制字元（含換行）時拒絕產生 unit
+- **跳脫**：`ExecStart` 的每個字以雙引號包住。執行檔（第一個字）只把 `%` 寫成 `%%`：systemd 會展開執行檔路徑中的指定符，但不展開 `$`，且拒絕其中的引號、反斜線、控制字元與 glob 字元（`*?[`），因此路徑含這些字元（或不是合法 UTF-8）時拒絕產生 unit。其餘參數跳脫 `\`、`"`，並把 `%`、`$` 寫成 `%%`、`$$`；`Environment=` 的值只跳脫 `\`、`"`、`%`。任何路徑或值含控制字元（含換行）時拒絕產生 unit
 - **解析**：migrate 讀取既有 unit 的 `ExecStart` 時，須還原上述引號與跳脫（含舊版未加引號的 unit），render → parse 必須 round-trip
 - user unit：新增 `RUNNER_SERVICE_VERSION`、`RUNNER_SERVICE_STOP_TIMEOUT`，以及安裝當下為絕對路徑的 `XDG_CONFIG_HOME` / `XDG_STATE_HOME`（讓 service 與 CLI 算出相同路徑）
 
@@ -299,7 +299,7 @@ README 新增升級說明涵蓋 E.1、E.2，並同步修正所有仍描述舊預
 - **log 檔**：使用者模式 log 檔名為 symlink 時拒絕；root 模式（以注入的所有權檢查在非 root 下測試）中間目錄為 symlink 時拒絕、目錄權限不安全時拒絕、缺少的目錄被建立；開啟後把目錄改名並在原位置放 symlink，輪替產生的檔案仍留在原目錄
 - **log 路徑決策**：純函式表格測試（使用者、root 預設、root 合法明確設定含 fallback、root 不合法設定、停用、缺 `$HOME`）；開檔失敗時改開 fallback
 - **service 範本**：
-  - unit：`LogsDirectory` 預設與自訂、`ReadWritePaths` 只有 `/tmp`、版本與停止逾時環境變數、user unit 的 XDG 變數、`ExecStart` 參數對 `%`、`$`、`"`、`\`、空白的跳脫、控制字元被拒；render → parse round-trip（含舊版未加引號的 unit）
+  - unit：`LogsDirectory` 預設與自訂、`ReadWritePaths` 只有 `/tmp`、版本與停止逾時環境變數、user unit 的 XDG 變數、`ExecStart` 參數對 `%`、`$`、`"`、`\`、空白的跳脫、執行檔路徑只跳脫 `%` 並拒絕引號、反斜線、glob 字元與非 UTF-8、控制字元被拒；render → parse round-trip（含舊版未加引號的 unit）
   - plist：stdout 為 `/dev/null`、stderr 路徑、環境變數、含 `&`／`<` 的路徑經 XML escape 後能被解析；macOS 上 `plutil -lint` 通過（不載入）
 - **安裝準備**：config 不存在（全新安裝警告、必要時拒絕）、語法錯誤、載入失敗、合法 config 的各項事實；`service install` 與 migrate 產生相同的 `installOpts`
 - **binary 安全檢查**：注入 stat 的表格測試，涵蓋擁有者非 root、group 可寫、others 可寫、祖先目錄不安全、非 regular file、symlink 解析、解析失敗；真實檔案測試（`/bin/sh` 為 root 專屬時通過；權限設為 0666 的檔案必定被拒）

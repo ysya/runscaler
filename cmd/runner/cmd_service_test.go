@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -83,6 +84,37 @@ func TestSystemdUnitSystemModeKeepsDockerDependency(t *testing.T) {
 	if !strings.Contains(unit, "run --config") {
 		t.Errorf("ExecStart must invoke the `run` subcommand:\n%s", unit)
 	}
+}
+
+func TestSystemdUnitSystemModeKeepsLockDirWritable(t *testing.T) {
+	// ProtectSystem=strict mounts /tmp read-only; without an exception runner
+	// run fails with "open runner lock /tmp/runner.lock: read-only file system"
+	// and systemd restarts it forever.
+	for _, provider := range []string{"docker", "tart"} {
+		unit, err := renderSystemdUnit(installOpts{
+			binaryPath: "/usr/local/bin/runner",
+			configPath: "/etc/runner/config.toml",
+			provider:   provider,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		paths := readWritePaths(unit)
+		for _, want := range []string{"/etc/runner", "/tmp"} {
+			if !slices.Contains(paths, want) {
+				t.Errorf("%s unit ReadWritePaths = %q, missing %q", provider, paths, want)
+			}
+		}
+	}
+}
+
+func readWritePaths(unit string) []string {
+	for line := range strings.SplitSeq(unit, "\n") {
+		if value, ok := strings.CutPrefix(line, "ReadWritePaths="); ok {
+			return strings.Fields(value)
+		}
+	}
+	return nil
 }
 
 func TestLaunchdPlistInvokesRunSubcommand(t *testing.T) {

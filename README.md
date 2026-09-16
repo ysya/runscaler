@@ -651,12 +651,20 @@ sudo runner service install --user=false
 For a user-level service, omit `sudo` and use `--user` instead of `--user=false`.
 User scope is the default on macOS.
 
+The same reinstall fixes a system-level systemd service from an older release
+that fails with `open runner lock /tmp/runner.lock: read-only file system`: its
+`ProtectSystem=strict` sandbox kept `/tmp` read-only.
+
 After that, the normal upgrade flow is:
 
 ```bash
 runner update
 runner service restart     # waits for active jobs automatically
 ```
+
+On macOS, launchd starts services with a minimal `PATH`. runner appends
+`/opt/homebrew/bin` and `/usr/local/bin` when they exist, so a Homebrew-installed
+`tart` is found without editing the plist.
 
 ### Systemd
 

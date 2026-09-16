@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/viper"
 
 	"github.com/ysya/runscaler/internal/config"
+	runnerlock "github.com/ysya/runscaler/internal/lock"
 )
 
 // Service file paths and identifiers.
@@ -328,6 +329,10 @@ func renderSystemdUnit(opts installOpts) (string, error) {
 	if opts.provider == "docker" {
 		rwPaths += " /var/run/docker.sock"
 	}
+	// ProtectSystem=strict leaves /tmp read-only, where runner run creates its
+	// machine-wide lock. PrivateTmp would not help: a private /tmp hides the
+	// lock from runners started outside the service.
+	rwPaths += " " + filepath.Dir(runnerlock.DefaultPath)
 
 	data := systemdData{
 		Description:        serviceDescription,

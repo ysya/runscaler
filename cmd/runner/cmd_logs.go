@@ -151,13 +151,16 @@ func openRegularFile(path string) (*os.File, error) {
 	return f, nil
 }
 
+// statSystemLog checks the system log's presence; tests replace it.
+var statSystemLog = os.Stat
+
 // explainLogReadError turns the common failures into the next command to try.
 func explainLogReadError(err error, path string, id layout.Identity) error {
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		msg := fmt.Sprintf("log file %s does not exist — runner may not have started as this user yet", path)
 		if !id.Root && path != layout.SystemLogFile {
-			if _, sysErr := os.Stat(layout.SystemLogFile); sysErr == nil || errors.Is(sysErr, fs.ErrPermission) {
+			if _, sysErr := statSystemLog(layout.SystemLogFile); sysErr == nil || errors.Is(sysErr, fs.ErrPermission) {
 				msg += fmt.Sprintf("\n\n  A system service logs to %s; run: sudo runner logs", layout.SystemLogFile)
 			}
 		}

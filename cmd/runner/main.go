@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -135,6 +136,13 @@ func main() {
 // Shared by `runner run` and the root drop-in compat path. var (not func) so
 // tests can stub it.
 var startManager = func(cmd *cobra.Command) error {
+	// Runtime failures are not usage errors; the full flag list buried the
+	// actual cause in service logs.
+	cmd.SilenceUsage = true
+	if err := refuseDarwinRoot(runtime.GOOS, os.Geteuid(), "run runner", pathExists); err != nil {
+		return err
+	}
+
 	cfg, err := loadConfig(cmd)
 	if err != nil {
 		return err
@@ -273,7 +281,8 @@ func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) e
 	if logFile != nil {
 		defer func() { _ = logFile.Close() }()
 	}
-	logger := config.NewLoggerWithWriter(cfg.LogLevel, cfg.LogFormat, os.Stdout, logWriter(logFile))
+	console := logConsole(stdoutIsDevNull(), logFile != nil)
+	logger := config.NewLoggerWithWriter(cfg.LogLevel, cfg.LogFormat, console, logWriter(logFile))
 	if old := oldDefaultLogFile(cfg, viper.ConfigFileUsed(), logPath); old != "" {
 		logger.Info("Log file location changed; the old file is left in place",
 			slog.String("path", logPath), slog.String("old", old))
@@ -547,7 +556,7 @@ func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) e
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			ssLogger := config.NewScaleSetLoggerWithWriter(cfg.LogLevel, cfg.LogFormat, ss.ScaleSetName, i, os.Stdout, logWriter(logFile))
+			ssLogger := config.NewScaleSetLoggerWithWriter(cfg.LogLevel, cfg.LogFormat, ss.ScaleSetName, i, console, logWriter(logFile))
 			if err := runScaleSetController(runCtx, drain, cfg.EffectiveDrainTimeout(), ss, dockerClients[ss.Docker.Socket], ssLogger, healthServer, tartCoordinator, guard, capacityAllocators[i]); err != nil {
 				errs <- fmt.Errorf("scaleset %q: %w", ss.ScaleSetName, err)
 				cancelRun()

@@ -93,6 +93,26 @@ func openRunLog(id layout.Identity, d logFileDecision) (*config.LogFileWriter, s
 	return w, d.Fallback, warnings
 }
 
+// stdoutIsDevNull reports whether stdout is discarded, as generated launchd
+// agents set it.
+func stdoutIsDevNull() bool {
+	out, err := os.Stdout.Stat()
+	if err != nil {
+		return false
+	}
+	null, err := os.Stat(os.DevNull)
+	return err == nil && os.SameFile(out, null)
+}
+
+// logConsole keeps log lines visible when stdout is discarded and no log
+// file is open, by sending them to stderr instead.
+func logConsole(stdoutDiscarded, fileOpen bool) *os.File {
+	if stdoutDiscarded && !fileOpen {
+		return os.Stderr
+	}
+	return os.Stdout
+}
+
 // oldDefaultLogFile returns the log older releases wrote beside the config
 // when it still exists and is not where runner writes now.
 func oldDefaultLogFile(cfg config.Config, usedConfig, current string) string {

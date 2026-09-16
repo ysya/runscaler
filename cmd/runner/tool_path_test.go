@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -50,5 +51,30 @@ func TestAppendMissingDirs(t *testing.T) {
 				t.Errorf("appendMissingDirs(%q) = %q, want %q", tt.path, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestHomebrewPathOnlyChangesMacOS(t *testing.T) {
+	dir := t.TempDir()
+	saved := homebrewBinDirs
+	t.Cleanup(func() { homebrewBinDirs = saved })
+	homebrewBinDirs = []string{dir}
+
+	if got := homebrewPath("linux", "/usr/bin"); got != "/usr/bin" {
+		t.Errorf("linux PATH = %q, want it unchanged", got)
+	}
+	if got := homebrewPath("darwin", "/usr/bin"); got != "/usr/bin:"+dir {
+		t.Errorf("darwin PATH = %q, want %q", got, "/usr/bin:"+dir)
+	}
+}
+
+func TestAppendMissingDirsSkipsFilesAndDuplicateCandidates(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(file, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := appendMissingDirs("/usr/bin", []string{file, dir, dir}); got != "/usr/bin:"+dir {
+		t.Errorf("appendMissingDirs() = %q, want %q", got, "/usr/bin:"+dir)
 	}
 }

@@ -779,12 +779,12 @@ func parseLogLevel(level string) charmlog.Level {
 // NewLogger creates a structured logger with the given level and format,
 // and sets it as the process-wide default.
 func NewLogger(level, format string) *slog.Logger {
-	return NewLoggerWithWriter(level, format, nil)
+	return NewLoggerWithWriter(level, format, os.Stdout, nil)
 }
 
-// NewLoggerWithWriter creates a process logger that tees to file when one is
-// supplied. The writer may be shared safely with scale-set loggers.
-func NewLoggerWithWriter(level, format string, file io.Writer) *slog.Logger {
+// NewLoggerWithWriter creates a process logger writing to console and, when
+// file is non-nil, teeing to it. The writer may be shared with scale-set loggers.
+func NewLoggerWithWriter(level, format string, console *os.File, file io.Writer) *slog.Logger {
 	opts := charmlog.Options{
 		ReportTimestamp: true,
 		TimeFormat:      time.DateTime,
@@ -795,8 +795,8 @@ func NewLoggerWithWriter(level, format string, file io.Writer) *slog.Logger {
 		opts.Formatter = charmlog.JSONFormatter
 	}
 
-	handler := charmlog.NewWithOptions(outputWriter(file), opts)
-	handler.SetColorProfile(stdoutColorProfile())
+	handler := charmlog.NewWithOptions(outputWriter(console, file), opts)
+	handler.SetColorProfile(consoleColorProfile(console))
 	logger := slog.New(&demoteHandler{inner: handler, demote: demoteMessages})
 	slog.SetDefault(logger)
 	return logger
@@ -816,10 +816,13 @@ var scaleSetColors = []color.Color{
 // NewScaleSetLogger creates a logger with a colored prefix for the given scale set.
 // The color is determined by the index, cycling through the palette.
 func NewScaleSetLogger(level, format string, name string, index int) *slog.Logger {
-	return NewScaleSetLoggerWithWriter(level, format, name, index, nil)
+	return NewScaleSetLoggerWithWriter(level, format, name, index, os.Stdout, nil)
 }
 
-func NewScaleSetLoggerWithWriter(level, format string, name string, index int, file io.Writer) *slog.Logger {
+// NewScaleSetLoggerWithWriter creates a scale-set logger writing to console
+// and, when file is non-nil, teeing to it. The writer may be shared with the
+// process logger.
+func NewScaleSetLoggerWithWriter(level, format string, name string, index int, console *os.File, file io.Writer) *slog.Logger {
 	opts := charmlog.Options{
 		ReportTimestamp: true,
 		TimeFormat:      time.DateTime,
@@ -831,8 +834,8 @@ func NewScaleSetLoggerWithWriter(level, format string, name string, index int, f
 		opts.Formatter = charmlog.JSONFormatter
 	}
 
-	handler := charmlog.NewWithOptions(outputWriter(file), opts)
-	handler.SetColorProfile(stdoutColorProfile())
+	handler := charmlog.NewWithOptions(outputWriter(console, file), opts)
+	handler.SetColorProfile(consoleColorProfile(console))
 
 	// Apply color only for text format (not JSON)
 	if strings.ToLower(format) != "json" {

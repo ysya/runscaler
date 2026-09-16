@@ -1,14 +1,17 @@
 package main
 
 import (
+	"encoding/xml"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"text/template"
 	"time"
+	"unicode"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -55,6 +58,13 @@ type installOpts struct {
 	// nil means the config omitted drain-timeout and therefore inherits the
 	// compiled-in default; a non-nil zero explicitly disables draining.
 	drainTimeout *time.Duration
+	// logFile is the config's explicit log-file (nil when unset); a system
+	// unit can only grant it a directory under /var/log.
+	logFile *string
+	// XDG base directories of the installing shell, recorded in user
+	// services so the service and the CLI resolve the same paths.
+	xdgConfigHome string
+	xdgStateHome  string
 }
 
 func newServiceManager() (serviceManager, error) {
@@ -295,14 +305,18 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart={{.BinaryPath}} run --config {{.ConfigPath}}
+ExecStart={{.ExecStart}}
 Restart=on-failure
 RestartSec=10s
 # Must exceed runner's drain budget so systemd does not SIGKILL an in-flight job.
 TimeoutStopSec={{.StopTimeoutSeconds}}
+{{- range .Environment}}
+Environment={{.}}
+{{- end}}
 {{- if not .User}}
 NoNewPrivileges=true
 ProtectSystem=strict
+LogsDirectory={{.LogsDirectory}}
 ReadWritePaths={{.ReadWritePaths}}
 {{- end}}
 
@@ -312,43 +326,116 @@ WantedBy={{- if .User}}default.target{{- else}}multi-user.target{{- end}}
 
 type systemdData struct {
 	Description        string
-	BinaryPath         string
-	ConfigPath         string
+	ExecStart          string
 	AfterDocker        bool
 	User               bool
+	LogsDirectory      string
 	ReadWritePaths     string
 	StopTimeoutSeconds int
+	Environment        []string
 }
 
 type systemdManager struct{}
 
 // renderSystemdUnit renders the complete unit used by install. Keeping
-// rendering separate from filesystem writes makes the stop-timeout safety
-// property directly testable.
+// rendering separate from filesystem writes makes the sandbox directly testable.
 func renderSystemdUnit(opts installOpts) (string, error) {
-	rwPaths := filepath.Dir(opts.configPath)
-	if opts.provider == "docker" {
-		rwPaths += " /var/run/docker.sock"
+	binary, err := systemdExecArg(opts.binaryPath)
+	if err != nil {
+		return "", fmt.Errorf("binary path: %w", err)
 	}
-	// ProtectSystem=strict leaves /tmp read-only, where runner run creates its
-	// machine-wide lock. PrivateTmp would not help: a private /tmp hides the
-	// lock from runners started outside the service.
-	rwPaths += " " + filepath.Dir(runnerlock.DefaultPath)
-
+	configPath, err := systemdExecArg(opts.configPath)
+	if err != nil {
+		return "", fmt.Errorf("config path: %w", err)
+	}
+	logsDir, _ := systemdLogsDirectory(opts.logFile)
 	data := systemdData{
-		Description:        serviceDescription,
-		BinaryPath:         opts.binaryPath,
-		ConfigPath:         opts.configPath,
-		AfterDocker:        opts.provider == "docker",
-		User:               opts.user,
-		ReadWritePaths:     rwPaths,
+		Description:   serviceDescription,
+		ExecStart:     binary + " run --config " + configPath,
+		AfterDocker:   opts.provider == "docker",
+		User:          opts.user,
+		LogsDirectory: logsDir,
+		// ProtectSystem=strict leaves /tmp read-only, where runner run creates
+		// its machine-wide lock. PrivateTmp would not help: a private /tmp
+		// hides the lock from runners started outside the service. Unix
+		// sockets such as Docker's stay connectable on read-only paths.
+		ReadWritePaths:     filepath.Dir(runnerlock.DefaultPath),
 		StopTimeoutSeconds: int(serviceStopTimeout(opts.drainTimeout).Seconds()),
+	}
+	for _, v := range serviceEnvironment(opts) {
+		assignment, err := systemdValue(v.Key + "=" + v.Value)
+		if err != nil {
+			return "", fmt.Errorf("environment %s: %w", v.Key, err)
+		}
+		data.Environment = append(data.Environment, assignment)
 	}
 	var out strings.Builder
 	if err := systemdTmpl.Execute(&out, data); err != nil {
 		return "", fmt.Errorf("render systemd unit: %w", err)
 	}
 	return out.String(), nil
+}
+
+type envVar struct{ Key, Value string }
+
+// serviceEnvironment is what every generated definition records: the template
+// generation and stop timeout runner checks at startup, and for user services
+// the installing shell's absolute XDG directories.
+func serviceEnvironment(opts installOpts) []envVar {
+	env := []envVar{
+		{Key: serviceVersionEnv, Value: strconv.Itoa(currentServiceVersion)},
+		{Key: serviceStopTimeoutEnv, Value: strconv.Itoa(int(serviceStopTimeout(opts.drainTimeout).Seconds()))},
+	}
+	if opts.user {
+		if filepath.IsAbs(opts.xdgConfigHome) {
+			env = append(env, envVar{Key: "XDG_CONFIG_HOME", Value: opts.xdgConfigHome})
+		}
+		if filepath.IsAbs(opts.xdgStateHome) {
+			env = append(env, envVar{Key: "XDG_STATE_HOME", Value: opts.xdgStateHome})
+		}
+	}
+	return env
+}
+
+// systemdLogsDirectory maps an explicit log-file onto LogsDirectory=, the only
+// log location a system unit's sandbox can write. It applies the same rule as
+// root's runtime log decision, so a rejected path is rejected in both places.
+func systemdLogsDirectory(logFile *string) (dir, warning string) {
+	const fallback = "runner"
+	if logFile == nil || *logFile == "" {
+		return fallback, ""
+	}
+	if rel, ok := layout.SystemLogsDirectory(*logFile); ok {
+		return rel, ""
+	}
+	return fallback, fmt.Sprintf("log-file %s is not in a directory under %s named with letters, digits, '.', '_' or '-'; the service will write to %s instead", *logFile, layout.SystemLogRoot, layout.SystemLogFile)
+}
+
+// systemdExecArg quotes one ExecStart word. systemd removes the quotes and
+// C-style escapes and expands %specifiers and $VARIABLES, so a literal % or $
+// is doubled.
+func systemdExecArg(s string) (string, error) {
+	if err := rejectControlChars(s); err != nil {
+		return "", err
+	}
+	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`, `%`, `%%`, `$`, `$$`).Replace(s) + `"`, nil
+}
+
+// systemdValue quotes a directive value such as an Environment= assignment,
+// where specifiers expand but $VARIABLES do not.
+func systemdValue(s string) (string, error) {
+	if err := rejectControlChars(s); err != nil {
+		return "", err
+	}
+	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`, `%`, `%%`).Replace(s) + `"`, nil
+}
+
+// rejectControlChars refuses values that would break line-based unit files.
+func rejectControlChars(s string) error {
+	if strings.IndexFunc(s, unicode.IsControl) >= 0 {
+		return fmt.Errorf("%q contains a control character", s)
+	}
+	return nil
 }
 
 func (m *systemdManager) install(opts installOpts) error {
@@ -465,19 +552,26 @@ func systemdUserFlag(user bool) []string {
 
 // ── launchd implementation (macOS) ──────────────────────────────────────
 
-var launchdTmpl = template.Must(template.New("launchd").Parse(`<?xml version="1.0" encoding="UTF-8"?>
+var launchdTmpl = template.Must(template.New("launchd").Funcs(template.FuncMap{"xml": xmlEscape}).Parse(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>{{.Label}}</string>
+    <string>{{xml .Label}}</string>
     <key>ProgramArguments</key>
     <array>
-        <string>{{.BinaryPath}}</string>
+        <string>{{xml .BinaryPath}}</string>
         <string>run</string>
         <string>--config</string>
-        <string>{{.ConfigPath}}</string>
+        <string>{{xml .ConfigPath}}</string>
     </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+{{- range .Environment}}
+        <key>{{xml .Key}}</key>
+        <string>{{xml .Value}}</string>
+{{- end}}
+    </dict>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
@@ -490,10 +584,11 @@ var launchdTmpl = template.Must(template.New("launchd").Parse(`<?xml version="1.
     <!-- Must exceed runner's drain budget so launchd does not SIGKILL an in-flight job. -->
     <key>ExitTimeOut</key>
     <integer>{{.StopTimeoutSeconds}}</integer>
+    <!-- runner writes its own rotated log; stdout would only duplicate it. -->
     <key>StandardOutPath</key>
-    <string>{{.LogPath}}</string>
+    <string>/dev/null</string>
     <key>StandardErrorPath</key>
-    <string>{{.LogPath}}</string>
+    <string>{{xml .StderrPath}}</string>
 </dict>
 </plist>
 `))
@@ -502,27 +597,44 @@ type launchdData struct {
 	Label              string
 	BinaryPath         string
 	ConfigPath         string
-	LogPath            string
+	StderrPath         string
 	StopTimeoutSeconds int
+	Environment        []envVar
 }
 
 type launchdManager struct{}
 
 // renderLaunchdPlist renders the complete plist used by install.
 func renderLaunchdPlist(opts installOpts) (string, error) {
-	m := &launchdManager{}
 	data := launchdData{
 		Label:              launchdLabel,
 		BinaryPath:         opts.binaryPath,
 		ConfigPath:         opts.configPath,
-		LogPath:            m.logPath(opts.user),
+		StderrPath:         launchdStderrPath(opts.user),
 		StopTimeoutSeconds: int(serviceStopTimeout(opts.drainTimeout).Seconds()),
+		Environment:        serviceEnvironment(opts),
 	}
 	var out strings.Builder
 	if err := launchdTmpl.Execute(&out, data); err != nil {
 		return "", fmt.Errorf("render launchd plist: %w", err)
 	}
 	return out.String(), nil
+}
+
+func xmlEscape(s string) string {
+	var b strings.Builder
+	_ = xml.EscapeText(&b, []byte(s))
+	return b.String()
+}
+
+// launchdStderrPath keeps what runner cannot log itself: startup failures,
+// panics and child process stderr. It is not rotated.
+func launchdStderrPath(user bool) string {
+	if user {
+		home, _ := os.UserHomeDir()
+		return filepath.Join(home, "Library", "Logs", "runner", "stderr.log")
+	}
+	return "/var/log/runner/stderr.log"
 }
 
 func (m *launchdManager) plistPath(user bool) string {
@@ -533,14 +645,6 @@ func (m *launchdManager) plistPath(user bool) string {
 	return filepath.Join(launchdSystemDir, launchdPlistFile)
 }
 
-func (m *launchdManager) logPath(user bool) string {
-	if user {
-		home, _ := os.UserHomeDir()
-		return filepath.Join(home, "Library", "Logs", "runner.log")
-	}
-	return "/var/log/runner.log"
-}
-
 func (m *launchdManager) install(opts installOpts) error {
 	plist := m.plistPath(opts.user)
 
@@ -549,6 +653,10 @@ func (m *launchdManager) install(opts installOpts) error {
 		if err := os.MkdirAll(filepath.Dir(plist), 0755); err != nil {
 			return fmt.Errorf("failed to create LaunchAgents directory: %w", err)
 		}
+	}
+
+	if err := os.MkdirAll(filepath.Dir(launchdStderrPath(opts.user)), 0o700); err != nil {
+		return fmt.Errorf("failed to create log directory: %w", err)
 	}
 
 	// Check if already installed
@@ -619,7 +727,7 @@ func (m *launchdManager) status(_ bool) error {
 }
 
 func (m *launchdManager) logs(user bool, follow bool, lines int) error {
-	logFile := m.logPath(user)
+	logFile := launchdStderrPath(user)
 	if _, err := os.Stat(logFile); os.IsNotExist(err) {
 		return fmt.Errorf("log file not found at %s", logFile)
 	}

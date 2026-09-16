@@ -441,6 +441,7 @@ func TestReadServiceConfig(t *testing.T) {
 	}
 	valid := write("valid.toml", "provider = \"tart\"\ndrain-timeout = \"3h\"\nlog-file = \"/var/log/custom/runner.log\"\n")
 	broken := write("broken.toml", "provider = \n")
+	invalid := write("invalid.toml", "drain-timeout = \"soon\"\n")
 	missing := filepath.Join(dir, "missing.toml")
 
 	facts, err := readServiceConfig(valid, true)
@@ -451,6 +452,15 @@ func TestReadServiceConfig(t *testing.T) {
 	}
 	if _, err := readServiceConfig(broken, false); err == nil {
 		t.Fatal("a config with a syntax error was accepted")
+	}
+	// drain-timeout = "soon" parses as TOML but config.Load rejects it (not a
+	// valid duration), exercising the decode-failure branch distinct from the
+	// syntax-error branch above.
+	if _, err := readServiceConfig(invalid, false); err == nil || !strings.Contains(err.Error(), "load config") {
+		t.Fatalf("readServiceConfig(invalid, false) = %v, want an error from the load step", err)
+	}
+	if _, err := readServiceConfig(invalid, true); err == nil || !strings.Contains(err.Error(), "load config") {
+		t.Fatalf("readServiceConfig(invalid, true) = %v, want an error from the load step", err)
 	}
 	if facts, err := readServiceConfig(missing, false); err != nil || facts.found {
 		t.Fatalf("missing optional config = %+v, %v", facts, err)

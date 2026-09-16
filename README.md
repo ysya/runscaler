@@ -355,6 +355,37 @@ Xcode VM images are huge (50–80 GB each) and `:latest` tags accumulate old
 layers under `$TART_HOME/cache/` — set `cache-budget` to keep it bounded.
 The sweeper only touches OCI/IPSW caches, never your local VMs.
 
+**Custom VM images.** `runner-image` accepts a local VM name as well as an
+OCI reference: startup checks `tart list` first and only pulls when the name
+is absent. To bake project dependencies into the image (simulator runtimes,
+CocoaPods/SPM caches, extra toolchains), clone a Cirrus Labs image, provision
+it, stop it, and point `runner-image` at the result:
+
+```bash
+tart clone ghcr.io/cirruslabs/macos-tahoe-xcode:latest ios-golden
+tart run ios-golden --no-graphics &
+tart exec -it ios-golden zsh      # runs as admin; install tools, warm caches
+tart stop ios-golden
+```
+
+```toml
+runner-image = "ios-golden"       # local VM — no registry needed
+```
+
+Every job still boots a fresh copy-on-write clone; runner never starts the
+golden VM itself. Share it across hosts with `tart login ghcr.io` followed by
+`tart push ios-golden ghcr.io/<org>/ios-golden:latest`, or make the build
+reproducible with the
+[Packer tart builder](https://github.com/openai/tart/blob/main/docs/integrations/packer.md)
+and [macos-image-templates](https://github.com/cirruslabs/macos-image-templates).
+Whatever the base, the image must keep the
+[Tart Guest Agent](https://github.com/openai/tart/blob/main/docs/blog/posts/2025-06-01-tart-guest-agent.md)
+running — runner drives VMs through `tart exec`, not SSH, and every
+non-vanilla Cirrus Labs image already ships it — and must have the GitHub
+Actions runner unpacked at `runner-dir` with an executable `run.sh`.
+Provisioning the golden VM occupies one of the host's two macOS VM slots, so
+do it while runner is not at capacity.
+
 **Runner version retirement.** By default runner sets `disable-update = true`,
 so GitHub never updates the runner binary inside the container or VM — the
 image-based model, where you refresh the runner by rebuilding the image.

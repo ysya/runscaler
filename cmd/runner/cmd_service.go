@@ -312,15 +312,28 @@ func installService(mgr serviceManager, opts installOpts, validateBinary func(us
 	return mgr.install(opts)
 }
 
-// validateServiceBinary resolves the binary a service will run and, for a
-// system service on Linux, requires that only root can change it: a root
-// service executing a user-writable file hands that user root.
-func validateServiceBinary(goos string, user bool, path string, evalSymlinks func(string) (string, error), stat statFunc) (string, error) {
+// untrustedBinaryError reports a service binary that someone other than
+// root could replace.
+type untrustedBinaryError struct {
+	Path string // resolved binary
+	Err  error  // the failing path and reason from checkRootOnlyChain
+}
+
+func (e *untrustedBinaryError) Error() string {
+	return "a service that runs as root must run a binary only root can modify: " + e.Err.Error()
+}
+func (e *untrustedBinaryError) Unwrap() error { return e.Err }
+
+// validateServiceBinary resolves the binary a service will run. On Linux, a
+// service that runs as root (system scope, or a user service installed by
+// root) must run a binary only root can modify: a root service executing a
+// user-writable file hands that user root.
+func validateServiceBinary(goos string, user bool, euid int, path string, evalSymlinks func(string) (string, error), stat statFunc) (string, error) {
 	resolved, err := evalSymlinks(path)
 	if err != nil {
 		return "", fmt.Errorf("resolve binary %s: %w", path, err)
 	}
-	if user || goos != "linux" {
+	if goos != "linux" || (user && euid != 0) {
 		return resolved, nil
 	}
 	st, err := stat(resolved)
@@ -331,13 +344,13 @@ func validateServiceBinary(goos string, user bool, path string, evalSymlinks fun
 		return "", fmt.Errorf("binary %s is not a regular file", resolved)
 	}
 	if err := checkRootOnlyChain(resolved, stat); err != nil {
-		return "", fmt.Errorf("a system service must run a binary only root can modify: %w\n\n  Install it to a root-owned directory first:\n    sudo install -m 0755 %s /usr/local/bin/runner\n    sudo /usr/local/bin/runner service install --user=false --binary-path /usr/local/bin/runner", err, shellQuotePath(resolved))
+		return "", &untrustedBinaryError{Path: resolved, Err: err}
 	}
 	return resolved, nil
 }
 
 func validateServiceBinaryFor(user bool, path string) (string, error) {
-	return validateServiceBinary(runtime.GOOS, user, path, filepath.EvalSymlinks, lstatFile)
+	return validateServiceBinary(runtime.GOOS, user, os.Geteuid(), path, filepath.EvalSymlinks, lstatFile)
 }
 
 func runServiceUninstall(cmd *cobra.Command, _ []string) error {

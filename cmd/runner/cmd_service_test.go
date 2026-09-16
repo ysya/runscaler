@@ -20,7 +20,7 @@ import (
 	"github.com/ysya/runscaler/internal/config"
 )
 
-func TestDetectProviderSupportsCanonicalAndLegacyKeys(t *testing.T) {
+func TestReadServiceConfigProviderSupportsCanonicalAndLegacyKeys(t *testing.T) {
 	tests := []struct {
 		name string
 		body string
@@ -41,8 +41,9 @@ provider = "docker"
 			if err := os.WriteFile(path, []byte(tt.body), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if got := detectProvider(path); got != tt.want {
-				t.Errorf("detectProvider() = %q, want %q", got, tt.want)
+			facts, err := readServiceConfig(path, true)
+			if err != nil || facts.provider != tt.want {
+				t.Errorf("provider = %q, %v; want %q", facts.provider, err, tt.want)
 			}
 		})
 	}
@@ -401,31 +402,23 @@ func TestServiceTemplatesHonorConfiguredDrainTimeout(t *testing.T) {
 	}
 }
 
-func TestDetectDrainTimeoutPreservesUnsetAndExplicitZero(t *testing.T) {
+func TestReadServiceConfigPreservesUnsetAndExplicitZeroDrain(t *testing.T) {
 	dir := t.TempDir()
-	writeConfig := func(name, body string) string {
+	write := func(name, body string) string {
 		t.Helper()
 		path := filepath.Join(dir, name)
-		if err := os.WriteFile(path, []byte(body), 0600); err != nil {
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		return path
 	}
-
-	unset, err := detectDrainTimeout(writeConfig("unset.toml", `name = "runner"`))
-	if err != nil {
-		t.Fatal(err)
+	unset, err := readServiceConfig(write("unset.toml", `name = "runner"`), true)
+	if err != nil || unset.drainTimeout != nil {
+		t.Fatalf("omitted drain-timeout = %v, %v; want nil", unset.drainTimeout, err)
 	}
-	if unset != nil {
-		t.Fatalf("omitted drain-timeout = %v, want nil/default", *unset)
-	}
-
-	explicit, err := detectDrainTimeout(writeConfig("zero.toml", `drain-timeout = "0s"`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if explicit == nil || *explicit != 0 {
-		t.Fatalf("explicit zero = %v, want non-nil zero", explicit)
+	zero, err := readServiceConfig(write("zero.toml", `drain-timeout = "0s"`), true)
+	if err != nil || zero.drainTimeout == nil || *zero.drainTimeout != 0 {
+		t.Fatalf("explicit zero = %v, %v; want non-nil zero", zero.drainTimeout, err)
 	}
 }
 

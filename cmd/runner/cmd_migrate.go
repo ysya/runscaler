@@ -16,6 +16,8 @@ import (
 
 	dockerclient "github.com/moby/moby/client"
 	"github.com/spf13/cobra"
+
+	"github.com/ysya/runscaler/internal/layout"
 )
 
 // newConfigPath is the destination for migrated config (var for testability).
@@ -38,14 +40,29 @@ func init() {
 	migrateCmd.Flags().Bool("user", defaultUserService(), "Migrate user-level service (default on macOS; --user=false for system scope)")
 	migrateCmd.Flags().Bool("dry-run", false, "Validate and show the migration plan without changing anything")
 	migrateCmd.Flags().Bool("cleanup", false, "Remove the legacy Docker volume after a successful migration")
-	migrateCmd.Flags().String("backup-dir", "", "Directory for versioned config backups (default: <target-config-dir>/backups)")
+	migrateCmd.Flags().String("backup-dir", "", "Directory for versioned config backups (default: /var/lib/runner/backups for system scope, $XDG_STATE_HOME/runner/backups for --user)")
 	cmd.AddCommand(migrateCmd)
+}
+
+// migrateScopeError rejects system-scope migration on macOS, where runner
+// only runs as the logged-in user.
+func migrateScopeError(goos string, user bool) error {
+	if goos == "darwin" && !user {
+		return errors.New("system-level migration is not supported on macOS: runner runs as the logged-in user.\n\n  Run 'runner migrate --user', then remove the old LaunchDaemon with 'sudo runner service uninstall --user=false'")
+	}
+	return nil
 }
 
 func runMigrate(c *cobra.Command, _ []string) error {
 	user, _ := c.Flags().GetBool("user")
 	dryRun, _ := c.Flags().GetBool("dry-run")
 	cleanup, _ := c.Flags().GetBool("cleanup")
+	if err := refuseDarwinRoot(runtime.GOOS, os.Geteuid(), "migrate the runner service", pathExists); err != nil {
+		return err
+	}
+	if err := migrateScopeError(runtime.GOOS, user); err != nil {
+		return err
+	}
 	if !dryRun {
 		if err := checkPrivileges(user); err != nil {
 			return err
@@ -202,7 +219,15 @@ func resolveConfigMigrationPaths(c *cobra.Command, user bool) (configMigrationPa
 		}
 		paths.BackupDir = absolute
 	} else {
-		paths.BackupDir = filepath.Join(filepath.Dir(paths.Target), "backups")
+		id := layout.CurrentIdentity()
+		// The migration scope, not the invoking user, owns the backups: a
+		// --user=false dry run by a user still plans system locations.
+		id.Root = !user
+		lay, err := layout.For(id)
+		if err != nil {
+			return paths, fmt.Errorf("resolve backup directory: %w", err)
+		}
+		paths.BackupDir = lay.BackupDir
 	}
 	return paths, nil
 }
@@ -411,9 +436,8 @@ type migrationServiceDeps struct {
 	validateNewConfig func(bool, string) error
 	newManager        func() (serviceManager, error)
 	executable        func() (string, error)
-	evalSymlinks      func(string) (string, error)
-	detectProvider    func(string) string
-	detectDrain       func(string) (*time.Duration, error)
+	prepareInstall    func(user bool, configPath, binaryPath string) (installOpts, error)
+	validateBinary    func(user bool, path string) (string, error)
 	stopLegacy        func(bool) error
 	startLegacy       func(bool) error
 	removeLegacyFile  func(bool) error
@@ -429,12 +453,18 @@ func defaultMigrationServiceDeps() migrationServiceDeps {
 		validateNewConfig: validateInstalledNewServiceConfig,
 		newManager:        newServiceManager,
 		executable:        os.Executable,
-		evalSymlinks:      filepath.EvalSymlinks,
-		detectProvider:    detectProvider,
-		detectDrain:       detectDrainTimeout,
-		stopLegacy:        stopLegacyService,
-		startLegacy:       startLegacyService,
-		removeLegacyFile:  removeLegacyServiceFile,
+		prepareInstall: func(user bool, configPath, binaryPath string) (installOpts, error) {
+			// Migration has already written and validated the target config.
+			opts, warnings, err := buildInstallOpts(user, configPath, binaryPath, true, os.Getenv)
+			for _, w := range warnings {
+				warnLegacy("%s", w)
+			}
+			return opts, err
+		},
+		validateBinary:   validateServiceBinaryFor,
+		stopLegacy:       stopLegacyService,
+		startLegacy:      startLegacyService,
+		removeLegacyFile: removeLegacyServiceFile,
 	}
 }
 
@@ -473,21 +503,12 @@ func migrateServiceWithDeps(user bool, configPath string, deps migrationServiceD
 		if err != nil {
 			return false, false, fmt.Errorf("cannot detect binary path: %w", err)
 		}
-		if resolved, rerr := deps.evalSymlinks(binaryPath); rerr == nil {
-			binaryPath = resolved
-		}
-		drainTimeout, err := deps.detectDrain(configPath)
+		opts, err := deps.prepareInstall(user, configPath, binaryPath)
 		if err != nil {
 			return false, false, err
 		}
-		if err := mgr.install(installOpts{
-			user:         user,
-			configPath:   configPath,
-			binaryPath:   binaryPath,
-			provider:     deps.detectProvider(configPath),
-			noStart:      true,
-			drainTimeout: drainTimeout,
-		}); err != nil {
+		opts.noStart = true
+		if err := installService(mgr, opts, deps.validateBinary); err != nil {
 			// install may have written the service file before a daemon command
 			// failed. Remove only the unit this attempt created.
 			if deps.newInstalled(user) {

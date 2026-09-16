@@ -346,6 +346,7 @@ func TestResolveConfigMigrationPathsUsesUserOwnedDefaults(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("XDG_STATE_HOME", "")
 	c := &cobra.Command{Use: "migrate-test"}
 	c.Flags().String("config", "", "")
 	c.Flags().String("backup-dir", "", "")
@@ -359,7 +360,7 @@ func TestResolveConfigMigrationPathsUsesUserOwnedDefaults(t *testing.T) {
 	if paths.Target != filepath.Join(home, ".config", "runner", "config.toml") {
 		t.Fatalf("user target = %s", paths.Target)
 	}
-	if paths.BackupDir != filepath.Join(home, ".config", "runner", "backups") || paths.DirPerm != 0o700 {
+	if paths.BackupDir != filepath.Join(home, ".local", "state", "runner", "backups") || paths.DirPerm != 0o700 {
 		t.Fatalf("user backup/permission = %s/%o", paths.BackupDir, paths.DirPerm)
 	}
 
@@ -450,11 +451,12 @@ func newMigrationServiceTestDeps(manager *fakeMigrationServiceManager, actions *
 		validateNewConfig: func(bool, string) error {
 			return nil
 		},
-		newManager:     func() (serviceManager, error) { return manager, nil },
-		executable:     func() (string, error) { return "/usr/local/bin/runner", nil },
-		evalSymlinks:   func(path string) (string, error) { return path, nil },
-		detectProvider: func(string) string { return "docker" },
-		detectDrain:    func(string) (*time.Duration, error) { return nil, nil },
+		newManager: func() (serviceManager, error) { return manager, nil },
+		executable: func() (string, error) { return "/usr/local/bin/runner", nil },
+		prepareInstall: func(user bool, configPath, binaryPath string) (installOpts, error) {
+			return installOpts{user: user, configPath: configPath, binaryPath: binaryPath, provider: "docker"}, nil
+		},
+		validateBinary: func(_ bool, path string) (string, error) { return path, nil },
 		stopLegacy: func(bool) error {
 			*actions = append(*actions, "stop-legacy")
 			*legacyRunning = false
@@ -558,11 +560,62 @@ func TestMigrateServiceKeepsCutoverWhenLegacyFileRemovalFails(t *testing.T) {
 	}
 }
 
+func TestMigrateServiceStopsWhenBinaryIsUnsafe(t *testing.T) {
+	var actions []string
+	legacyInstalled, legacyRunning := true, true
+	newInstalled, newRunning := false, false
+	manager := &fakeMigrationServiceManager{actions: &actions, installed: &newInstalled, running: &newRunning}
+	deps := newMigrationServiceTestDeps(manager, &actions, &legacyInstalled, &legacyRunning, &newInstalled, &newRunning)
+	deps.validateBinary = func(bool, string) (string, error) {
+		return "", errors.New("a system service must run a binary only root can modify")
+	}
+
+	_, cutover, err := migrateServiceWithDeps(false, "/etc/runner/config.toml", deps)
+	if err == nil || cutover || len(actions) != 0 || !legacyRunning {
+		t.Fatalf("err=%v cutover=%v actions=%v legacyRunning=%v; want refusal before touching services", err, cutover, actions, legacyRunning)
+	}
+}
+
+func TestMigrateServiceUsesSharedInstallOptions(t *testing.T) {
+	var actions []string
+	legacyInstalled, legacyRunning := true, false
+	newInstalled, newRunning := false, false
+	manager := &fakeMigrationServiceManager{actions: &actions, installed: &newInstalled, running: &newRunning}
+	deps := newMigrationServiceTestDeps(manager, &actions, &legacyInstalled, &legacyRunning, &newInstalled, &newRunning)
+	logFile := "/var/log/custom/runner.log"
+	deps.prepareInstall = func(user bool, configPath, binaryPath string) (installOpts, error) {
+		return installOpts{user: user, configPath: configPath, binaryPath: binaryPath, logFile: &logFile, xdgStateHome: "/xdg/state"}, nil
+	}
+
+	if _, _, err := migrateServiceWithDeps(true, "/home/test/.config/runner/config.toml", deps); err != nil {
+		t.Fatal(err)
+	}
+	got := manager.installOpts
+	if got.logFile == nil || *got.logFile != logFile || got.xdgStateHome != "/xdg/state" || !got.noStart {
+		t.Fatalf("install options = %+v, want the shared log file, XDG state and noStart", got)
+	}
+}
+
+func TestMigrateScopeError(t *testing.T) {
+	if err := migrateScopeError("darwin", false); err == nil || !strings.Contains(err.Error(), "runner migrate --user") {
+		t.Errorf("macOS system migration = %v", err)
+	}
+	for _, tc := range []struct {
+		goos string
+		user bool
+	}{{"darwin", true}, {"linux", false}, {"linux", true}} {
+		if err := migrateScopeError(tc.goos, tc.user); err != nil {
+			t.Errorf("migrateScopeError(%+v) = %v", tc, err)
+		}
+	}
+}
+
 func TestRunMigrateRollsBackConfigWhenServiceCutoverFails(t *testing.T) {
 	fixMigrationIdentity(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("XDG_STATE_HOME", "")
 	source := filepath.Join(home, ".config", "runscaler", "config.toml")
 	target := filepath.Join(home, ".config", "runner", "config.toml")
 	writeTestFile(t, source, validLegacyConfig(), 0o600)
@@ -589,7 +642,7 @@ func TestRunMigrateRollsBackConfigWhenServiceCutoverFails(t *testing.T) {
 	if got, err := os.ReadFile(source); err != nil || !bytes.Equal(got, validLegacyConfig()) {
 		t.Fatal("failed cutover changed legacy source")
 	}
-	backups, err := filepath.Glob(filepath.Join(home, ".config", "runner", "backups", "*.bak"))
+	backups, err := filepath.Glob(filepath.Join(home, ".local", "state", "runner", "backups", "*.bak"))
 	if err != nil || len(backups) != 1 {
 		t.Fatalf("backups after rollback = %v, %v; want one retained backup", backups, err)
 	}
@@ -600,6 +653,7 @@ func TestRunMigrateRemovesDefaultLegacyConfigOnlyAfterCutover(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("XDG_STATE_HOME", "")
 	source := filepath.Join(home, ".config", "runscaler", "config.toml")
 	target := filepath.Join(home, ".config", "runner", "config.toml")
 	writeTestFile(t, source, validLegacyConfig(), 0o600)

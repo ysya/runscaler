@@ -275,7 +275,7 @@ README 新增升級說明涵蓋 E.1、E.2，並同步修正所有仍描述舊預
 | 安裝時 config 存在但無法讀取或載入 | 拒絕，既有定義不變 |
 | `--force` 或 migrate 時 config 不存在 | 拒絕，既有定義不變 |
 | 全新安裝時 config 不存在 | 警告，照常安裝 |
-| Linux system 安裝，binary 解析失敗或路徑不安全 | 拒絕，列出違規路徑與原因，提示 `sudo install` 到 `/usr/local/bin` |
+| Linux system 安裝，binary 解析失敗或路徑不安全 | 拒絕；解析失敗時顯示解析錯誤，路徑不安全時列出違規路徑與原因並提示 `sudo install` 到 `/usr/local/bin` |
 | 路徑或值含控制字元 | 拒絕產生 unit |
 | `service install` 已安裝且未加 `--force` | 拒絕，提示 `--force` |
 | system unit 的 `log-file` 不符合 `SystemLogsDirectory` | 安裝時警告，照常安裝（runner 執行時改寫預設位置） |

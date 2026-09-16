@@ -17,6 +17,35 @@ const DefaultPath = "/tmp/runner.lock"
 
 var ErrAlreadyRunning = errors.New("another runner is already running")
 
+// sysOps are the system calls Acquire depends on, replaceable in tests.
+type sysOps struct {
+	open    func(path string, mode int, perm uint32) (int, error)
+	fstat   func(fd int, stat *unix.Stat_t) error
+	fchmod  func(fd int, mode uint32) error
+	geteuid func() int
+}
+
+var sys = sysOps{open: unix.Open, fstat: unix.Fstat, fchmod: unix.Fchmod, geteuid: os.Geteuid}
+
+// openLockFile opens an existing lock without O_CREAT and creates a missing
+// one with O_EXCL. With fs.protected_regular enabled, the kernel refuses an
+// O_CREAT open of a file in /tmp owned by someone else, even for root, so a
+// plain O_CREAT open would lock root out of a file a user created first.
+func openLockFile(path string) (int, error) {
+	const flags = unix.O_RDWR | unix.O_CLOEXEC | unix.O_NOFOLLOW
+	for attempt := 0; attempt < 3; attempt++ {
+		fd, err := sys.open(path, flags, 0)
+		if !errors.Is(err, unix.ENOENT) {
+			return fd, err
+		}
+		fd, err = sys.open(path, flags|unix.O_CREAT|unix.O_EXCL, 0o666)
+		if !errors.Is(err, unix.EEXIST) {
+			return fd, err
+		}
+	}
+	return -1, fmt.Errorf("%s was repeatedly created and removed while opening it", path)
+}
+
 // Info is diagnostic metadata stored in the lock file. The kernel flock is
 // the only source of truth; this content may be stale or malformed.
 type Info struct {
@@ -49,9 +78,9 @@ func (e *AlreadyRunningError) Unwrap() error { return ErrAlreadyRunning }
 // O_NOFOLLOW and verified as regular so a privileged service cannot be tricked
 // into following a /tmp symlink. The file deliberately remains in place after
 // release: unlinking a flock file can split contenders across two inodes and
-// break mutual exclusion.
+// break mutual exclusion. The lock guards against accidentally starting a second runner; it is not a security boundary against local users.
 func Acquire(path string, info Info) (release func(), err error) {
-	fd, err := unix.Open(path, unix.O_CREAT|unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o666)
+	fd, err := openLockFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("open runner lock %s: %w", path, err)
 	}
@@ -68,16 +97,22 @@ func Acquire(path string, info Info) (release func(), err error) {
 	}()
 
 	var stat unix.Stat_t
-	if err := unix.Fstat(fd, &stat); err != nil {
+	if err := sys.fstat(fd, &stat); err != nil {
 		return nil, fmt.Errorf("inspect runner lock %s: %w", path, err)
 	}
 	if stat.Mode&unix.S_IFMT != unix.S_IFREG {
 		return nil, fmt.Errorf("runner lock %s is not a regular file", path)
 	}
+	// A hard link would let the lock chmod and truncate another file.
+	if uint64(stat.Nlink) != 1 {
+		return nil, fmt.Errorf("runner lock %s has %d hard links; remove it once no runner is running", path, stat.Nlink)
+	}
 	// Root-run and user-run instances must be able to contend on the same file.
-	// Contents are diagnostics only and are written only after holding the lock.
-	if err := unix.Fchmod(fd, 0o666); err != nil {
-		return nil, fmt.Errorf("set runner lock permissions %s: %w", path, err)
+	// Only its owner may chmod it; everyone else can use it as it is.
+	if int(stat.Uid) == sys.geteuid() {
+		if err := sys.fchmod(fd, 0o666); err != nil {
+			return nil, fmt.Errorf("set runner lock permissions %s: %w", path, err)
+		}
 	}
 
 	if err := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB); err != nil {

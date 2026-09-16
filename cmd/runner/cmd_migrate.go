@@ -256,8 +256,11 @@ func parseSystemdServiceInvocation(data []byte) (legacyServiceInvocation, error)
 }
 
 // splitSystemdCommand splits an ExecStart value into words, undoing the
-// quoting systemdExecArg applies and accepting the unquoted form older
-// releases wrote.
+// quoting systemdExecArg and systemdExecutable apply and accepting the
+// unquoted form older releases wrote. Word 0 (the executable) only undoes the
+// %% doubling: systemd never expands $VARIABLES in the executable path, so
+// systemdExecutable never doubled a literal $ there. Every later word undoes
+// both %% and $$, matching systemdExecArg.
 func splitSystemdCommand(s string) ([]string, error) {
 	var (
 		words   []string
@@ -296,9 +299,14 @@ func splitSystemdCommand(s string) ([]string, error) {
 	if inWord {
 		words = append(words, current.String())
 	}
-	unescape := strings.NewReplacer("%%", "%", "$$", "$")
+	executableUnescape := strings.NewReplacer("%%", "%")
+	argUnescape := strings.NewReplacer("%%", "%", "$$", "$")
 	for i, word := range words {
-		words[i] = unescape.Replace(word)
+		if i == 0 {
+			words[i] = executableUnescape.Replace(word)
+		} else {
+			words[i] = argUnescape.Replace(word)
+		}
 	}
 	return words, nil
 }

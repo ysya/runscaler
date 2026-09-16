@@ -12,6 +12,7 @@ import (
 	"text/template"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -340,7 +341,7 @@ type systemdManager struct{}
 // renderSystemdUnit renders the complete unit used by install. Keeping
 // rendering separate from filesystem writes makes the sandbox directly testable.
 func renderSystemdUnit(opts installOpts) (string, error) {
-	binary, err := systemdExecArg(opts.binaryPath)
+	binary, err := systemdExecutable(opts.binaryPath)
 	if err != nil {
 		return "", fmt.Errorf("binary path: %w", err)
 	}
@@ -419,6 +420,22 @@ func systemdExecArg(s string) (string, error) {
 		return "", err
 	}
 	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`, `%`, `%%`, `$`, `$$`).Replace(s) + `"`, nil
+}
+
+// systemdExecutable quotes and encodes the ExecStart executable (word 0).
+// Unlike every later ExecStart word, systemd expands %specifiers in the
+// executable path but never $VARIABLES there, so a literal $ must not be
+// doubled. systemd also rejects an executable path that, after undoing the
+// surrounding quoting, contains a quote, a backslash, a control character,
+// invalid UTF-8, or a glob character (*?[) — quoting or backslash-escaping
+// those does not help, since the check runs on the unescaped result, so such
+// a path is rejected here instead of being written into a unit systemd
+// cannot load.
+func systemdExecutable(s string) (string, error) {
+	if rejectControlChars(s) != nil || !utf8.ValidString(s) || strings.ContainsAny(s, `"'\*?[`) {
+		return "", fmt.Errorf("systemd does not allow control, non-UTF-8, quote, backslash, or glob (*?[) characters in an executable path: %q", s)
+	}
+	return `"` + strings.ReplaceAll(s, `%`, `%%`) + `"`, nil
 }
 
 // systemdValue quotes a directive value such as an Environment= assignment,

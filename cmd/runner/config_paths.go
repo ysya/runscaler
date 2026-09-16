@@ -2,21 +2,18 @@ package main
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"runtime"
+
+	"github.com/ysya/runscaler/internal/layout"
 )
 
 // Use the same CLI convention on Linux and macOS. Relative XDG paths are
 // invalid under the XDG specification and must not depend on the working dir.
 func userConfigPath(app string) (string, error) {
-	base := os.Getenv("XDG_CONFIG_HOME")
-	if !filepath.IsAbs(base) {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", fmt.Errorf("resolve user config directory: %w", err)
-		}
-		base = filepath.Join(home, ".config")
+	base, err := layout.CurrentIdentity().ConfigHome()
+	if err != nil {
+		return "", fmt.Errorf("resolve user config directory: %w", err)
 	}
 	return filepath.Join(base, app, "config.toml"), nil
 }

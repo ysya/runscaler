@@ -613,12 +613,30 @@ func TestInstallRetryCommand(t *testing.T) {
 
 func TestUntrustedBinaryHint(t *testing.T) {
 	retry := "sudo /usr/local/bin/runner service install --user=false --force --config-path '/etc/runner/config.toml' --binary-path /usr/local/bin/runner"
-	got := untrustedBinaryHint("/home/ada/.local/bin/runner", retry)
-	want := "\n\n  Install a copy only root can modify, then retry:\n" +
-		"    sudo install -m 0755 '/home/ada/.local/bin/runner' /usr/local/bin/runner\n" +
-		"    " + retry
-	if got != want {
-		t.Errorf("untrustedBinaryHint() = %q\nwant %q", got, want)
+	tests := []struct {
+		name   string
+		binary string
+		want   string
+	}{
+		{
+			name:   "binary elsewhere",
+			binary: "/home/ada/.local/bin/runner",
+			want: "\n\n  Install a copy only root can modify, then retry:\n" +
+				"    sudo install -m 0755 '/home/ada/.local/bin/runner' /usr/local/bin/runner\n" +
+				"    " + retry,
+		},
+		{
+			name:   "binary already at the root path",
+			binary: "/usr/local/bin/runner",
+			want:   "\n\n  Make the path reported above changeable only by root, then retry:\n    " + retry,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := untrustedBinaryHint(tt.binary, retry); got != tt.want {
+				t.Errorf("untrustedBinaryHint() = %q\nwant %q", got, tt.want)
+			}
+		})
 	}
 }
 

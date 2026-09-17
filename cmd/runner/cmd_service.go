@@ -355,8 +355,13 @@ func (e *untrustedBinaryError) Error() string {
 func (e *untrustedBinaryError) Unwrap() error { return e.Err }
 
 // untrustedBinaryHint shows how to give a root service a binary only root
-// can modify and repeat the command with it.
+// can modify and repeat the command with it. When the binary already is
+// rootBinaryPath, a copy cannot replace it, so the reported path is what
+// needs fixing.
 func untrustedBinaryHint(binary, retry string) string {
+	if binary == rootBinaryPath {
+		return "\n\n  Make the path reported above changeable only by root, then retry:\n    " + retry
+	}
 	return "\n\n  Install a copy only root can modify, then retry:\n" +
 		"    sudo install -m 0755 " + shellQuotePath(binary) + " " + rootBinaryPath + "\n" +
 		"    " + retry

@@ -151,14 +151,16 @@ func absConfigPath(path string) string {
 // definition is migrated rather than reinstalled beside it; a leftover legacy
 // file next to a running runner service does not change the fix, because
 // migrate never regenerates an installed runner service. A root service whose
-// binary others could replace is first given a root-only copy.
+// binary others could replace is first given a root-only copy, unless the
+// binary already is that copy's path: the reinstall then reports the unsafe
+// path and why.
 func serviceFixCommand(goos string, root bool, configPath, binaryPath string, underLegacy bool, stat statFunc) string {
 	switch {
 	case underLegacy && root:
 		return "sudo " + shellQuotePath(binaryPath) + " migrate --user=false"
 	case underLegacy:
 		return shellQuotePath(binaryPath) + " migrate --user"
-	case goos == "linux" && root && checkRootOnlyChain(binaryPath, stat) != nil:
+	case goos == "linux" && root && binaryPath != rootBinaryPath && checkRootOnlyChain(binaryPath, stat) != nil:
 		// One line, so it works in a log attribute and a terminal alike.
 		return "sudo install -m 0755 " + shellQuotePath(binaryPath) + " " + rootBinaryPath + " && " +
 			serviceReinstallCommand(true, configPath, rootBinaryPath)

@@ -567,7 +567,7 @@ func TestMigrateServiceStopsWhenBinaryIsUnsafe(t *testing.T) {
 	manager := &fakeMigrationServiceManager{actions: &actions, installed: &newInstalled, running: &newRunning}
 	deps := newMigrationServiceTestDeps(manager, &actions, &legacyInstalled, &legacyRunning, &newInstalled, &newRunning)
 	deps.validateBinary = func(bool, string) (string, error) {
-		return "", errors.New("a system service must run a binary only root can modify")
+		return "", errors.New("a service that runs as root must run a binary only root can modify")
 	}
 
 	_, cutover, err := migrateServiceWithDeps(false, "/etc/runner/config.toml", deps)

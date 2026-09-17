@@ -140,6 +140,10 @@ func TestServiceFixCommand(t *testing.T) {
 		"/home/ada/.local": userDir, "/home/ada/.local/bin": userDir,
 		"/home/ada/.local/bin/runner": {UID: 1000, Mode: 0o755},
 	}
+	groupWritableBin := map[string]fileStat{
+		"/": rootDir(0o755), "/usr": rootDir(0o755), "/usr/local": rootDir(0o755),
+		"/usr/local/bin": rootDir(0o775), "/usr/local/bin/runner": {UID: 0, Mode: 0o755},
+	}
 	tests := []struct {
 		name        string
 		goos        string
@@ -159,6 +163,11 @@ func TestServiceFixCommand(t *testing.T) {
 			name: "untrusted root binary on linux", goos: "linux", root: true,
 			configPath: "/etc/runner/config.toml", binaryPath: "/home/ada/.local/bin/runner", stat: untrusted,
 			want: "sudo install -m 0755 '/home/ada/.local/bin/runner' /usr/local/bin/runner && sudo '/usr/local/bin/runner' service install --user=false --force --config-path '/etc/runner/config.toml' --binary-path '/usr/local/bin/runner'",
+		},
+		{
+			name: "untrusted binary already at the root path", goos: "linux", root: true,
+			configPath: "/etc/runner/config.toml", binaryPath: "/usr/local/bin/runner", stat: groupWritableBin,
+			want: "sudo '/usr/local/bin/runner' service install --user=false --force --config-path '/etc/runner/config.toml' --binary-path '/usr/local/bin/runner'",
 		},
 		{
 			name: "untrusted binary for a user", goos: "linux",

@@ -662,8 +662,11 @@ runner service install --user --force --config-path ~/.config/runner/config.toml
 ```
 
 `--force` validates the config and binary and renders the new definition before
-touching the installed one. When a definition is outdated, runner logs this
-command with the exact config and binary paths it is running with.
+touching the installed one. When a definition is outdated, runner logs the
+command that fixes it, with the exact config and binary paths it is running
+with: this `--force` reinstall, `runner migrate` when a pre-rename `runscaler`
+definition started it, or for a root service whose binary is not root-owned, a
+copy to `/usr/local/bin` followed by the reinstall.
 
 After that, the normal upgrade flow is:
 
@@ -675,17 +678,20 @@ runner service restart     # waits for active jobs automatically
 ### Service layout
 
 - **Linux system service** runs as root and must execute a binary only root can
-  modify, such as `/usr/local/bin/runner`; `runner service install --user=false`
-  refuses anything else. The unit sets `ProtectSystem=strict`: `/etc/runner`
-  stays read-only, logs go to `LogsDirectory=runner` (`/var/log/runner`), and
-  only `/tmp` is writable, for the run lock.
+  modify, such as `/usr/local/bin/runner`; `runner service install` and
+  `runner migrate` refuse anything else for any service that runs as root
+  (`--user=false`, or `--user` run by root). The unit sets
+  `ProtectSystem=strict`: `/etc/runner` stays read-only, logs go to
+  `LogsDirectory=runner` (`/var/log/runner`), and only `/tmp` is writable, for
+  the run lock.
 - **macOS** supports only a LaunchAgent for the logged-in user. It starts at
   login, so enable automatic login on unattended hosts, and install it from a
-  local GUI session rather than SSH. runner refuses to run, install or migrate
-  as root on macOS. launchd starts agents with a minimal `PATH`; runner appends
-  `/opt/homebrew/bin` and `/usr/local/bin` when present so a Homebrew-installed
-  `tart` is found. The agent discards stdout (runner writes its own rotated log)
-  and keeps stderr in `~/Library/Logs/runner/stderr.log`, which is not rotated.
+  local GUI session rather than SSH. runner refuses to run, init, install or
+  migrate as root on macOS. launchd starts agents with a minimal `PATH`; runner
+  appends `/opt/homebrew/bin` and `/usr/local/bin` when present so a
+  Homebrew-installed `tart` is found. The agent discards stdout (runner writes
+  its own rotated log) and keeps stderr in `~/Library/Logs/runner/stderr.log`,
+  which is not rotated.
 - The run lock at `/tmp/runner.lock` prevents accidentally starting a second
   runner; it is not a security boundary against local users.
 
@@ -769,8 +775,8 @@ moves existing files.
 | Existing setup | After upgrading the binary | What to do |
 | --- | --- | --- |
 | Linux system service | Fails to take the lock and prints a fix | Run the printed command; when the binary is not root-owned, it first installs a copy to `/usr/local/bin` |
-| Linux user service | Runs; logs move; warns | Run the printed `service install --force` command |
-| macOS LaunchAgent | Runs; logs move; warns | Run the printed `service install --force` command |
+| Linux user service | Runs; logs move; warns | Run the printed command (`service install --force`, or `runner migrate` for a pre-rename definition) |
+| macOS LaunchAgent | Runs; logs move; warns | Run the printed command (`service install --force`, or `runner migrate` for a pre-rename definition) |
 | macOS LaunchDaemon | Refuses to run as root | Convert it as below |
 | tmux / foreground | Logs move; notes the old file | Nothing; delete the old `runner.log` to silence the note |
 

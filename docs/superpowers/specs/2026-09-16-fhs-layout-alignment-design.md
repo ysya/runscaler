@@ -211,7 +211,7 @@ migrate 時第二行改為以 `/usr/local/bin/runner` 重跑相同選項的 `mig
 4. 只有檔案擁有者等於自己的 effective UID 時才 `Fchmod(0666)`
 5. `flock(LOCK_EX|LOCK_NB)`；成功後才寫診斷資訊
 
-lock 是防止誤啟動第二個實例的安全網，不是安全邊界：本機使用者仍可搶先占鎖，或刪除自己建立的 lock 檔使後續程序鎖到不同 inode。`Info` 不新增欄位。唯讀檔案系統的重裝提示（`explainLockError`，已實作未 commit）改為 D.3 的 `--force` 單一指令，並帶入實際 config 與 binary 路徑。
+lock 是防止誤啟動第二個實例的安全網，不是安全邊界：本機使用者仍可搶先占鎖，或刪除自己建立的 lock 檔使後續程序鎖到不同 inode。`Info` 不新增欄位。唯讀檔案系統的重裝提示（`explainLockError`）改為 D.3 的修正指令，並帶入實際 config 與 binary 路徑。
 
 #### D.3 過舊 service 提醒（取代 `logServiceDrainTimeoutReminder`）
 
@@ -221,8 +221,8 @@ lock 是防止誤啟動第二個實例的安全網，不是安全邊界：本機
 - **提醒內容**：附上可直接執行的單一指令，帶入目前實際使用的 config（絕對路徑）與 binary（解析後）：
   - root：`sudo <binary> service install --user=false --force --config-path <config> --binary-path <binary>`
   - 使用者：`<binary> service install --user --force --config-path <config> --binary-path <binary>`
-  - 同一層級仍有舊版（runscaler）定義時，改為提示 `runner migrate`（root 加 `sudo` 與 `--user=false`，使用者加 `--user`）
-  - root 執行且目前的 binary 不是只有 root 能改時，改為一行兩步驟：先 `sudo install -m 0755 <binary> /usr/local/bin/runner`，再以 `/usr/local/bin/runner` 執行上述 `--force` 指令
+  - 本程序由舊版（runscaler）定義啟動時（launchd label 為 `com.runscaler.agent`，或 `/proc/self/cgroup` 顯示 systemd unit 為 `runscaler.service`），改為提示 `runner migrate`（root 加 `sudo` 與 `--user=false`，使用者加 `--user`）；只殘留舊定義檔而由新定義啟動時，仍提示 `--force` 重裝
+  - root 執行且目前的 binary 不是只有 root 能改時，改為一行兩步驟：先 `sudo install -m 0755 <binary> /usr/local/bin/runner`，再以 `/usr/local/bin/runner` 執行上述 `--force` 指令；binary 已是 `/usr/local/bin/runner`（不安全的是上層目錄）時維持一般 `--force` 指令，執行時會列出違規路徑與原因
 - 兩者皆通過時不輸出任何提醒
 
 #### D.4 `runner logs`
@@ -279,15 +279,15 @@ README 新增升級說明涵蓋 E.1、E.2，並同步修正所有仍描述舊預
 | 安裝時 config 存在但無法讀取或載入 | 拒絕，既有定義不變 |
 | `--force` 或 migrate 時 config 不存在 | 拒絕，既有定義不變 |
 | 全新安裝時 config 不存在 | 警告，照常安裝 |
-| Linux system 安裝，binary 解析失敗或路徑不安全 | 拒絕；解析失敗時顯示解析錯誤，路徑不安全時列出違規路徑與原因並提示 `sudo install` 到 `/usr/local/bin` |
+| Linux 上安裝以 root 執行的 service，binary 解析失敗或路徑不安全 | 拒絕；解析失敗時顯示解析錯誤，路徑不安全時列出違規路徑與原因並提示 `sudo install` 到 `/usr/local/bin`（binary 已在該處時改為提示修正違規路徑的權限） |
 | 路徑或值含控制字元 | 拒絕產生 unit |
 | `service install` 已安裝且未加 `--force` | 拒絕，提示 `--force` |
 | system unit 的 `log-file` 不符合 `SystemLogsDirectory` | 安裝時警告，照常安裝（runner 執行時改寫預設位置） |
 | root 的 `log-file` 不符合 `SystemLogsDirectory` | 啟動時警告，改用預設路徑 |
 | root 開 log 時遇到 symlink 或不安全的目錄 | 警告，改開 fallback；無 fallback 則不寫檔 |
 | log 目錄建立或開檔失敗 | stderr 警告，繼續執行；stdout 為 `/dev/null` 時 logger 改寫 stderr |
-| service 範本過舊或停止逾時不足 | WARN 並附 `--force` 重裝指令，繼續執行 |
-| lock 所在檔案系統唯讀 | 拒絕啟動，附 `--force` 重裝指令 |
+| service 範本過舊或停止逾時不足 | WARN 並附 D.3 的修正指令，繼續執行 |
+| lock 所在檔案系統唯讀 | 拒絕啟動，附 D.3 的修正指令 |
 | lock 檔為 hardlink 或非 regular file | 拒絕啟動，說明 `/tmp/runner.lock` 異常 |
 | `runner logs` 權限不足 | 錯誤並提示 `sudo runner logs` |
 | `runner logs` 目標（含 `-f` 重開後）不是 regular file | 錯誤，不讀取 |

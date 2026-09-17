@@ -35,6 +35,49 @@ func startedByServiceManager(getenv func(string) string) bool {
 	return false
 }
 
+// systemdUnitFromCgroup returns the systemd service unit that owns a
+// process, read from /proc/<pid>/cgroup content: the last path element
+// ending in ".service" on the cgroup v2 line ("0::…") or the v1
+// "name=systemd" line, or "" when there is none.
+func systemdUnitFromCgroup(content string) string {
+	for _, line := range strings.Split(content, "\n") {
+		// hierarchy-ID:controllers:path, where the path may contain ':'.
+		fields := strings.SplitN(line, ":", 3)
+		if len(fields) != 3 || (fields[1] != "" && fields[1] != "name=systemd") {
+			continue
+		}
+		// Walk from the end: the owning service can sit below another
+		// service, such as user@1000.service for a user unit.
+		elems := strings.Split(fields[2], "/")
+		for i := len(elems) - 1; i >= 0; i-- {
+			if strings.HasSuffix(elems[i], ".service") {
+				return elems[i]
+			}
+		}
+	}
+	return ""
+}
+
+// runningUnderLegacyDefinition reports whether a pre-rename definition
+// started this process: launchd's job label, or on Linux the systemd unit
+// that owns the process.
+func runningUnderLegacyDefinition(goos string, getenv func(string) string, readCgroup func() (string, error)) bool {
+	if getenv("XPC_SERVICE_NAME") == legacyLaunchdLabel {
+		return true
+	}
+	if goos != "linux" || getenv("INVOCATION_ID") == "" {
+		return false
+	}
+	content, err := readCgroup()
+	return err == nil && systemdUnitFromCgroup(content) == legacySystemdUnit
+}
+
+// readSelfCgroup reads this process's cgroup membership.
+func readSelfCgroup() (string, error) {
+	data, err := os.ReadFile("/proc/self/cgroup")
+	return string(data), err
+}
+
 // outdatedServiceWarnings reads the template generation and stop timeout that
 // generated service definitions record. It does not audit hand-edited
 // definitions.
@@ -104,14 +147,16 @@ func absConfigPath(path string) string {
 }
 
 // serviceFixCommand is the command that regenerates the definition of the
-// service this process runs under. A pre-rename definition is migrated
-// rather than reinstalled beside it, and a root service whose binary others
-// could replace is first given a root-only copy.
-func serviceFixCommand(goos string, root bool, configPath, binaryPath string, legacyInstalled bool, stat statFunc) string {
+// service this process runs under. A service started by a pre-rename
+// definition is migrated rather than reinstalled beside it; a leftover legacy
+// file next to a running runner service does not change the fix, because
+// migrate never regenerates an installed runner service. A root service whose
+// binary others could replace is first given a root-only copy.
+func serviceFixCommand(goos string, root bool, configPath, binaryPath string, underLegacy bool, stat statFunc) string {
 	switch {
-	case legacyInstalled && root:
+	case underLegacy && root:
 		return "sudo " + shellQuotePath(binaryPath) + " migrate --user=false"
-	case legacyInstalled:
+	case underLegacy:
 		return shellQuotePath(binaryPath) + " migrate --user"
 	case goos == "linux" && root && checkRootOnlyChain(binaryPath, stat) != nil:
 		// One line, so it works in a log attribute and a terminal alike.
@@ -124,7 +169,7 @@ func serviceFixCommand(goos string, root bool, configPath, binaryPath string, le
 
 // currentServiceFixCommand is serviceFixCommand for this process.
 func currentServiceFixCommand() string {
-	return serviceFixCommand(runtime.GOOS, os.Geteuid() == 0, absConfigPath(viper.ConfigFileUsed()), currentBinaryPath(), legacyServiceInstalled(os.Geteuid() != 0), lstatFile)
+	return serviceFixCommand(runtime.GOOS, os.Geteuid() == 0, absConfigPath(viper.ConfigFileUsed()), currentBinaryPath(), runningUnderLegacyDefinition(runtime.GOOS, os.Getenv, readSelfCgroup), lstatFile)
 }
 
 // warnOutdatedService logs each reason to regenerate the service together

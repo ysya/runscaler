@@ -367,11 +367,26 @@ pool-size = 2            # pre-warm 2 VMs for instant job pickup (~2s vs ~30s co
 # home = "/Volumes/Data/tart"          # TART_HOME for the tart CLI ("" = ~/.tart)
 # cache-budget = 80                    # cap OCI/IPSW cache to N GB via `tart prune` (0 = disabled)
 # cache-cleanup-interval = "24h"       # how often the prune sweep runs
+# mtu = 0                              # guest MTU: 0 = match a VPN tunnel (default), -1 = off, 1280–1500 = fixed
+# dns = ["1.1.1.1", "8.8.8.8"]         # guest resolvers ([] = keep the one Tart's NAT hands out)
 ```
 
 Xcode VM images are huge (50–80 GB each) and `:latest` tags accumulate old
 layers under `$TART_HOME/cache/` — set `cache-budget` to keep it bounded.
 The sweeper only touches OCI/IPSW caches, never your local VMs.
+
+**Hosts behind a VPN (Cloudflare WARP, Tailscale exit nodes, corporate
+VPNs).** A tunnel that cannot carry 1500-byte packets breaks the VMs while the
+host itself keeps working: the guest advertises a full-size TCP MSS, servers
+answer with 1500-byte packets the tunnel drops, and every TLS handshake from
+the VM stalls — the runner starts but never connects, so jobs stay queued. By
+default (`mtu = 0`) runner looks up the host's route to the scale set's GitHub
+host before each runner starts and, when that route's MTU is below 1500, sets
+the guest's MTU to match (`sudo -n ifconfig`, which the Cirrus Labs images
+allow). Set a fixed `mtu` if the tunnel only carries some destinations, or
+`-1` to leave guests alone. Tart's NAT also proxies DNS through the host, and
+that proxy can stop answering after the host's VPN disconnects; set `dns` to
+give the guests resolvers of their own.
 
 **Custom VM images.** `runner-image` accepts a local VM name as well as an
 OCI reference: startup checks `tart list` first and only pulls when the name

@@ -104,6 +104,8 @@ dind = true
 # home = "/Users/admin/.tart"             # TART_HOME for tart CLI ("" = ~/.tart)
 # cache-budget = 0                        # cap OCI/IPSW cache size in GB; 0 = disabled
 # cache-cleanup-interval = "24h"          # how often to run `tart prune --space-budget`
+# mtu = 0                                 # guest MTU: 0 = match the host's route to GitHub when it is a VPN tunnel, -1 = off, 1280-1500 = fixed
+# dns = ["1.1.1.1", "8.8.8.8"]            # guest resolvers; [] = keep the one Tart's NAT proxies through the host
 
 # --- Multiple scale sets mode ---
 # Use [[scaleset]] entries to manage multiple orgs/repos from one process.

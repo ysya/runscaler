@@ -6,6 +6,7 @@ import (
 	"image/color"
 	"io"
 	"log/slog"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -381,6 +382,20 @@ type TartConfig struct {
 	Memory    int    `mapstructure:"memory"`     // Memory in MB (0 = use image default)
 	PoolSize  int    `mapstructure:"pool-size"`  // Pre-warmed VM count (0 = disabled)
 
+	// MTU is applied to the guest's network interface before the runner
+	// starts. A host whose route to GitHub runs through a tunnel (Cloudflare
+	// WARP, a VPN) cannot carry the 1500-byte packets a default guest asks
+	// for, so TLS handshakes from the VM stall while the host itself works.
+	// 0 (default) = auto: match the host's route MTU to the scale set's
+	// GitHub host when it is below 1500, otherwise leave the guest alone.
+	// -1 = never touch it. 1280–1500 = always use this value.
+	MTU int `mapstructure:"mtu"`
+	// DNS replaces the guest's resolvers (e.g. ["1.1.1.1", "8.8.8.8"]) before
+	// the runner starts. Empty (default) keeps the resolver Tart's NAT hands
+	// out, which proxies through the host and can stop answering after the
+	// host's VPN disconnects.
+	DNS []string `mapstructure:"dns"`
+
 	// CacheCleanup enables periodic `tart prune` of the OCI/IPSW caches under
 	// TART_HOME. Pointer: nil = inherit default (true). Local VMs are never
 	// touched. Disable (false) only if you manage the cache yourself.
@@ -588,6 +603,15 @@ func (ss *ScaleSetConfig) Validate() error {
 		}
 		if ss.Tart.PoolSize < 0 || ss.Tart.PoolSize > ss.MaxRunners {
 			return fmt.Errorf("tart pool-size must be between 0 and max-runners")
+		}
+		// Below 1280 the guest loses IPv6; above 1500 the NAT cannot carry it.
+		if ss.Tart.MTU != 0 && ss.Tart.MTU != -1 && (ss.Tart.MTU < 1280 || ss.Tart.MTU > 1500) {
+			return fmt.Errorf("tart mtu must be 0 (auto), -1 (off), or between 1280 and 1500")
+		}
+		for _, server := range ss.Tart.DNS {
+			if _, err := netip.ParseAddr(server); err != nil {
+				return fmt.Errorf("tart dns entry %q is not an IP address", server)
+			}
 		}
 	default:
 		return fmt.Errorf("unsupported provider %q (must be %q or \"tart\")", ss.Provider, DefaultProvider)

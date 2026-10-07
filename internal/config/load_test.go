@@ -1,6 +1,7 @@
 package config
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1246,4 +1247,42 @@ func TestLoad_ScaleSetsViaSet(t *testing.T) {
 			t.Error("expected an error for a non-table scaleset element")
 		}
 	})
+}
+
+// TestLoad_TartGuestNetworkInheritanceAndOverride pins that the guest network
+// keys decode from TOML at all (a wrong mapstructure tag would silently drop a
+// WARP host's MTU fix), are inherited from the top-level [tart] table, and can
+// be switched back off per scale set — including with an empty dns list.
+func TestLoad_TartGuestNetworkInheritanceAndOverride(t *testing.T) {
+	cfg := loadTOML(t, `
+[tart]
+mtu = 1380
+dns = ["1.1.1.1", "8.8.8.8"]
+
+[[scaleset]]
+url = "https://github.com/org-a"
+name = "inherits"
+token = "token-a"
+
+[[scaleset]]
+url = "https://github.com/org-b"
+name = "overrides"
+token = "token-b"
+[scaleset.tart]
+mtu = -1
+dns = []
+`)
+	sets := cfg.ResolveScaleSets()
+	if got := sets[0].Tart.MTU; got != 1380 {
+		t.Errorf("inherited MTU = %d, want 1380", got)
+	}
+	if got := sets[0].Tart.DNS; !slices.Equal(got, []string{"1.1.1.1", "8.8.8.8"}) {
+		t.Errorf("inherited DNS = %q, want [1.1.1.1 8.8.8.8]", got)
+	}
+	if got := sets[1].Tart.MTU; got != -1 {
+		t.Errorf("overridden MTU = %d, want -1", got)
+	}
+	if got := sets[1].Tart.DNS; len(got) != 0 {
+		t.Errorf("overridden DNS = %q, want empty", got)
+	}
 }

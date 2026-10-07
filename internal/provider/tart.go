@@ -124,6 +124,13 @@ type TartProvider struct {
 	cmd         CommandRunner
 	coordinator *TartHostCoordinator
 
+	// Guest network, applied before each runner starts (see TartConfig).
+	mtu        int      // 0 = auto, -1 = off, otherwise a fixed MTU
+	dns        []string // guest resolvers; empty = keep what Tart's NAT hands out
+	githubHost string   // the host whose route decides the auto MTU
+	mtuLogMu   sync.Mutex
+	lastMTULog string // last MTU and reason logged at Info; repeats go to Debug
+
 	// VM pool
 	pool     chan *warmVM
 	poolCtx  context.Context
@@ -160,6 +167,9 @@ func NewTartProviderWithCoordinator(ss config.ScaleSetConfig, logger *slog.Logge
 		logger:      logger,
 		cmd:         execCommandRunner{extraEnv: extraEnv},
 		coordinator: coordinator,
+		mtu:         ss.Tart.MTU,
+		dns:         ss.Tart.DNS,
+		githubHost:  registrationHost(ss.RegistrationURL),
 	}
 	return p
 }
@@ -664,6 +674,10 @@ func writeJITCmd(path, jitConfig string) string {
 
 // Uses Virtio gRPC (Guest Agent) instead of SSH — no network dependency.
 func (p *TartProvider) runRunner(ctx context.Context, vmName, jitConfig string) error {
+	// Before the runner first dials GitHub: a pooled VM may have booted while
+	// the host's VPN was in a different state.
+	p.configureGuestNetwork(ctx, vmName)
+
 	// Verify runner binary exists before attempting to start
 	runScript := p.runnerDir + "/run.sh"
 	if _, err := p.cmd.Run(ctx, "tart", "exec", vmName, "test", "-x", runScript); err != nil {

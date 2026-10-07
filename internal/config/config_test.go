@@ -64,6 +64,14 @@ func validScaleSetConfig() ScaleSetConfig {
 	}
 }
 
+// validTart turns a validScaleSetConfig into a valid Tart scale set, so a
+// table row only has to state the one Tart field it is exercising.
+func validTart(c *ScaleSetConfig) {
+	c.Provider = "tart"
+	c.RunnerImage = "macos-base:latest"
+	c.MaxRunners = 2
+}
+
 func TestScaleSetConfigValidate(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -284,6 +292,50 @@ func TestScaleSetConfigValidate_TartProvider(t *testing.T) {
 				c.Provider = "podman"
 			},
 			wantErr: "unsupported provider",
+		},
+		{
+			name:   "tart mtu off",
+			modify: func(c *ScaleSetConfig) { validTart(c); c.Tart.MTU = -1 },
+		},
+		{
+			name:   "tart mtu at IPv6 minimum",
+			modify: func(c *ScaleSetConfig) { validTart(c); c.Tart.MTU = 1280 },
+		},
+		{
+			name:   "tart mtu at ethernet maximum",
+			modify: func(c *ScaleSetConfig) { validTart(c); c.Tart.MTU = 1500 },
+		},
+		{
+			name:    "tart mtu below IPv6 minimum",
+			modify:  func(c *ScaleSetConfig) { validTart(c); c.Tart.MTU = 1279 },
+			wantErr: "tart mtu",
+		},
+		{
+			name:    "tart mtu above ethernet maximum",
+			modify:  func(c *ScaleSetConfig) { validTart(c); c.Tart.MTU = 1501 },
+			wantErr: "tart mtu",
+		},
+		{
+			name:    "tart mtu negative other than off",
+			modify:  func(c *ScaleSetConfig) { validTart(c); c.Tart.MTU = -2 },
+			wantErr: "tart mtu",
+		},
+		{
+			name: "tart dns accepts IPv4 and IPv6",
+			modify: func(c *ScaleSetConfig) {
+				validTart(c)
+				c.Tart.DNS = []string{"1.1.1.1", "2606:4700:4700::1111"}
+			},
+		},
+		{
+			name:    "tart dns rejects hostname",
+			modify:  func(c *ScaleSetConfig) { validTart(c); c.Tart.DNS = []string{"one.one.one.one"} },
+			wantErr: "tart dns",
+		},
+		{
+			name:    "tart dns rejects empty entry",
+			modify:  func(c *ScaleSetConfig) { validTart(c); c.Tart.DNS = []string{""} },
+			wantErr: "tart dns",
 		},
 	}
 

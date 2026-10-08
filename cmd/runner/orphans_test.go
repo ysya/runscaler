@@ -207,6 +207,8 @@ func TestFindOrphanTartVMs_MatchesRunnerAndPoolNames(t *testing.T) {
 	  {"Name":"pool-0-1778066579017","Source":"local"},
 	  {"Name":"runner-nothex00","Source":"local"},
 	  {"Name":"pool-x-1778066579017","Source":"local"},
+	  {"Name":"runner-keep-0a1b2c3d","Source":"local"},
+	  {"Name":"runner-keep-golden","Source":"local"},
 	  {"Name":"macos-tahoe-base","Source":"local"},
 	  {"Name":"runner-0011aabb","Source":"OCI"},
 	  {"Name":"ghcr.io/cirruslabs/macos-tahoe-xcode:latest","Source":"OCI"}
@@ -216,7 +218,9 @@ func TestFindOrphanTartVMs_MatchesRunnerAndPoolNames(t *testing.T) {
 	if err != nil {
 		t.Fatalf("findOrphanTartVMs: %v", err)
 	}
-	want := map[string]bool{"runner-deadbeef": true, "pool-0-1778066579017": true}
+	// runner-keep-<8 hex> is the throwaway clone a cache prune leaves behind
+	// if runner dies between cloning and deleting it.
+	want := map[string]bool{"runner-deadbeef": true, "pool-0-1778066579017": true, "runner-keep-0a1b2c3d": true}
 	if len(got) != len(want) {
 		t.Fatalf("got %v, want exactly %v — base images and user VMs must not be claimed", got, want)
 	}

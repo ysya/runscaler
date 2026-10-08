@@ -19,6 +19,11 @@ import (
 
 var poolNamePattern = regexp.MustCompile(`^pool-[0-9]+-[0-9]+$`)
 
+// keepVMNamePattern matches the throwaway clone a cache prune makes to mark a
+// runner image as used (provider.markTartImagesUsed); one survives only if
+// runner died between cloning and deleting it.
+var keepVMNamePattern = regexp.MustCompile(`^runner-keep-[0-9a-f]{8}$`)
+
 // findOrphanTartVMs lists local VMs created by runner. OCI entries and local
 // base images are deliberately excluded: only the exact ephemeral runner and
 // warm-pool naming schemes are safe to claim.
@@ -43,7 +48,7 @@ func findOrphanTartVMs(ctx context.Context, runner provider.CommandRunner) ([]st
 		if vm.Source != "local" {
 			continue
 		}
-		if runnerNamePattern.MatchString(vm.Name) || poolNamePattern.MatchString(vm.Name) {
+		if runnerNamePattern.MatchString(vm.Name) || poolNamePattern.MatchString(vm.Name) || keepVMNamePattern.MatchString(vm.Name) {
 			orphans = append(orphans, vm.Name)
 		}
 	}

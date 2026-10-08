@@ -180,6 +180,7 @@ jobs:
 | `runner version`         | Show version, commit, build date, and runtime info     |
 | `runner update`          | Update runner to the latest release                    |
 | `runner update --check`  | Check for updates without installing                   |
+| `runner scaleset delete` | Remove a retired scale set from GitHub                 |
 
 ### Status dashboard
 
@@ -224,6 +225,12 @@ runner service restart
 
 That restart is safe by default: SIGTERM starts a drain and waits for active
 jobs instead of killing them.
+
+The scale set itself stays registered across restarts, so a job queued while
+runner is stopped — for an upgrade, a reboot, or after a crash — is picked up
+as soon as runner reconnects. runner never deletes a scale set on its own: when
+you retire a `[[scaleset]]`, stop runner and remove it from GitHub with
+`runner scaleset delete <name>`.
 
 ### Troubleshooting with `doctor`
 
@@ -373,7 +380,10 @@ pool-size = 2            # pre-warm 2 VMs for instant job pickup (~2s vs ~30s co
 
 Xcode VM images are huge (50–80 GB each) and `:latest` tags accumulate old
 layers under `$TART_HOME/cache/` — set `cache-budget` to keep it bounded.
-The sweeper only touches OCI/IPSW caches, never your local VMs.
+The sweeper only touches OCI/IPSW caches, never your local VMs. Before every
+prune it marks each Tart scale set's `runner-image` as just used, so a week
+without jobs no longer evicts the image the next job clones from, and under
+`cache-budget` that image is evicted last.
 
 **Hosts behind a VPN (Cloudflare WARP, Tailscale exit nodes, corporate
 VPNs).** A tunnel that cannot carry 1500-byte packets breaks the VMs while the
@@ -387,6 +397,14 @@ allow). Set a fixed `mtu` if the tunnel only carries some destinations, or
 `-1` to leave guests alone. Tart's NAT also proxies DNS through the host, and
 that proxy can stop answering after the host's VPN disconnects; set `dns` to
 give the guests resolvers of their own.
+
+**Runner start-up check.** A runner that dies or never reaches GitHub leaves
+its VM running, so runner hands a VM over only once the runner inside prints
+`Listening for Jobs` and is still alive a few seconds later — the moment
+GitHub refuses a retired runner version. If it exits first, or has not
+connected within 5 minutes, runner deletes the VM, logs `Failed to start
+runner` with the runner's own output (or the tail of its `_diag` log), and
+retries.
 
 **Custom VM images.** `runner-image` accepts a local VM name as well as an
 OCI reference: startup checks `tart list` first and only pulls when the name
@@ -426,7 +444,8 @@ GitHub retires old runner versions server-side, and a runner that is both
 outdated and barred from updating connects, is refused with
 `Runner version vX.Y.Z is deprecated and cannot receive messages`, and exits.
 The scale set still shows Online while every runner it starts dies, so jobs
-queue with no visible cause. Container images are easy to rebuild, but a
+stay queued; on Tart the start-up check above logs the refusal. Container
+images are easy to rebuild, but a
 140 GB macOS VM image is not — set `disable-update = false` on those scale
 sets to let each runner update itself, trading a per-job download for
 self-healing across retirements.

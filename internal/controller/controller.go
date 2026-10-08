@@ -57,12 +57,16 @@ type ScaleSetController struct {
 	diskChecker DiskChecker
 	capacity    *capacity.Allocator
 	reconcile   chan struct{}
-	workCtx     context.Context
-	cancelWork  context.CancelFunc
-	workerWG    sync.WaitGroup
-	cleanupWG   sync.WaitGroup
-	stopOnce    sync.Once
-	draining    atomic.Bool
+	// cancelAcquire abandons the reconciler's capacity wait when new work is
+	// signalled (see acquireCapacity). Guarded by acquireMu.
+	acquireMu     sync.Mutex
+	cancelAcquire context.CancelFunc
+	workCtx       context.Context
+	cancelWork    context.CancelFunc
+	workerWG      sync.WaitGroup
+	cleanupWG     sync.WaitGroup
+	stopOnce      sync.Once
+	draining      atomic.Bool
 }
 
 // Compile-time check that ScaleSetController implements listener.Scaler.
@@ -227,8 +231,10 @@ func (s *ScaleSetController) reconcileOne() bool {
 		slog.Int("currentCount", current),
 		slog.Int("desiredCount", target),
 	)
-	lease, err := s.capacity.Acquire(s.workCtx)
+	lease, err := s.acquireCapacity()
 	if err != nil {
+		// Abandoned for a signal (or shutdown): the loop picks the signal up,
+		// claims any cleanup it announced, and retries the scale-up after.
 		return false
 	}
 	// Demand may have changed while this scale set waited for host capacity.
@@ -294,6 +300,34 @@ func (s *ScaleSetController) signalReconcile() {
 	case s.reconcile <- struct{}{}:
 	default:
 	}
+	s.acquireMu.Lock()
+	if s.cancelAcquire != nil {
+		s.cancelAcquire()
+	}
+	s.acquireMu.Unlock()
+}
+
+// acquireCapacity waits for a host capacity lease but gives up as soon as the
+// reconciler is signalled. The signalled work is often a cleanup, and only the
+// reconciler claims cleanups — including the one that would release the lease
+// this wait is for — so waiting through a signal can deadlock the scale set.
+func (s *ScaleSetController) acquireCapacity() (*capacity.Lease, error) {
+	ctx, cancel := context.WithCancel(s.workCtx)
+	defer cancel()
+	s.acquireMu.Lock()
+	s.cancelAcquire = cancel
+	// A signal sent before cancelAcquire was set is still in the channel.
+	signalled := len(s.reconcile) > 0
+	s.acquireMu.Unlock()
+	defer func() {
+		s.acquireMu.Lock()
+		s.cancelAcquire = nil
+		s.acquireMu.Unlock()
+	}()
+	if signalled {
+		return nil, context.Canceled
+	}
+	return s.capacity.Acquire(ctx)
 }
 
 // startInstance creates and starts a new ephemeral runner.

@@ -644,3 +644,43 @@ func TestWriteJITCmd_QuotesPayload(t *testing.T) {
 		t.Fatalf("written JIT config = %q, want %q", got, want)
 	}
 }
+
+// tartListWithLocalVMs is `tart list --format json` with a golden VM, a
+// similarly named old one, and the OCI tag runner clones from. tart escapes
+// "/" in JSON, so OCI names never appear verbatim in the raw output.
+const tartListWithLocalVMs = `[
+  {"State":"stopped","Disk":140,"Accessed":"2026-10-07T20:47:57Z","Name":"ghcr.io\/cirruslabs\/macos-golden-gate-xcode:27","Source":"OCI","Running":false,"Size":81},
+  {"State":"stopped","Disk":140,"Accessed":"2026-10-06T08:00:00Z","Name":"ios-golden","Source":"local","Running":false,"Size":82},
+  {"State":"stopped","Disk":120,"Accessed":"2026-09-01T08:00:00Z","Name":"macos-base-old","Source":"local","Running":false,"Size":60}
+]`
+
+func TestTartProvider_EnsureImage(t *testing.T) {
+	tests := []struct {
+		name     string
+		image    string
+		wantPull bool
+	}{
+		{name: "OCI image already cached", image: "ghcr.io/cirruslabs/macos-golden-gate-xcode:27", wantPull: false},
+		{name: "local golden VM", image: "ios-golden", wantPull: false},
+		{name: "image not present", image: "ghcr.io/cirruslabs/macos-tahoe-xcode:26.5", wantPull: true},
+		{name: "only a similarly named VM", image: "macos-base", wantPull: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := &mockCommandRunner{results: map[string]cmdResult{
+				"tart list --format json": {output: []byte(tartListWithLocalVMs)},
+				"tart pull":               {},
+			}}
+			p := newTestTartProvider(cmd)
+			p.baseImage = tt.image
+
+			if err := p.EnsureImage(context.Background()); err != nil {
+				t.Fatalf("EnsureImage() error: %v", err)
+			}
+			pulled := callIndex(cmd.getCalls(), "tart", "pull", tt.image) >= 0
+			if pulled != tt.wantPull {
+				t.Errorf("pulled = %v, want %v; calls: %v", pulled, tt.wantPull, cmd.getCalls())
+			}
+		})
+	}
+}

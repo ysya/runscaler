@@ -4,7 +4,7 @@
 # Pinned to the multi-arch index digest for reproducible builds and stable layer caching
 # (covers both linux/amd64 and linux/arm64). Dependabot keeps the tag+digest fresh.
 # Refresh manually with: docker buildx imagetools inspect ghcr.io/actions/actions-runner:latest
-FROM ghcr.io/actions/actions-runner:2.336.0@sha256:0cfdcc701ce933c6d243c6b0b2da767366dc9f2e99961d4c3754b0b78084cdda
+FROM ghcr.io/actions/actions-runner:2.338.0@sha256:4ffadc0002b2581327e06101fc8c06cd189232baf79fe561fac9caeb76f5e807
 
 # Avoid interactive prompts during package installation
 ENV DEBIAN_FRONTEND=noninteractive

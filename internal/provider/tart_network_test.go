@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/ysya/runscaler/internal/config"
 )
@@ -205,8 +206,8 @@ func TestTartProvider_AutoMTULeavesGuestAloneOnFullSizeRoute(t *testing.T) {
 	if n := countCallsContaining(calls, "ifconfig"); n != 0 {
 		t.Errorf("ifconfig called %d times on a 1500-byte route, want 0", n)
 	}
-	if n := cmd.callCount("tart exec"); n != 5 {
-		t.Errorf("tart exec called %d times, want the usual 5 when nothing needs adjusting", n)
+	if n := countCallsContaining(calls, "tart exec runner-abc /sbin/route"); n != 0 {
+		t.Errorf("guest route looked up %d times when nothing needs adjusting, want 0", n)
 	}
 }
 
@@ -313,6 +314,7 @@ func TestNewTartProvider_GuestNetworkFromScaleSetConfig(t *testing.T) {
 	cmd := networkCmdRunner(routeGetHostNoVPN)
 	cmd.results["/sbin/route -n get ghes.example.com"] = cmdResult{output: []byte(routeGetHostWARP)}
 	p.cmd = cmd
+	p.runnerPoll, p.runnerListenTimeout, p.runnerSettle = time.Millisecond, 50*time.Millisecond, time.Millisecond
 
 	if _, err := p.StartInstance(context.Background(), "runner-abc", "jit"); err != nil {
 		t.Fatalf("StartInstance() error: %v", err)

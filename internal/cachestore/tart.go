@@ -17,6 +17,9 @@ type TartConfig struct {
 	Home     string
 	MaxAge   time.Duration
 	BudgetGB int
+	// KeepImages are the runner images of the scale sets sharing Home; each
+	// prune first marks them used so an idle week cannot evict one.
+	KeepImages []string
 }
 
 type tartStore struct {
@@ -100,7 +103,7 @@ func (s *tartStore) Measure(ctx context.Context) (uint64, error) {
 func (s *tartStore) Reclaim(ctx context.Context, tier Tier) (uint64, error) {
 	switch tier {
 	case Tier2:
-		if err := provider.PruneTartCache(ctx, s.cfg.Home, s.cfg.MaxAge, s.cfg.BudgetGB, slog.Default()); err != nil {
+		if err := provider.PruneTartCache(ctx, s.cfg.Home, s.cfg.MaxAge, s.cfg.BudgetGB, s.cfg.KeepImages, slog.Default()); err != nil {
 			return 0, fmt.Errorf("prune tart cache: %w", err)
 		}
 		// PruneTartCache reports no reclaimed-space total either — 0 here

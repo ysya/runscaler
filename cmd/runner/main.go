@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -598,65 +599,15 @@ func runScaleSetController(ctx context.Context, drain <-chan struct{}, drainTime
 		return fmt.Errorf("failed to create scaleset client: %w", err)
 	}
 
-	// Resolve runner group ID
-	var runnerGroupID int
-	switch ss.RunnerGroup {
-	case scaleset.DefaultRunnerGroup, "":
-		runnerGroupID = 1
-	default:
-		runnerGroup, err := scalesetClient.GetRunnerGroupByName(ctx, ss.RunnerGroup)
-		if err != nil {
-			return fmt.Errorf("failed to get runner group: %w", err)
-		}
-		runnerGroupID = runnerGroup.ID
-	}
-
-	// Get or create runner scale set
-	desired := &scaleset.RunnerScaleSet{
-		Name:          ss.ScaleSetName,
-		RunnerGroupID: runnerGroupID,
-		Labels:        config.BuildLabels(ss.ScaleSetName, ss.Labels),
-		RunnerSetting: scaleset.RunnerSetting{
-			DisableUpdate: ss.IsUpdateDisabled(),
-		},
-	}
-
-	scaleSet, err := scalesetClient.GetRunnerScaleSet(ctx, runnerGroupID, ss.ScaleSetName)
+	// The scale set is registered once and kept across restarts (see
+	// ensureScaleSet), so it is deliberately not deleted on exit.
+	scaleSet, err := ensureScaleSet(ctx, scalesetClient, ss, logger)
 	if err != nil {
-		return fmt.Errorf("failed to get runner scale set: %w", err)
-	}
-	if scaleSet == nil {
-		scaleSet, err = scalesetClient.CreateRunnerScaleSet(ctx, desired)
-		if err != nil {
-			return fmt.Errorf("failed to create runner scale set: %w", err)
-		}
-		logger.Info("Scale set created",
-			slog.Int("scaleSetID", scaleSet.ID),
-			slog.String("name", scaleSet.Name),
-		)
-	} else {
-		scaleSet, err = scalesetClient.UpdateRunnerScaleSet(ctx, scaleSet.ID, desired)
-		if err != nil {
-			return fmt.Errorf("failed to update runner scale set: %w", err)
-		}
-		logger.Info("Scale set reused",
-			slog.Int("scaleSetID", scaleSet.ID),
-			slog.String("name", scaleSet.Name),
-		)
+		return err
 	}
 
 	// Set user agent info
 	scalesetClient.SetSystemInfo(config.NewSystemInfo(scaleSet.ID, version))
-
-	// Delete scale set on exit (with timeout to avoid hanging if API is unresponsive)
-	defer func() {
-		logger.Info("Deleting runner scale set", slog.Int("scaleSetID", scaleSet.ID))
-		cleanCtx, cleanCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-		defer cleanCancel()
-		if err := scalesetClient.DeleteRunnerScaleSet(cleanCtx, scaleSet.ID); err != nil {
-			logger.Error("Failed to delete runner scale set", slog.Any("error", err))
-		}
-	}()
 
 	// Create the instance provider once; it persists across reconnections.
 	var instanceProvider provider.InstanceProvider
@@ -1213,6 +1164,7 @@ type tartCacheSweepTarget struct {
 	spaceBudgetGB int
 	interval      time.Duration
 	enabled       bool
+	keepImages    []string // runner images every prune marks used first
 }
 
 // tartCacheStores builds one target per unique TART_HOME across scaleSets —
@@ -1296,15 +1248,25 @@ func tartCacheStoreFor(home string, sets []config.ScaleSetConfig, logger *slog.L
 		chosen = &settings{maxAge: maxAge, budgetGB: sets[0].Tart.CacheBudgetGB}
 	}
 
+	// Every scaleset cloning from this home needs its image kept, including
+	// one that leaves cleanup to another scaleset sharing the home.
+	var keep []string
+	for _, ss := range sets {
+		if ss.RunnerImage != "" && !slices.Contains(keep, ss.RunnerImage) {
+			keep = append(keep, ss.RunnerImage)
+		}
+	}
+
 	store := cachestore.NewTartStore(execCommandRunner{}, cachestore.TartConfig{
-		Enabled:  enabled,
-		Home:     home,
-		MaxAge:   chosen.maxAge,
-		BudgetGB: chosen.budgetGB,
+		Enabled:    enabled,
+		Home:       home,
+		MaxAge:     chosen.maxAge,
+		BudgetGB:   chosen.budgetGB,
+		KeepImages: keep,
 	})
 	return tartCacheSweepTarget{
 		store: store, home: home, maxAge: chosen.maxAge, spaceBudgetGB: chosen.budgetGB,
-		interval: chosen.interval, enabled: enabled,
+		interval: chosen.interval, enabled: enabled, keepImages: keep,
 	}
 }
 

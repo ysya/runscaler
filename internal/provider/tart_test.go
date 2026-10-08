@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -20,6 +21,9 @@ type mockCommandRunner struct {
 	calls    []cmdCall
 	results  map[string]cmdResult // key: "command arg1 arg2..." -> result
 	fallback cmdResult
+	// sequences answers an exact key with these results in order before
+	// falling back to results, for a command whose outcome changes.
+	sequences map[string][]cmdResult
 }
 
 type blockingContextCommandRunner struct {
@@ -62,6 +66,10 @@ func (m *mockCommandRunner) Run(_ context.Context, name string, args ...string) 
 	m.calls = append(m.calls, cmdCall{name: name, args: args})
 
 	key := name + " " + strings.Join(args, " ")
+	if seq := m.sequences[key]; len(seq) > 0 {
+		m.sequences[key] = seq[1:]
+		return seq[0].output, seq[0].err
+	}
 	if r, ok := m.results[key]; ok {
 		return r.output, r.err
 	}
@@ -104,6 +112,10 @@ func newTestTartProvider(cmd *mockCommandRunner) *TartProvider {
 		logger:      slog.New(slog.DiscardHandler),
 		cmd:         cmd,
 		coordinator: NewTartHostCoordinator(10),
+		// Real waits are seconds to minutes; keep the start-up loop instant.
+		runnerPoll:          time.Millisecond,
+		runnerListenTimeout: 50 * time.Millisecond,
+		runnerSettle:        time.Millisecond,
 	}
 }
 
@@ -147,10 +159,89 @@ func TestTartProvider_StartInstance_Success(t *testing.T) {
 	// 2. test -x (verify runner binary)
 	// 3. write JIT config to file
 	// 4. start runner
-	// 5. pgrep verification
+	// 5. pgrep: runner still alive
+	// 6. grep: runner reports "Listening for Jobs"
+	// 7. pgrep: runner survived its first poll for messages
 	execCount := cmd.callCount("tart exec")
-	if execCount != 5 {
-		t.Fatalf("expected 5 tart exec calls, got %d", execCount)
+	if execCount != 7 {
+		t.Fatalf("expected 7 tart exec calls, got %d", execCount)
+	}
+}
+
+// runnerDiagListing is `ls -t` of the runner's _diag directory after a job:
+// newest first, with a Worker log ahead of the Runner log.
+const runnerDiagListing = "Worker_20261007-230510-utc.log\nRunner_20261007-230024-utc.log\n"
+
+// startupCmdRunner answers a cold start whose runner start-up checks are
+// overridden by the given results.
+func startupCmdRunner(overrides map[string]cmdResult) *mockCommandRunner {
+	results := map[string]cmdResult{
+		"tart clone": {},
+		"tart run":   {},
+		"tart exec":  {},
+		"tart exec runner-abc ls -t /Users/admin/actions-runner/_diag": {output: []byte(runnerDiagListing)},
+	}
+	for k, v := range overrides {
+		results[k] = v
+	}
+	return &mockCommandRunner{results: results}
+}
+
+func TestTartProvider_StartInstance_RunnerExitsBeforeListening(t *testing.T) {
+	cmd := startupCmdRunner(map[string]cmdResult{
+		"tart exec runner-abc pgrep -f Runner.Listener": {err: errors.New("exit status 1")},
+		"tart exec runner-abc tail -20 /tmp/runner.log": {output: []byte("An error occurred: Not configured")},
+	})
+	p := newTestTartProvider(cmd)
+
+	_, err := p.StartInstance(context.Background(), "runner-abc", "jit")
+	if err == nil || !strings.Contains(err.Error(), "Not configured") {
+		t.Fatalf("StartInstance() error = %v, want one carrying the runner log", err)
+	}
+	if callIndex(cmd.getCalls(), "tart", "delete", "runner-abc") < 0 {
+		t.Error("VM with a dead runner was not deleted")
+	}
+}
+
+func TestTartProvider_StartInstance_RunnerNeverConnects(t *testing.T) {
+	cmd := startupCmdRunner(map[string]cmdResult{
+		"tart exec runner-abc grep -q Listening for Jobs /tmp/runner.log": {err: errors.New("exit status 1")},
+		"tart exec runner-abc tail -n 20 /Users/admin/actions-runner/_diag/Runner_20261007-230024-utc.log": {
+			output: []byte("[2026-10-07 23:01:24Z WARN GitHubActionsService] GET request to https://pipelinesghubeus8.actions.githubusercontent.com timed out after 60 seconds"),
+		},
+	})
+	p := newTestTartProvider(cmd)
+
+	_, err := p.StartInstance(context.Background(), "runner-abc", "jit")
+	if err == nil {
+		t.Fatal("StartInstance() succeeded for a runner that never connected")
+	}
+	if !strings.Contains(err.Error(), "timed out after 60 seconds") {
+		t.Errorf("error = %q, want it to carry the newest Runner diag log", err)
+	}
+	if callIndex(cmd.getCalls(), "tart", "delete", "runner-abc") < 0 {
+		t.Error("VM whose runner never connected was not deleted")
+	}
+}
+
+func TestTartProvider_StartInstance_RunnerExitsRightAfterConnecting(t *testing.T) {
+	cmd := startupCmdRunner(map[string]cmdResult{
+		"tart exec runner-abc tail -20 /tmp/runner.log": {
+			output: []byte("Listening for Jobs\nAn error occured: Runner version v2.334.0 is deprecated and cannot receive messages."),
+		},
+	})
+	// Alive while connecting, gone once GitHub refuses its first poll.
+	cmd.sequences = map[string][]cmdResult{
+		"tart exec runner-abc pgrep -f Runner.Listener": {{}, {err: errors.New("exit status 1")}},
+	}
+	p := newTestTartProvider(cmd)
+
+	_, err := p.StartInstance(context.Background(), "runner-abc", "jit")
+	if err == nil || !strings.Contains(err.Error(), "is deprecated") {
+		t.Fatalf("StartInstance() error = %v, want one carrying the refusal from the runner log", err)
+	}
+	if callIndex(cmd.getCalls(), "tart", "delete", "runner-abc") < 0 {
+		t.Error("VM whose runner was refused was not deleted")
 	}
 }
 
@@ -265,11 +356,115 @@ func TestPruneTartCache_DisabledWhenNoCriteria(t *testing.T) {
 	cmd := &mockCommandRunner{}
 	ctx := context.Background()
 
-	if err := pruneTartCacheWith(ctx, cmd, "/some/home", 0, 0, slog.New(slog.DiscardHandler)); err != nil {
+	keep := []string{"ghcr.io/cirruslabs/macos-golden-gate-xcode:27"}
+	if err := pruneTartCacheWith(ctx, cmd, "/some/home", 0, 0, keep, slog.New(slog.DiscardHandler)); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if got := len(cmd.getCalls()); got != 0 {
-		t.Errorf("expected 0 calls when no criteria set, got %d", got)
+		t.Errorf("expected 0 calls when no criteria set, got %d — nothing is pruned, so nothing needs marking", got)
+	}
+}
+
+// ociCacheListing is `tart list --source oci --format json` on a host that
+// pulled one Xcode image: its tag and the digest the tag points at.
+const ociCacheListing = `[
+  {
+    "State" : "stopped",
+    "Disk" : 140,
+    "Accessed" : "2026-10-07T20:47:57Z",
+    "Name" : "ghcr.io\/cirruslabs\/macos-golden-gate-xcode:27",
+    "Source" : "OCI",
+    "Running" : false,
+    "Size" : 81
+  },
+  {
+    "State" : "stopped",
+    "Disk" : 140,
+    "Accessed" : "2026-10-07T23:00:11Z",
+    "Name" : "ghcr.io\/cirruslabs\/macos-golden-gate-xcode@sha256:324ea5656dee8ab9b0a0df70fda2cfed8912051ad0eca3b1b883bf6ddac88fab",
+    "Source" : "OCI",
+    "Running" : false,
+    "Size" : 81
+  }
+]`
+
+var keepVMName = regexp.MustCompile(`^runner-keep-[0-9a-f]{8}$`)
+
+func TestPruneTartCache_MarksKeptImageUsedBeforePruning(t *testing.T) {
+	cmd := &mockCommandRunner{results: map[string]cmdResult{
+		"tart list --source oci --format json": {output: []byte(ociCacheListing)},
+		"tart clone":                           {},
+		"tart delete":                          {},
+		"tart prune":                           {},
+	}}
+	keep := []string{"ghcr.io/cirruslabs/macos-golden-gate-xcode:27"}
+
+	if err := pruneTartCacheWith(context.Background(), cmd, "/some/home", 7*24*time.Hour, 150, keep, slog.New(slog.DiscardHandler)); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	calls := cmd.getCalls()
+	clone, del, prune := -1, -1, -1
+	var throwaway string
+	for i, c := range calls {
+		switch {
+		case c.name == "tart" && c.args[0] == "clone":
+			clone, throwaway = i, c.args[2]
+			if c.args[1] != keep[0] {
+				t.Errorf("cloned %q, want the kept image %q", c.args[1], keep[0])
+			}
+		case c.name == "tart" && c.args[0] == "delete":
+			del = i
+			if c.args[1] != throwaway {
+				t.Errorf("deleted %q, want the throwaway clone %q", c.args[1], throwaway)
+			}
+		case c.name == "tart" && c.args[0] == "prune":
+			prune = i
+		}
+	}
+	if clone < 0 || del < 0 || prune < 0 {
+		t.Fatalf("want clone, delete and prune; calls: %v", calls)
+	}
+	if clone >= del || del >= prune {
+		t.Errorf("order clone=%d delete=%d prune=%d, want the image marked used before pruning", clone, del, prune)
+	}
+	if !keepVMName.MatchString(throwaway) {
+		t.Errorf("throwaway VM %q must match %s so startup reconciliation can reclaim it", throwaway, keepVMName)
+	}
+}
+
+func TestPruneTartCache_DoesNotCloneImageMissingFromCache(t *testing.T) {
+	cmd := &mockCommandRunner{results: map[string]cmdResult{
+		"tart list --source oci --format json": {output: []byte(ociCacheListing)},
+		"tart prune":                           {},
+	}}
+	// Cloning an image that is not cached would pull it — 80+ GB.
+	keep := []string{"ghcr.io/cirruslabs/macos-tahoe-xcode:26.5"}
+
+	if err := pruneTartCacheWith(context.Background(), cmd, "/some/home", 7*24*time.Hour, 0, keep, slog.New(slog.DiscardHandler)); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if n := cmd.callCount("tart clone"); n != 0 {
+		t.Errorf("tart clone called %d times for an image not in the cache, want 0", n)
+	}
+	if n := cmd.callCount("tart prune"); n != 1 {
+		t.Errorf("tart prune called %d times, want 1", n)
+	}
+}
+
+func TestPruneTartCache_PrunesEvenWhenMarkingFails(t *testing.T) {
+	cmd := &mockCommandRunner{results: map[string]cmdResult{
+		"tart list --source oci --format json": {output: []byte(ociCacheListing)},
+		"tart clone":                           {err: errors.New("no space left on device")},
+		"tart prune":                           {},
+	}}
+	keep := []string{"ghcr.io/cirruslabs/macos-golden-gate-xcode:27"}
+
+	if err := pruneTartCacheWith(context.Background(), cmd, "/some/home", 7*24*time.Hour, 0, keep, slog.New(slog.DiscardHandler)); err != nil {
+		t.Fatalf("unexpected error: %v; marking is best-effort", err)
+	}
+	if n := cmd.callCount("tart prune"); n != 1 {
+		t.Errorf("tart prune called %d times after a failed mark, want 1 — cleanup must keep working", n)
 	}
 }
 
@@ -279,7 +474,7 @@ func TestPruneTartCache_AgeOnly(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	if err := pruneTartCacheWith(ctx, cmd, "/some/home", 7*24*time.Hour, 0, slog.New(slog.DiscardHandler)); err != nil {
+	if err := pruneTartCacheWith(ctx, cmd, "/some/home", 7*24*time.Hour, 0, nil, slog.New(slog.DiscardHandler)); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -297,7 +492,7 @@ func TestPruneTartCache_AgeAndBudget(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	if err := pruneTartCacheWith(ctx, cmd, "/some/home", 7*24*time.Hour, 50, slog.New(slog.DiscardHandler)); err != nil {
+	if err := pruneTartCacheWith(ctx, cmd, "/some/home", 7*24*time.Hour, 50, nil, slog.New(slog.DiscardHandler)); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -316,7 +511,7 @@ func TestPruneTartCache_SubDayAgeFloorsToOneDay(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	if err := pruneTartCacheWith(ctx, cmd, "/some/home", 12*time.Hour, 0, slog.New(slog.DiscardHandler)); err != nil {
+	if err := pruneTartCacheWith(ctx, cmd, "/some/home", 12*time.Hour, 0, nil, slog.New(slog.DiscardHandler)); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -334,7 +529,7 @@ func TestPruneTartCache_BudgetOnly(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	if err := pruneTartCacheWith(ctx, cmd, "/some/home", 0, 50, slog.New(slog.DiscardHandler)); err != nil {
+	if err := pruneTartCacheWith(ctx, cmd, "/some/home", 0, 50, nil, slog.New(slog.DiscardHandler)); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
@@ -354,7 +549,7 @@ func TestPruneTartCache_PropagatesError(t *testing.T) {
 	}
 	ctx := context.Background()
 
-	err := pruneTartCacheWith(ctx, cmd, "/some/home", 7*24*time.Hour, 0, slog.New(slog.DiscardHandler))
+	err := pruneTartCacheWith(ctx, cmd, "/some/home", 7*24*time.Hour, 0, nil, slog.New(slog.DiscardHandler))
 	if err == nil {
 		t.Fatal("expected error from failed prune, got nil")
 	}

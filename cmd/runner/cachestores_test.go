@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -294,6 +295,24 @@ func TestTartCacheStores(t *testing.T) {
 		}
 		if targets["/Volumes/A"].store == nil || targets["/Volumes/B"].store == nil {
 			t.Error("every target must carry a constructed store")
+		}
+	})
+
+	t.Run("every scaleset sharing a home contributes its runner image to keep", func(t *testing.T) {
+		no := false
+		sets := []config.ScaleSetConfig{
+			{Provider: "tart", RunnerImage: "ghcr.io/cirruslabs/macos-golden-gate-xcode:27", Tart: config.TartConfig{Home: "/Volumes/A"}},
+			{Provider: "tart", RunnerImage: "ios-golden", Tart: config.TartConfig{Home: "/Volumes/A", CacheCleanup: &no}},
+			{Provider: "tart", RunnerImage: "ghcr.io/cirruslabs/macos-golden-gate-xcode:27", Tart: config.TartConfig{Home: "/Volumes/A"}},
+			{Provider: "tart", RunnerImage: "ghcr.io/cirruslabs/macos-tahoe-xcode:26.5", Tart: config.TartConfig{Home: "/Volumes/B"}},
+		}
+		targets := tartCacheStores(sets, slog.New(slog.DiscardHandler))
+		want := []string{"ghcr.io/cirruslabs/macos-golden-gate-xcode:27", "ios-golden"}
+		if got := targets["/Volumes/A"].keepImages; !slices.Equal(got, want) {
+			t.Errorf("/Volumes/A keepImages = %q, want %q (each image once, even from a scaleset with cleanup off)", got, want)
+		}
+		if got := targets["/Volumes/B"].keepImages; !slices.Equal(got, []string{"ghcr.io/cirruslabs/macos-tahoe-xcode:26.5"}) {
+			t.Errorf("/Volumes/B keepImages = %q, want only its own scaleset's image", got)
 		}
 	})
 

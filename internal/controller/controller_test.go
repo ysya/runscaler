@@ -1295,3 +1295,35 @@ func TestDrainLogsRunnerRemoved(t *testing.T) {
 	e := waitForLog(t, rec, "Runner removed")
 	assertInfoAttrs(t, e, map[string]string{"name": "runner-abc", "reason": "drain"})
 }
+
+// A scale set waiting for host capacity must still clean up its own finished
+// runner: that cleanup is what frees the capacity it is waiting for. The
+// reconciler is the only worker that claims cleanups, so a capacity wait it
+// cannot leave holds the finished runner's lease forever.
+func TestFinishedRunnerIsCleanedUpWhileWaitingForCapacity(t *testing.T) {
+	b := capacity.NewBroker(1)
+	a := b.Register("test", 0)
+	p := &mockProvider{}
+	rec := &logRecorder{}
+	s := NewScaleSetController(1, 0, 2, p, &mockScaleset{}, slog.New(rec), WithCapacityAllocator(a))
+	defer s.Shutdown(context.Background())
+	ctx := context.Background()
+
+	name, err := s.startInstance(ctx) // takes the host's only slot
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.HandleDesiredRunnerCount(ctx, 2); err != nil {
+		t.Fatal(err)
+	}
+	waitForLog(t, rec, "Scaling up runner") // the reconciler now waits for capacity
+
+	if err := s.HandleJobStarted(ctx, &scaleset.JobStarted{RunnerName: name}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.HandleJobCompleted(ctx, &scaleset.JobCompleted{RunnerName: name}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool { return p.removedCount() == 1 },
+		"finished runner was not cleaned up while the scale set waited for capacity")
+}

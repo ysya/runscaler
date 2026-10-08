@@ -76,11 +76,15 @@ flowchart LR
 - **Tart provider (macOS):** Apple Silicon Mac with [Tart](https://tart.run/) installed:
 
   ```bash
+  # Homebrew 7 refuses formulae from a tap you have not trusted
+  brew trust --formula openai/tools/tart openai/tools/softnet
   brew install openai/tools/tart
 
   # Pull a macOS runner image (pre-installed with Xcode and runner dependencies)
   tart pull ghcr.io/cirruslabs/macos-tahoe-xcode:latest
   ```
+
+  > **Upgrading from the `cirruslabs/cli` tap:** Tart moved to `openai/tools`, so `brew upgrade` never gets past the last `cirruslabs/cli` release (2.32.x). Run `brew uninstall tart softnet`, then the two commands above, then remove the old tap. Homebrew will not untap formulae it does not trust, so trust them just for that: `brew trust --formula cirruslabs/cli/tart cirruslabs/cli/softnet && brew untap cirruslabs/cli && brew untrust --formula cirruslabs/cli/tart cirruslabs/cli/softnet`. Avoid `brew untap --force`, which uninstalls every formula it attributes to the tap.
 
   > **Note:** Apple's Virtualization.framework limits each host to **2 concurrent macOS VMs**. Set `max-runners` accordingly. Each VM slot is assigned a deterministic MAC address to prevent DHCP lease exhaustion — no sudo required.
 
@@ -378,6 +382,10 @@ pool-size = 2            # pre-warm 2 VMs for instant job pickup (~2s vs ~30s co
 # dns = ["1.1.1.1", "8.8.8.8"]         # guest resolvers ([] = keep the one Tart's NAT hands out)
 ```
 
+With `home` set, point your own tart commands at the same directory —
+`TART_HOME=/Volumes/Data/tart tart list`. A bare `tart list` reads `~/.tart`
+and shows none of runner's images or VMs.
+
 Xcode VM images are huge (50–80 GB each) and `:latest` tags accumulate old
 layers under `$TART_HOME/cache/` — set `cache-budget` to keep it bounded.
 The sweeper only touches OCI/IPSW caches, never your local VMs. Before every
@@ -437,18 +445,29 @@ Actions runner unpacked at `runner-dir` with an executable `run.sh`.
 Provisioning the golden VM occupies one of the host's two macOS VM slots, so
 do it while runner is not at capacity.
 
-**Runner version retirement.** By default runner sets `disable-update = true`,
-so GitHub never updates the runner binary inside the container or VM — the
-image-based model, where you refresh the runner by rebuilding the image.
-GitHub retires old runner versions server-side, and a runner that is both
-outdated and barred from updating connects, is refused with
+**Runner version retirement.** GitHub retires runner versions server-side:
+each release gets a `runtime_deprecates_at` date some weeks after newer
+releases ship, and a runner still on a retired version is refused on its first
+poll for messages with
 `Runner version vX.Y.Z is deprecated and cannot receive messages`, and exits.
 The scale set still shows Online while every runner it starts dies, so jobs
-stay queued; on Tart the start-up check above logs the refusal. Container
-images are easy to rebuild, but a
-140 GB macOS VM image is not — set `disable-update = false` on those scale
-sets to let each runner update itself, trading a per-job download for
-self-healing across retirements.
+stay queued; on Tart the start-up check above logs the refusal. Every
+ephemeral container or VM starts at the runner version baked into its image,
+and `disable-update` cannot change that: the update instruction arrives on the
+same message poll GitHub refuses (see
+[community discussion #206494](https://github.com/orgs/community/discussions/206494)),
+so `disable-update = false` only makes a still-supported runner download the
+latest release before its first job — it does not rescue a retired one. That
+is why runner defaults to `disable-update = true` and the runner is refreshed
+with the image instead: rebuild the container image, or replace
+`actions-runner` in your golden VM. To see how long a version has left:
+
+```bash
+gh api repos/<owner>/<repo>/actions/runners/deprecations/<version>   # runtime_deprecates_at
+```
+
+The org-level endpoint (`orgs/<org>/actions/runners/deprecations/<version>`)
+needs the `admin:org` scope.
 
 ### Token Security
 

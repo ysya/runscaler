@@ -82,13 +82,12 @@ type ScaleSetConfig struct {
 	// image-based model — the runner is refreshed by rebuilding the image, and
 	// ephemeral runners skip a download on every job.
 	//
-	// Set false when the image's bundled runner cannot be refreshed easily
-	// (e.g. a 140GB macOS VM image). GitHub retires old runner versions
-	// server-side, and a runner that is both outdated and forbidden to update
-	// connects, is refused ("Runner version vX is deprecated and cannot
-	// receive messages"), then exits — jobs sit queued behind a scale set that
-	// still looks healthy. Allowing the update trades a per-job download for
-	// self-healing across retirements.
+	// Setting false does not protect an image from runner retirement: every
+	// ephemeral runner starts at the image's version, and GitHub refuses a
+	// retired version ("Runner version vX is deprecated and cannot receive
+	// messages") on the same message poll that would carry the update. It
+	// only makes a still-supported runner fetch the latest release before its
+	// first job.
 	DisableUpdate *bool `mapstructure:"disable-update"`
 
 	// Docker provider settings

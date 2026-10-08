@@ -54,8 +54,8 @@ const (
 	// DefaultDisableUpdate keeps GitHub from updating the runner binary inside
 	// the container or VM. True matches the image-based model: the runner is
 	// refreshed by rebuilding the image, and ephemeral runners avoid
-	// downloading an update on every job. Scale sets whose image lags behind
-	// GitHub's supported runner versions should override this to false.
+	// downloading an update on every job. Allowing updates cannot save an
+	// image whose runner version GitHub has retired (see DisableUpdate).
 	DefaultDisableUpdate = true
 
 	// DefaultBuildxCleanup is disabled because buildx builders are daemon-global

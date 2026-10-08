@@ -24,10 +24,10 @@ runner-group = "default"
 max-runners = 10
 
 # disable-update = true   # bar GitHub from updating the runner binary in the
-#                         # image/VM (default). Set false when the image's
-#                         # bundled runner can't be refreshed easily — GitHub
-#                         # retires old runner versions, and one that may not
-#                         # update is refused and exits, leaving jobs queued.
+#                         # image/VM (default). false does not survive runner
+#                         # retirement: each runner starts at the image's
+#                         # version and GitHub refuses a retired one before any
+#                         # update — keep the image's runner current instead.
 
 # --- Single scale set mode ---
 # Use top-level fields when managing a single org/repo.

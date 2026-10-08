@@ -252,14 +252,17 @@ func (p *TartProvider) fillPool(slot int) {
 
 // EnsureImage checks if the base image exists locally, and pulls it if not.
 func (p *TartProvider) EnsureImage(ctx context.Context) error {
-	// `tart list` outputs one VM per line; check if baseImage is already local
 	out, err := p.cmd.Run(ctx, "tart", "list", "--format", "json")
+	if err == nil {
+		var names map[string]bool
+		if names, err = tartListNames(out); err == nil && names[p.baseImage] {
+			p.logger.Debug("Base image already exists locally", slog.String("image", p.baseImage))
+			return nil
+		}
+	}
 	if err != nil {
 		// If list fails, try pulling anyway
 		p.logger.Warn("Failed to list local images, will attempt pull", slog.Any("error", err))
-	} else if strings.Contains(string(out), p.baseImage) {
-		p.logger.Debug("Base image already exists locally", slog.String("image", p.baseImage))
-		return nil
 	}
 
 	p.logger.Info("Pulling base image (this may take a while on first run)...", slog.String("image", p.baseImage))
@@ -654,6 +657,24 @@ func pruneTartCacheWith(ctx context.Context, runner CommandRunner, tartHome stri
 // each image still in the OCI cache is cloned into a throwaway VM that is
 // deleted right away. An image missing from the cache is skipped, since
 // cloning it would pull it. Best-effort: failures are logged.
+// tartListNames returns the names in `tart list --format json` output. Match
+// against these rather than the raw output: tart's JSON escapes "/", so an
+// OCI reference never appears verbatim, and a substring test would also take
+// "macos-base-old" for "macos-base".
+func tartListNames(out []byte) (map[string]bool, error) {
+	var entries []struct {
+		Name string `json:"Name"`
+	}
+	if err := json.Unmarshal(out, &entries); err != nil {
+		return nil, fmt.Errorf("parse tart list: %w", err)
+	}
+	names := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		names[e.Name] = true
+	}
+	return names, nil
+}
+
 func markTartImagesUsed(ctx context.Context, runner CommandRunner, images []string, logger *slog.Logger) {
 	if len(images) == 0 {
 		return
@@ -664,17 +685,11 @@ func markTartImagesUsed(ctx context.Context, runner CommandRunner, images []stri
 			slog.Any("error", err))
 		return
 	}
-	var entries []struct {
-		Name string `json:"Name"`
-	}
-	if err := json.Unmarshal(out, &entries); err != nil {
+	cached, err := tartListNames(out)
+	if err != nil {
 		logger.Warn("Failed to parse the Tart cache listing; runner images are not protected from this prune",
 			slog.Any("error", err))
 		return
-	}
-	cached := make(map[string]bool, len(entries))
-	for _, e := range entries {
-		cached[e.Name] = true
 	}
 
 	for _, image := range images {

@@ -2,10 +2,12 @@ package provider
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -130,6 +132,11 @@ type TartProvider struct {
 	githubHost string   // the host whose route decides the auto MTU
 	mtuLogMu   sync.Mutex
 	lastMTULog string // last MTU and reason logged at Info; repeats go to Debug
+
+	// Runner start-up checks; zero means the default (see waitRunnerListening).
+	runnerPoll          time.Duration
+	runnerListenTimeout time.Duration
+	runnerSettle        time.Duration
 
 	// VM pool
 	pool     chan *warmVM
@@ -595,7 +602,7 @@ func (p *TartProvider) waitForExec(ctx context.Context, name string) error {
 //
 // tartHome may be empty, meaning use tart's default ($HOME/.tart). It is passed
 // through TART_HOME so a single binary can prune multiple independent caches.
-func PruneTartCache(ctx context.Context, tartHome string, maxAge time.Duration, spaceBudgetGB int, logger *slog.Logger) error {
+func PruneTartCache(ctx context.Context, tartHome string, maxAge time.Duration, spaceBudgetGB int, keepImages []string, logger *slog.Logger) error {
 	if maxAge <= 0 && spaceBudgetGB <= 0 {
 		return nil
 	}
@@ -603,13 +610,13 @@ func PruneTartCache(ctx context.Context, tartHome string, maxAge time.Duration, 
 	if tartHome != "" {
 		extraEnv = append(extraEnv, "TART_HOME="+tartHome)
 	}
-	return pruneTartCacheWith(ctx, execCommandRunner{extraEnv: extraEnv}, tartHome, maxAge, spaceBudgetGB, logger)
+	return pruneTartCacheWith(ctx, execCommandRunner{extraEnv: extraEnv}, tartHome, maxAge, spaceBudgetGB, keepImages, logger)
 }
 
 // pruneTartCacheWith is the testable core: it issues the prune command via the
 // supplied CommandRunner. The exported wrapper above provides the default
 // execCommandRunner wired with TART_HOME.
-func pruneTartCacheWith(ctx context.Context, runner CommandRunner, tartHome string, maxAge time.Duration, spaceBudgetGB int, logger *slog.Logger) error {
+func pruneTartCacheWith(ctx context.Context, runner CommandRunner, tartHome string, maxAge time.Duration, spaceBudgetGB int, keepImages []string, logger *slog.Logger) error {
 	args := []string{"prune", "--entries", "caches"}
 	attrs := []any{slog.String("home", tartHome)}
 
@@ -633,12 +640,58 @@ func pruneTartCacheWith(ctx context.Context, runner CommandRunner, tartHome stri
 		// error. Treat as a disabled sweep rather than failing.
 		return nil
 	}
+	markTartImagesUsed(ctx, runner, keepImages, logger)
 
 	logger.Info("Pruning Tart cache", attrs...)
 	if _, err := runner.Run(ctx, "tart", args...); err != nil {
 		return fmt.Errorf("tart prune (home=%q): %w", tartHome, err)
 	}
 	return nil
+}
+
+// markTartImagesUsed protects images from the prune that follows. tart prune
+// evicts by last access, and cloning an image is what records an access, so
+// each image still in the OCI cache is cloned into a throwaway VM that is
+// deleted right away. An image missing from the cache is skipped, since
+// cloning it would pull it. Best-effort: failures are logged.
+func markTartImagesUsed(ctx context.Context, runner CommandRunner, images []string, logger *slog.Logger) {
+	if len(images) == 0 {
+		return
+	}
+	out, err := runner.Run(ctx, "tart", "list", "--source", "oci", "--format", "json")
+	if err != nil {
+		logger.Warn("Failed to list the Tart cache; runner images are not protected from this prune",
+			slog.Any("error", err))
+		return
+	}
+	var entries []struct {
+		Name string `json:"Name"`
+	}
+	if err := json.Unmarshal(out, &entries); err != nil {
+		logger.Warn("Failed to parse the Tart cache listing; runner images are not protected from this prune",
+			slog.Any("error", err))
+		return
+	}
+	cached := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		cached[e.Name] = true
+	}
+
+	for _, image := range images {
+		if !cached[image] {
+			continue
+		}
+		vm := fmt.Sprintf("runner-keep-%08x", rand.Uint32())
+		if _, err := runner.Run(ctx, "tart", "clone", image, vm); err != nil {
+			logger.Warn("Failed to mark a runner image as used; this prune may evict it",
+				slog.String("image", image), slog.Any("error", err))
+			continue
+		}
+		if _, err := runner.Run(ctx, "tart", "delete", vm); err != nil {
+			logger.Warn("Failed to delete a throwaway VM; startup reconciliation will remove it",
+				slog.String("vm", vm), slog.Any("error", err))
+		}
+	}
 }
 
 // runRunner starts the GitHub Actions runner inside the VM via `tart exec`.
@@ -695,13 +748,86 @@ func (p *TartProvider) runRunner(ctx context.Context, vmName, jitConfig string) 
 		return fmt.Errorf("failed to start runner on %s: %w", vmName, err)
 	}
 
-	// Wait briefly and verify the runner process is still alive
-	time.Sleep(2 * time.Second)
-	if _, err := p.cmd.Run(ctx, "tart", "exec", vmName, "pgrep", "-f", "Runner.Listener"); err != nil {
-		// Grab log output to help diagnose the failure
-		logOut, _ := p.cmd.Run(ctx, "tart", "exec", vmName, "tail", "-20", "/tmp/runner.log")
-		return fmt.Errorf("runner process died on %s, log:\n%s", vmName, string(logOut))
+	// Hand the VM over only once the runner holds a session with GitHub. A
+	// runner that dies or never connects leaves the VM running, so nothing
+	// else would notice while its job stays queued.
+	return p.waitRunnerListening(ctx, vmName)
+}
+
+const (
+	defaultRunnerPoll          = 2 * time.Second
+	defaultRunnerListenTimeout = 5 * time.Minute
+	// A runner GitHub has retired connects and prints "Listening for Jobs",
+	// then is refused on its first poll for messages and exits.
+	defaultRunnerSettle = 5 * time.Second
+)
+
+// waitRunnerListening polls until the runner prints "Listening for Jobs",
+// then checks that it survives its first poll for messages. Errors carry the
+// runner's own explanation, since the VM is deleted right after.
+func (p *TartProvider) waitRunnerListening(ctx context.Context, vmName string) error {
+	poll := cmp.Or(p.runnerPoll, defaultRunnerPoll)
+	timeout := cmp.Or(p.runnerListenTimeout, defaultRunnerListenTimeout)
+	deadline := time.Now().Add(timeout)
+	for {
+		if err := sleepContext(ctx, poll); err != nil {
+			return err
+		}
+		if !p.runnerAlive(ctx, vmName) {
+			return fmt.Errorf("runner process exited on %s before connecting to GitHub; runner log:\n%s",
+				vmName, p.runnerLogTail(ctx, vmName))
+		}
+		if _, err := p.cmd.Run(ctx, "tart", "exec", vmName, "grep", "-q", "Listening for Jobs", "/tmp/runner.log"); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("runner on %s did not connect to GitHub within %s; newest runner diagnostics:\n%s",
+				vmName, timeout, p.runnerDiagTail(ctx, vmName))
+		}
 	}
 
+	if err := sleepContext(ctx, cmp.Or(p.runnerSettle, defaultRunnerSettle)); err != nil {
+		return err
+	}
+	if !p.runnerAlive(ctx, vmName) {
+		return fmt.Errorf("runner process exited on %s right after connecting to GitHub; runner log:\n%s",
+			vmName, p.runnerLogTail(ctx, vmName))
+	}
 	return nil
+}
+
+func (p *TartProvider) runnerAlive(ctx context.Context, vmName string) bool {
+	_, err := p.cmd.Run(ctx, "tart", "exec", vmName, "pgrep", "-f", "Runner.Listener")
+	return err == nil
+}
+
+func (p *TartProvider) runnerLogTail(ctx context.Context, vmName string) string {
+	out, _ := p.cmd.Run(ctx, "tart", "exec", vmName, "tail", "-20", "/tmp/runner.log")
+	return strings.TrimSpace(string(out))
+}
+
+// runnerDiagTail returns the end of the newest Runner_*.log, where the
+// runner records the connection failures it never prints to its stdout.
+func (p *TartProvider) runnerDiagTail(ctx context.Context, vmName string) string {
+	dir := p.runnerDir + "/_diag"
+	out, err := p.cmd.Run(ctx, "tart", "exec", vmName, "ls", "-t", dir)
+	if err != nil {
+		return fmt.Sprintf("(could not list %s: %v)", dir, err)
+	}
+	for _, name := range strings.Fields(string(out)) { // ls -t lists newest first
+		if strings.HasPrefix(name, "Runner_") && strings.HasSuffix(name, ".log") {
+			tail, _ := p.cmd.Run(ctx, "tart", "exec", vmName, "tail", "-n", "20", dir+"/"+name)
+			return strings.TrimSpace(string(tail))
+		}
+	}
+	return fmt.Sprintf("(no Runner_*.log in %s)", dir)
+}
+
+func sleepContext(ctx context.Context, d time.Duration) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(d):
+		return nil
+	}
 }

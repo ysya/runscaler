@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -58,6 +59,11 @@ func TestLoggerWritesFile(t *testing.T) {
 	}
 }
 
+// plainWarnLine is the Warn line without styling. The level is padded to the
+// widest label (charm log pads WARN to align with ERROR), so match any run of
+// spaces rather than pin the library's column width.
+var plainWarnLine = regexp.MustCompile(` WARN +linux: disk low free=2GB\n`)
+
 func TestLoggerColorsConsoleButNotLogFile(t *testing.T) {
 	setColorEnv(t, "1") // stands in for a color terminal
 	console, read := pipeConsole(t)
@@ -68,7 +74,7 @@ func TestLoggerColorsConsoleButNotLogFile(t *testing.T) {
 	if got := read(); !strings.Contains(got, "\x1b[") {
 		t.Errorf("console lost its styling: %q", got)
 	}
-	if got := file.String(); strings.Contains(got, "\x1b") || !strings.Contains(got, " WARN linux: disk low free=2GB\n") {
+	if got := file.String(); strings.Contains(got, "\x1b") || !plainWarnLine.MatchString(got) {
 		t.Errorf("log file = %q, want plain text", got)
 	}
 }
@@ -80,7 +86,7 @@ func TestLoggerPlainWhenConsoleIsNotTerminal(t *testing.T) {
 
 	NewScaleSetLoggerWithWriter("info", "text", "linux", 0, console, &file).Warn("disk low", "free", "2GB")
 
-	if got := read(); strings.Contains(got, "\x1b") || !strings.Contains(got, " WARN linux: disk low free=2GB\n") {
+	if got := read(); strings.Contains(got, "\x1b") || !plainWarnLine.MatchString(got) {
 		t.Errorf("console = %q, want plain text", got)
 	}
 }

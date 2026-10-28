@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ysya/runscaler/internal/capacity"
+	"github.com/ysya/runscaler/internal/metrics"
 	"github.com/ysya/runscaler/internal/provider"
 )
 
@@ -67,6 +68,8 @@ type ScaleSetController struct {
 	cleanupWG     sync.WaitGroup
 	stopOnce      sync.Once
 	draining      atomic.Bool
+	runtimeMu     sync.Mutex
+	runtime       metrics.RuntimeStatus
 }
 
 // Compile-time check that ScaleSetController implements listener.Scaler.
@@ -327,6 +330,8 @@ func (s *ScaleSetController) acquireCapacity() (*capacity.Lease, error) {
 	if signalled {
 		return nil, context.Canceled
 	}
+	s.setCapacityWaiting(true)
+	defer s.setCapacityWaiting(false)
 	return s.capacity.Acquire(ctx)
 }
 
@@ -346,7 +351,9 @@ func (s *ScaleSetController) startInstanceWithLease(ctx context.Context, lease *
 		lease.Release()
 		return "", fmt.Errorf("runner name collision: %s", name)
 	}
-	fail := func(err error) (string, error) {
+	s.recordStartAttempt(started)
+	fail := func(reason string, err error) (string, error) {
+		s.recordStartFailure(ctx, reason)
 		s.instances.failProvision(name)
 		lease.Release()
 		return "", err
@@ -372,12 +379,12 @@ func (s *ScaleSetController) startInstanceWithLease(ctx context.Context, lease *
 		s.scaleSetID,
 	)
 	if err != nil {
-		return fail(fmt.Errorf("failed to generate JIT config: %w", err))
+		return fail("jit_config_failed", fmt.Errorf("failed to generate JIT config: %w", err))
 	}
 
 	instanceID, err := s.provider.StartInstance(ctx, name, jit.EncodedJITConfig)
 	if err != nil {
-		return fail(err)
+		return fail("provider_start_failed", err)
 	}
 
 	removeNow, tracked := s.instances.markReady(name, instanceID)
@@ -388,6 +395,7 @@ func (s *ScaleSetController) startInstanceWithLease(ctx context.Context, lease *
 		lease.Release()
 		return "", fmt.Errorf("runner %s was no longer tracked after provider start", name)
 	}
+	s.recordStartSuccess()
 	s.logger.Info("Runner started",
 		slog.String("name", name),
 		slog.String("instanceID", instanceID),

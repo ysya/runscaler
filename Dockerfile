@@ -1,4 +1,6 @@
-FROM golang:1.26-alpine AS builder
+FROM golang:1.27.3-alpine AS builder
+
+ENV GOTOOLCHAIN=local
 
 WORKDIR /build
 COPY go.mod go.sum ./

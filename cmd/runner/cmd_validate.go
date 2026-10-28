@@ -15,7 +15,7 @@ import (
 var validateCmd = &cobra.Command{
 	Use:     "validate",
 	Short:   "Validate configuration and connectivity",
-	Long:    "Check that the config file is valid, Docker/Tart is reachable, and GitHub tokens work.",
+	Long:    "Check that the config file is valid, Docker/Tart is reachable, and GitHub credentials work.",
 	Example: `  runner validate --config config.toml`,
 	RunE:    runValidate,
 }
@@ -122,7 +122,7 @@ func runValidate(cmd *cobra.Command, args []string) error {
 	// Test GitHub API connectivity for each scale set
 	logger := config.NewLogger(cfg.LogLevel, cfg.LogFormat)
 	for i, ss := range scaleSets {
-		client, err := config.NewScalesetClient(ss.RegistrationURL, ss.Token, logger)
+		client, err := ss.NewScalesetClient(logger)
 		if err != nil {
 			fmt.Printf("  ✗ scaleset[%d] %q GitHub API: %s\n", i, ss.ScaleSetName, err)
 			return fmt.Errorf("validation failed")
@@ -130,7 +130,11 @@ func runValidate(cmd *cobra.Command, args []string) error {
 		_, err = client.GetRunnerGroupByName(ctx, "default")
 		if err != nil {
 			fmt.Printf("  ✗ scaleset[%d] %q GitHub API: %s\n", i, ss.ScaleSetName, err)
-			fmt.Println("    Check that your token has the correct scopes (admin:org or repo)")
+			if ss.GitHubApp != nil {
+				fmt.Println("    Check the GitHub App installation, private key, and runner permissions")
+			} else {
+				fmt.Println("    Check that your token has the correct scopes (admin:org or repo)")
+			}
 			return fmt.Errorf("validation failed")
 		}
 		fmt.Printf("  ✓ scaleset[%d] %q GitHub API is reachable\n", i, ss.ScaleSetName)

@@ -41,6 +41,14 @@ max-runners = 10
 # url = "https://github.com/your-org"
 # name = "my-runners"
 # token = "ghp_xxx"
+# Or use GitHub App authentication instead of token:
+# github-app.client-id = "Iv1.example"
+# github-app.installation-id = 123456
+# github-app.private-key-file = "/absolute/path/to/runner-app.pem"
+# Use exactly one key source; the environment variable contains the full RSA PEM:
+# github-app.private-key-env = "RUNNER_GITHUB_APP_KEY"
+# App configuration disables ambient RUNNER_TOKEN/RUNSCALER_TOKEN fallback.
+# Explicit token + App configuration is rejected.
 # max-runners = 10
 # min-runners = 0
 # labels = ["self-hosted", "linux"]
@@ -111,7 +119,7 @@ dind = true
 # Use [[scaleset]] entries to manage multiple orgs/repos from one process.
 # Each entry inherits runner-image, runner-group, max-runners, [docker],
 # and [tart] from the defaults above unless explicitly overridden.
-# Identity fields (url, name, token, labels, min-runners) are per-scaleset
+# Identity fields (url, name, token, github-app, labels, min-runners) are per-scaleset
 # and never inherited from the top level.
 # Unknown keys warn at startup and fail `runner validate`.
 
@@ -119,6 +127,10 @@ dind = true
 # url = "https://github.com/org-a"
 # name = "runners-a"
 # token = "ghp_aaa"
+# For App auth, remove token and set all App references in this entry:
+# github-app.client-id = "Iv1.example"
+# github-app.installation-id = 123456
+# github-app.private-key-env = "ORG_A_APP_KEY"
 # max-runners = 5
 
 # [[scaleset]]

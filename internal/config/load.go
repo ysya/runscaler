@@ -18,7 +18,7 @@ var globalOnlyKeys = []string{"log-level", "log-format", "log-file", "health-por
 // identityKeys identify a single scale set (or only make sense per scale
 // set, like min-runners where 0 is a valid explicit value); they are never
 // inherited from the top level.
-var identityKeys = []string{"url", "name", "token", "labels", "min-runners"}
+var identityKeys = []string{"url", "name", "token", "github-app", "labels", "min-runners"}
 
 // aliasSpec is one deprecated-key → canonical-key mapping applied at the
 // map level, before any struct decode happens. table is the top-level
@@ -129,6 +129,12 @@ func applyAliases(settings map[string]any) []string {
 // whose config was written for another version keep starting.
 func Load(v *viper.Viper) (Config, error) {
 	settings := v.AllSettings()
+	// AllSettings drops empty tables while flattening configuration. Preserve
+	// explicit App selection so an empty App table fails validation instead
+	// of silently falling back to an ambient personal access token.
+	if _, present := settings["github-app"]; !present && v.IsSet("github-app") {
+		settings["github-app"] = v.Get("github-app")
+	}
 
 	rawScaleSets, err := popScaleSets(settings)
 	if err != nil {

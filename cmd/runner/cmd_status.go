@@ -190,6 +190,17 @@ func (s statusStyles) overall(h health.HealthResponse) string {
 }
 
 func (s statusStyles) scaleSetState(ss health.ScaleSetStatus) string {
+	if ss.Runtime != nil {
+		if ss.Runtime.Draining {
+			return s.render(s.warn, "● DRAINING")
+		}
+		if ss.Runtime.Degraded {
+			return s.render(s.bad, "● ERROR")
+		}
+		if ss.Ready && ss.Runtime.WaitingForCapacity {
+			return s.render(s.warn, "○ WAITING FOR CAPACITY")
+		}
+	}
 	if ss.Ready {
 		return s.render(s.good, "● READY")
 	}
@@ -252,6 +263,15 @@ func formatStatus(h health.HealthResponse, endpoint string, now time.Time, color
 				fmt.Fprintf(&b, " · %d desired", ss.Metrics.DesiredRunners)
 			}
 			fmt.Fprintln(&b)
+			if runtime := ss.Runtime; runtime != nil {
+				fmt.Fprintf(&b, "    %s%d attempts · %d failed · %d consecutive\n", styles.field("Startups"), runtime.StartAttempts, runtime.StartFailures, runtime.ConsecutiveStartFailures)
+				if !runtime.LastSuccessfulStart.IsZero() {
+					fmt.Fprintf(&b, "    %s%s\n", styles.field("Last start"), formatLastConnected(runtime.LastSuccessfulStart.Format(time.RFC3339), now))
+				}
+				if runtime.FailureReason != "" {
+					fmt.Fprintf(&b, "    %s%s\n", styles.field("Failure"), runtime.FailureReason)
+				}
+			}
 
 			if ss.Metrics == nil {
 				fmt.Fprintf(&b, "    %snot reported yet\n", styles.field("Metrics"))

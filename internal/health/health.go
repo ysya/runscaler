@@ -24,6 +24,11 @@ type InstanceLifecycleCounter interface {
 	InstanceLifecycleCounts() (provisioning, idle, busy, removing int)
 }
 
+// RuntimeStatusProvider optionally reports provisioning and drain state.
+type RuntimeStatusProvider interface {
+	RuntimeStatus() metrics.RuntimeStatus
+}
+
 // MetricsProvider provides a snapshot of listener metrics for a scale set.
 type MetricsProvider interface {
 	Snapshot() metrics.Snapshot
@@ -51,15 +56,16 @@ type connectionState struct {
 
 // ScaleSetStatus represents the status of a single scale set.
 type ScaleSetStatus struct {
-	Name          string         `json:"name"`
-	Ready         bool           `json:"ready"`
-	LastError     string         `json:"last_error,omitempty"`
-	LastConnected string         `json:"last_connected,omitempty"`
-	Idle          int            `json:"idle"`
-	Busy          int            `json:"busy"`
-	Provisioning  int            `json:"provisioning,omitempty"`
-	Removing      int            `json:"removing,omitempty"`
-	Metrics       *MetricsStatus `json:"metrics,omitempty"`
+	Name          string                 `json:"name"`
+	Ready         bool                   `json:"ready"`
+	LastError     string                 `json:"last_error,omitempty"`
+	LastConnected string                 `json:"last_connected,omitempty"`
+	Idle          int                    `json:"idle"`
+	Busy          int                    `json:"busy"`
+	Provisioning  int                    `json:"provisioning,omitempty"`
+	Removing      int                    `json:"removing,omitempty"`
+	Metrics       *MetricsStatus         `json:"metrics,omitempty"`
+	Runtime       *metrics.RuntimeStatus `json:"runtime,omitempty"`
 }
 
 // MetricsStatus holds listener-level metrics for a scale set.
@@ -206,15 +212,8 @@ func (h *HealthServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 
-	status := "ok"
-	for name := range h.controllers {
-		if !h.states[name].Ready {
-			status = "degraded"
-			break
-		}
-	}
 	resp := HealthResponse{
-		Status:    status,
+		Status:    "ok",
 		Version:   h.version,
 		Uptime:    time.Since(h.startTime).Truncate(time.Second).String(),
 		ScaleSets: make([]ScaleSetStatus, 0, len(h.controllers)),
@@ -246,6 +245,17 @@ func (h *HealthServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		state := h.states[name]
 		ss.Ready = state.Ready
 		ss.LastError = state.LastError
+		if runtime, ok := controller.(RuntimeStatusProvider); ok {
+			snapshot := runtime.RuntimeStatus()
+			ss.Runtime = &snapshot
+			ss.Ready = ss.Ready && !snapshot.Draining && !snapshot.Degraded
+			if snapshot.Degraded && ss.LastError == "" {
+				ss.LastError = "runner startup failed: " + snapshot.FailureReason
+			}
+		}
+		if !ss.Ready {
+			resp.Status = "degraded"
+		}
 		if !state.LastConnected.IsZero() {
 			ss.LastConnected = state.LastConnected.Format(time.RFC3339)
 		}
@@ -279,6 +289,13 @@ func (h *HealthServer) handleReadyz(w http.ResponseWriter, r *http.Request) {
 		if !h.states[name].Ready {
 			ready = false
 			break
+		}
+		if runtime, ok := h.controllers[name].(RuntimeStatusProvider); ok {
+			status := runtime.RuntimeStatus()
+			if status.Draining || status.Degraded {
+				ready = false
+				break
+			}
 		}
 	}
 	h.mu.RUnlock()

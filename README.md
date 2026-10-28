@@ -178,7 +178,7 @@ jobs:
 | `runner init`            | Generate a config file interactively                   |
 | `runner validate`        | Validate configuration and connectivity                |
 | `runner status`          | Show capacity, connections, jobs, queues, and disk headroom |
-| `runner doctor`          | Diagnose and clean up orphaned containers/VMs          |
+| `runner doctor`          | Diagnose GitHub connectivity and orphaned containers/VMs |
 | `runner cache`           | Show disk usage and retention policy for every cache store |
 | `runner logs`            | Show/follow runner's rotating log file                  |
 | `runner service`         | Install, regenerate (`--force`), start, stop, and inspect the service |
@@ -208,6 +208,22 @@ runner status --json
 # Plain dashboard for logs or terminals where color is undesirable
 runner status --no-color
 ```
+
+Each scale set's optional `runtime` object in `/healthz` (and `status --json`)
+reports startup attempts, failures, consecutive failures, the last attempt and
+successful start, global-capacity waiting, and draining. Counters last for the
+manager process's lifetime. Missing startup timestamps mean no such event has
+been recorded. Failure reasons are safe categories (`jit_config_failed` or
+`provider_start_failed`), not raw provider errors or credential values.
+
+`/healthz` remains a liveness endpoint returning HTTP 200. Its JSON `status`
+becomes `degraded`, and `/readyz` returns HTTP 503, when a listener is disconnected,
+a controller is draining, or a failed startup still leaves demand unmet. An
+unfinished retry does not restore readiness; a successful start does. Normal
+waits for global host capacity, scale-to-zero, and historical failures after
+demand disappears are not faults. Runtime snapshots perform no provider or
+GitHub requests. The dashboard explains these states as `ERROR`,
+`WAITING FOR CAPACITY`, or `DRAINING`, with startup counts and timestamps.
 
 ### Updating
 
@@ -245,12 +261,22 @@ them automatically after acquiring the machine-wide lock. Use `doctor` for a
 manual check while runner is stopped:
 
 ```bash
-# Check for orphaned resources
+# Check GitHub API connectivity and orphaned resources
 runner doctor
 
 # Auto-remove orphaned containers and VMs
 runner doctor --fix
 ```
+
+Doctor probes every configured scale set's GitHub API using its App or PAT
+credentials, resolves its runner group, and queries its registration. Each
+probe has a five-second timeout; failures do not prevent later probes or local
+resource checks. Cancellation stops further probes. A scale set that is not
+registered yet is reported without creating or modifying it.
+
+Failed API checks make the command exit unsuccessfully even when there are no
+orphaned resources. Reports contain safe cancellation, timeout, DNS, TLS, or
+numeric HTTP-status categories; raw SDK response bodies are not printed.
 
 The `--fix` flag takes the same machine-wide lock as `runner run`, so it refuses
 to remove resources while any current runner instance is active. The health
@@ -542,8 +568,8 @@ runner init --url https://github.com/your-org --name app-runners \
 ```
 
 `run`, `validate`, `doctor`, and `scaleset delete` use the same auth selection.
-`doctor` currently checks client construction; use `validate` to test API
-connectivity and permissions.
+`doctor` performs read-only API probes for every configured scale set;
+`validate` also checks provider connectivity and configuration.
 
 ### Token Security
 

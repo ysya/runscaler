@@ -2,15 +2,27 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'hotfix/**']
   pull_request:
+  schedule:
+    - cron: '23 3 * * 1'
+  workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
 
+env:
+  GOTOOLCHAIN: local
+
 jobs:
   test:
-    runs-on: ubuntu-latest
+    name: Test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
 
@@ -19,10 +31,13 @@ jobs:
           go-version-file: go.mod
 
       - name: Run tests
-        run: go test ./...
+        run: go test -race ./...
 
       - name: Run vet
         run: go vet ./...
+
+      - name: Check for reachable vulnerabilities
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
 
   lint:
     runs-on: ubuntu-latest

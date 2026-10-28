@@ -2,12 +2,16 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"regexp"
@@ -26,8 +30,9 @@ import (
 
 var doctorCmd = &cobra.Command{
 	Use:   "doctor",
-	Short: "Diagnose and clean up orphaned runners",
-	Long: `Check for orphaned Docker containers and Tart VMs left by runner after
+	Short: "Diagnose GitHub connectivity and orphaned runners",
+	Long: `Probe the GitHub API for every configured scale set with a five-second
+timeout per probe, then check for Docker containers and Tart VMs left after
 abnormal termination. Shared volumes are reported for visibility but never
 removed automatically because they may hold data for an in-flight workflow.
 
@@ -80,9 +85,6 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("refusing destructive cleanup with config warnings; run 'runner validate' and fix them first")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
 	// Safety check: take the same machine-wide lock as `runner run`. Unlike a
 	// health probe this remains reliable when health is disabled, moved to a
 	// different port, or the process is still starting.
@@ -111,7 +113,10 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	}
 
 	// Scaleset API connectivity check (if config is available)
-	checkScalesetAPI(ctx, &cfg)
+	apiErr := checkScalesetAPI(cmd.Context(), &cfg)
+
+	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
+	defer cancel()
 
 	var totalOrphans int
 
@@ -119,7 +124,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	for socket := range dockerSockets {
 		orphans, err := checkDocker(ctx, socket, fix)
 		if err != nil {
-			return err
+			return errors.Join(apiErr, err)
 		}
 		totalOrphans += orphans
 	}
@@ -127,52 +132,120 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	// Tart checks
 	orphans, err := checkTart(ctx, fix, tartHomes)
 	if err != nil {
-		return err
+		return errors.Join(apiErr, err)
 	}
 	totalOrphans += orphans
 
-	// Summary
-	fmt.Println()
-	if totalOrphans == 0 {
-		fmt.Println("All clean. No orphaned resources found.")
-	} else if fix {
-		fmt.Printf("Cleanup incomplete: %d orphaned resource(s) remain.\n", totalOrphans)
-		return fmt.Errorf("orphaned resources remain after cleanup")
-	} else {
-		fmt.Printf("Found %d orphaned resource(s). Run 'runner doctor --fix' to clean up.\n", totalOrphans)
-		return fmt.Errorf("orphaned resources found")
-	}
-	return nil
+	return reportDoctorSummary(cmd.OutOrStdout(), totalOrphans, fix, apiErr)
 }
 
-// checkScalesetAPI tests scaleset API connectivity and prints debug info.
-func checkScalesetAPI(ctx context.Context, cfg *config.Config) {
-	scaleSets := cfg.ResolveScaleSets()
-	if len(scaleSets) == 0 {
-		return
+func reportDoctorSummary(out io.Writer, totalOrphans int, fix bool, apiErr error) error {
+	fmt.Fprintln(out)
+	if totalOrphans == 0 {
+		if apiErr != nil {
+			fmt.Fprintln(out, "No orphaned resources found. GitHub API diagnosis failed.")
+		} else {
+			fmt.Fprintln(out, "All clean. No orphaned resources found.")
+		}
+	} else if fix {
+		fmt.Fprintf(out, "Cleanup incomplete: %d orphaned resource(s) remain.\n", totalOrphans)
+		return errors.Join(apiErr, fmt.Errorf("orphaned resources remain after cleanup"))
+	} else {
+		fmt.Fprintf(out, "Found %d orphaned resource(s). Run 'runner doctor --fix' to clean up.\n", totalOrphans)
+		return errors.Join(apiErr, fmt.Errorf("orphaned resources found"))
 	}
+	return apiErr
+}
 
-	// Use the first scale set with configured credentials for the check.
-	var ss config.ScaleSetConfig
-	for _, s := range scaleSets {
-		if (s.Token != "" || s.GitHubApp != nil) && s.RegistrationURL != "" {
-			ss = s
-			break
+// checkScalesetAPI probes the read-only API for every configured scale set.
+func checkScalesetAPI(ctx context.Context, cfg *config.Config) error {
+	return checkScalesetAPIWith(ctx, cfg, os.Stdout, func(ss config.ScaleSetConfig) (scaleSetAPI, error) {
+		return ss.NewScalesetClient(nil)
+	})
+}
+
+func checkScalesetAPIWith(ctx context.Context, cfg *config.Config, out io.Writer, newClient func(config.ScaleSetConfig) (scaleSetAPI, error)) error {
+	scaleSets := cfg.ResolveScaleSets()
+	var failures []error
+	for _, ss := range scaleSets {
+		if err := ctx.Err(); err != nil {
+			return errors.Join(append(failures, err)...)
+		}
+		probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		registered, err := probeDoctorScaleSet(probeCtx, ss, newClient)
+		cancel()
+		if err != nil {
+			safeErr := safeDoctorAPIError(err)
+			fmt.Fprintf(out, "  ✗ GitHub API [%s]: %s\n", ss.ScaleSetName, safeErr)
+			failures = append(failures, fmt.Errorf("GitHub API [%s]: %w", ss.ScaleSetName, safeErr))
+			continue
+		}
+		if registered {
+			fmt.Fprintf(out, "  ✓ GitHub API [%s]: reachable; scale set registered\n", ss.ScaleSetName)
+		} else {
+			fmt.Fprintf(out, "  ✓ GitHub API [%s]: reachable; scale set not registered yet\n", ss.ScaleSetName)
 		}
 	}
+	return errors.Join(failures...)
+}
+
+func probeDoctorScaleSet(ctx context.Context, ss config.ScaleSetConfig, newClient func(config.ScaleSetConfig) (scaleSetAPI, error)) (bool, error) {
+	// Match ScaleSetConfig.Validate's URL boundary before the factory can
+	// read App credentials or the SDK can issue an authenticated request.
+	registrationURL, err := url.ParseRequestURI(ss.RegistrationURL)
+	if err != nil || registrationURL.Scheme != "https" || registrationURL.Host == "" || registrationURL.User != nil {
+		return false, errors.New("invalid registration URL")
+	}
 	if ss.Token == "" && ss.GitHubApp == nil {
-		fmt.Println("  - Scaleset API: no credentials configured (skipping)")
-		return
+		return false, fmt.Errorf("registration URL and credentials are required")
 	}
-
-	client, err := ss.NewScalesetClient(nil)
+	client, err := newClient(ss)
 	if err != nil {
-		fmt.Printf("  ✗ Scaleset API: failed to create client: %s\n", err)
-		return
+		return false, err
 	}
+	groupID, err := resolveRunnerGroupID(ctx, client, ss.RunnerGroup)
+	if err != nil {
+		return false, err
+	}
+	registered, err := client.GetRunnerScaleSet(ctx, groupID, ss.ScaleSetName)
+	return registered != nil, err
+}
 
-	fmt.Println("  ✓ Scaleset API client created")
-	fmt.Printf("    Debug: %s\n", client.DebugInfo())
+// The SDK wraps response bodies, URLs and authentication failures in error
+// strings. Never return or print those strings: App JWTs and exchanged tokens
+// are not available for configured-value redaction. Only fixed categories and
+// a bounded numeric HTTP status may cross the diagnostic output boundary.
+var doctorHTTPStatus = regexp.MustCompile(`\(status="([1-5][0-9]{2})(?: |")`)
+
+func safeDoctorAPIError(err error) error {
+	if errors.Is(err, context.Canceled) {
+		return fmt.Errorf("cancelled: %w", context.Canceled)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("timed out: %w", context.DeadlineExceeded)
+	}
+	var networkErr net.Error
+	if errors.As(err, &networkErr) && networkErr.Timeout() {
+		return errors.New("request timed out")
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return errors.New("DNS lookup failed")
+	}
+	var verificationErr *tls.CertificateVerificationError
+	var authorityErr x509.UnknownAuthorityError
+	var hostnameErr x509.HostnameError
+	var certificateErr x509.CertificateInvalidError
+	var recordErr tls.RecordHeaderError
+	if errors.As(err, &verificationErr) || errors.As(err, &authorityErr) || errors.As(err, &hostnameErr) || errors.As(err, &certificateErr) || errors.As(err, &recordErr) {
+		return errors.New("TLS verification failed")
+	}
+	// SDK v0.4.0 exposes response status only in its formatted error. Copy
+	// just the three validated digits, never arbitrary response text.
+	if match := doctorHTTPStatus.FindStringSubmatch(err.Error()); len(match) == 2 {
+		return fmt.Errorf("HTTP %s request failed", match[1])
+	}
+	return errors.New("request failed")
 }
 
 // isRunnerRunning checks if a runner instance is responding on the health port.

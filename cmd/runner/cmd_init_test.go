@@ -40,18 +40,8 @@ func runInitTestConfig(t *testing.T, providerFlag string) string {
 
 func runInitWithOutput(t *testing.T, providerFlag, output string) {
 	t.Helper()
-	c := &cobra.Command{}
+	c := newInitTestCommand()
 	f := c.Flags()
-	f.String("output", "", "")
-	f.String("url", "", "")
-	f.String("name", "", "")
-	f.String("token", "", "")
-	f.Int("max-runners", 1, "")
-	f.String("provider", "", "")
-	f.String("backend", "", "")
-	f.String("runner-image", "", "")
-	f.Bool("dind", false, "")
-	f.String("shared-volume", "", "")
 	values := map[string]string{
 		"url": "https://github.com/test-org", "name": "test-runners",
 		"token": "fake-token", "max-runners": "1", providerFlag: "docker",
@@ -67,6 +57,71 @@ func runInitWithOutput(t *testing.T, providerFlag, output string) {
 	}
 	if err := runInit(c, nil); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func newInitTestCommand() *cobra.Command {
+	c := &cobra.Command{}
+	f := c.Flags()
+	f.String("output", "", "")
+	f.String("url", "", "")
+	f.String("name", "", "")
+	f.String("token", "", "")
+	f.Int("max-runners", 1, "")
+	f.String("provider", "", "")
+	f.String("backend", "", "")
+	f.String("runner-image", "", "")
+	f.Bool("dind", false, "")
+	f.String("shared-volume", "", "")
+	registerGitHubAppFlags(f)
+	return c
+}
+
+func TestInitGitHubAppDoesNotPromptForOrWritePAT(t *testing.T) {
+	for _, provider := range []string{"docker", "tart"} {
+		t.Run(provider, func(t *testing.T) {
+			t.Setenv("RUNNER_TEST_APP_KEY", "synthetic-private-value-never-written")
+			c := newInitTestCommand()
+			output := filepath.Join(t.TempDir(), "config.toml")
+			for name, value := range map[string]string{
+				"output": output, "url": "https://github.com/example-org", "name": "app-runners",
+				"max-runners": "1", "provider": provider, "runner-image": "example-image", "dind": "false", "shared-volume": "",
+				"github-app-client-id": "Iv1.synthetic", "github-app-installation-id": "123",
+				"github-app-private-key-env": "RUNNER_TEST_APP_KEY",
+			} {
+				if err := c.Flags().Set(name, value); err != nil {
+					t.Fatal(err)
+				}
+			}
+			saved := reader
+			t.Cleanup(func() { reader = saved })
+			reader = bufio.NewReader(strings.NewReader("")) // Any unexpected credential prompt must fail.
+			if err := runInit(c, nil); err != nil {
+				t.Fatal(err)
+			}
+			assertGeneratedConfigValid(t, output)
+			v := viper.New()
+			v.SetConfigFile(output)
+			if err := v.ReadInConfig(); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := config.Load(v)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ss := cfg.ResolveScaleSets()[0]
+			if ss.Token != "" || ss.GitHubApp.ClientID != "Iv1.synthetic" || ss.GitHubApp.InstallationID != 123 || ss.GitHubApp.PrivateKeyEnv != "RUNNER_TEST_APP_KEY" {
+				t.Fatal("generated configuration did not preserve App credential references")
+			}
+			assertFileMode(t, output, 0o600)
+			contents, err := os.ReadFile(output)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(contents), "synthetic-private-value-never-written") {
+				t.Fatal("init wrote private key material instead of an environment reference")
+			}
+		})
 	}
 }
 

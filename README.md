@@ -21,6 +21,7 @@ Runners are **ephemeral** — each container/VM handles exactly one job and is r
   - [Updating](#updating)
 - [Configuration](#configuration)
   - [Config File (TOML)](#config-file-toml)
+  - [GitHub App Authentication](#github-app-authentication)
   - [Token Security](#token-security)
   - [CLI Flags](#cli-flags)
 - [Caching](#caching)
@@ -97,7 +98,7 @@ flowchart LR
 
   Override per VM with `cpu` and `memory` under `[tart]` in config. For iOS builds (Xcode), 8 GB+ is recommended.
 
-- A GitHub **Personal Access Token** — required scopes depend on token type and runner level:
+- GitHub credentials: a [GitHub App](#github-app-authentication) or a **Personal Access Token**. PAT scopes depend on token type and runner level:
 
   | Token type           | Organization runners                                               | Repository runners                 |
   | -------------------- | ------------------------------------------------------------------ | ---------------------------------- |
@@ -295,7 +296,7 @@ Configuration can be provided via a TOML config file (`--config`) or CLI flags. 
 Unknown config keys (typos, options from another version) are not silently
 ignored: `runner run` logs a warning for each and keeps starting, while
 `runner validate` fails on them. The same applies to single-mode keys
-(`url`, `name`, `token`, `labels`, `min-runners`) left at the top level
+(`url`, `name`, `token`, `github-app`, `labels`, `min-runners`) left at the top level
 when `[[scaleset]]` entries exist.
 
 ### Config File (TOML)
@@ -469,6 +470,81 @@ gh api repos/<owner>/<repo>/actions/runners/deprecations/<version>   # runtime_d
 The org-level endpoint (`orgs/<org>/actions/runners/deprecations/<version>`)
 needs the `admin:org` scope.
 
+### GitHub App Authentication
+
+GitHub App authentication is supported for organization and repository runners.
+Install the App on the organization or repository that owns the runners. For
+organization runners, grant organization **Self-hosted runners: Read and write**.
+For repository runners, grant repository **Administration: Read and write**;
+repository **Metadata: Read-only** is included. Enterprise-level runners require
+a PAT. See GitHub's [runner authentication guide](https://docs.github.com/en/actions/how-tos/manage-runners/use-actions-runner-controller/authenticate-to-the-api)
+for App registration and permission details.
+
+Configure the App's Client ID (preferred; a numeric App ID as a string also works),
+Installation ID, and exactly one private-key source. These IDs are different;
+the Installation ID identifies this App's installation on the target owner.
+See [GitHub's JWT guide](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-json-web-token-jwt-for-a-github-app).
+
+```toml
+url = "https://github.com/your-org"
+name = "app-runners"
+max-runners = 2
+
+github-app.client-id = "Iv1.example"
+github-app.installation-id = 123456
+github-app.private-key-file = "/absolute/path/to/runner-app.pem"
+# Alternatively, replace private-key-file with an environment variable name:
+# github-app.private-key-env = "RUNNER_GITHUB_APP_KEY"
+```
+
+The key must be an unencrypted RSA PEM key (PKCS#1 or PKCS#8), at most 64 KiB.
+Use an absolute file path and keep the file outside the repository with private
+permissions, such as `0600`. For an environment source, the named variable must
+contain the complete PEM value with real newlines; the config stores only its
+name. Keys are read when a client is created, so restart the manager after
+rotating a key. The SDK signs JWTs and exchanges credentials as needed.
+
+Generated service definitions do not copy App key environment variables from
+the installing shell. Use a key file for these services, or supply the variable
+through the service manager explicitly.
+
+When App configuration is present, `RUNNER_TOKEN` and the legacy
+`RUNSCALER_TOKEN` fallback are ignored. An explicit `token` or `--token` together
+with App configuration is an error. Incomplete App settings also fail instead
+of silently selecting PAT authentication.
+
+App credentials, like PAT credentials, are never inherited by `[[scaleset]]`
+entries. Configure each installation independently; App and PAT scale sets can
+run in the same process:
+
+```toml
+[[scaleset]]
+url = "https://github.com/org-a"
+name = "app-runners"
+github-app.client-id = "Iv1.example"
+github-app.installation-id = 123456
+github-app.private-key-env = "ORG_A_APP_KEY"
+
+[[scaleset]]
+url = "https://github.com/org-b"
+name = "pat-runners"
+token = "env:ORG_B_TOKEN"
+```
+
+For non-interactive setup, `runner init` accepts the same App reference flags as
+`runner run`, and writes the references without prompting for a PAT:
+
+```bash
+runner init --url https://github.com/your-org --name app-runners \
+  --provider docker --max-runners 2 --dind=false --shared-volume="" \
+  --github-app-client-id Iv1.example --github-app-installation-id 123456 \
+  --github-app-private-key-file /absolute/path/to/runner-app.pem
+```
+
+`run`, `validate`, `doctor`, and `scaleset delete` use the same auth selection.
+`doctor` currently checks client construction; use `validate` to test API
+connectivity and permissions.
+
 ### Token Security
 
 Avoid passing tokens as CLI flags (visible in `ps` output). Two alternatives:
@@ -528,7 +604,11 @@ pool-size = 2
 | `--config`          |                      |                                         | Path to TOML config file                          |
 | `--url`             | `url`                | (required)                              | Registration URL (org or repo)                    |
 | `--name`            | `name`               | (required)                              | Scale set name (used as `runs-on` label)          |
-| `--token`           | `token`              | (required)                              | GitHub Personal Access Token                      |
+| `--token`           | `token`              | (required for PAT mode)                 | GitHub Personal Access Token                      |
+| `--github-app-client-id` | `github-app.client-id` | (unset)                              | GitHub App Client ID or numeric App ID as a string |
+| `--github-app-installation-id` | `github-app.installation-id` | (unset)                  | GitHub App installation ID                        |
+| `--github-app-private-key-file` | `github-app.private-key-file` | (unset)                | Absolute path to an RSA PEM key                   |
+| `--github-app-private-key-env` | `github-app.private-key-env` | (unset)                  | Name of the environment variable containing the PEM key |
 | `--provider`        | `provider`           | `docker`                                | Instance provider (`docker` or `tart`)             |
 | `--max-runners`     | `max-runners`        | `10`                                    | Maximum concurrent runners                        |
 | `--concurrent`      | `concurrent`         | `0` (sum of `max-runners`)              | Host-wide maximum across all scale sets           |

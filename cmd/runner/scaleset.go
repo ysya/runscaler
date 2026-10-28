@@ -158,7 +158,7 @@ func runScalesetDelete(c *cobra.Command, args []string) error {
 	}
 	defer release()
 
-	client, err := config.NewScalesetClient(ss.RegistrationURL, ss.Token, slog.Default())
+	client, err := ss.NewScalesetClient(slog.Default())
 	if err != nil {
 		return fmt.Errorf("failed to create scaleset client: %w", err)
 	}

@@ -33,6 +33,7 @@ func init() {
 	flags.String("url", "", "Registration URL (e.g. https://github.com/org)")
 	flags.String("name", "", "Scale set name")
 	flags.String("token", "", "Personal access token")
+	registerGitHubAppFlags(flags)
 	flags.Int("max-runners", config.DefaultMaxRunners, "Maximum concurrent runners")
 	flags.String("provider", "", "Instance provider (docker or tart)")
 	flags.String("backend", "", "Deprecated alias for --provider")
@@ -72,6 +73,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 	url, _ := cmd.Flags().GetString("url")
 	name, _ := cmd.Flags().GetString("name")
 	token, _ := cmd.Flags().GetString("token")
+	app := githubAppFromFlags(cmd.Flags())
 	maxRunners, _ := cmd.Flags().GetInt("max-runners")
 	providerName, _ := cmd.Flags().GetString("provider")
 	legacyBackend, _ := cmd.Flags().GetString("backend")
@@ -91,7 +93,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 			return err
 		}
 	}
-	if token == "" {
+	if token == "" && app == nil {
 		token, err = promptSecret("GitHub Personal Access Token")
 		if err != nil {
 			return err
@@ -148,6 +150,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 			RegistrationURL: url,
 			ScaleSetName:    name,
 			Token:           token,
+			GitHubApp:       app,
 			MaxRunners:      maxRunners,
 			Provider:        "tart",
 			RunnerImage:     runnerImage,
@@ -165,9 +168,7 @@ url = %q
 # Scale set name — used as the runs-on label in workflows
 name = %q
 
-# Personal access token (consider using env:VARIABLE_NAME for security)
-# Example: token = "env:GITHUB_TOKEN"
-token = %q
+%s
 
 # Runner limits
 max-runners = %d
@@ -192,7 +193,7 @@ runner-image = %q
 [tart]
 # Path to the runner binary inside the VM
 runner-dir = %q
-`, url, name, token, maxRunners, maxRunners,
+`, url, name, initAuthenticationConfig(token, app), maxRunners, maxRunners,
 			config.DefaultLogLevel, config.DefaultLogFormat,
 			config.DefaultHealthAddress, config.DefaultHealthPort,
 			runnerImage, config.DefaultTartRunnerDir,
@@ -222,6 +223,7 @@ runner-dir = %q
 			RegistrationURL: url,
 			ScaleSetName:    name,
 			Token:           token,
+			GitHubApp:       app,
 			MaxRunners:      maxRunners,
 			Provider:        config.DefaultProvider,
 			RunnerImage:     runnerImage,
@@ -244,9 +246,7 @@ url = %q
 # Scale set name — used as the runs-on label in workflows
 name = %q
 
-# Personal access token (consider using env:VARIABLE_NAME for security)
-# Example: token = "env:GITHUB_TOKEN"
-token = %q
+%s
 
 # Runner limits
 max-runners = %d
@@ -306,7 +306,7 @@ shared-volume = %q
 # provider = "tart"
 # max-runners = 2
 # runner-image = "ghcr.io/cirruslabs/macos-sequoia-xcode:latest"
-`, url, name, token, maxRunners, maxRunners,
+`, url, name, initAuthenticationConfig(token, app), maxRunners, maxRunners,
 			config.DefaultLogLevel, config.DefaultLogFormat,
 			config.DefaultHealthAddress, config.DefaultHealthPort,
 			runnerImage, config.DefaultProvider,

@@ -16,6 +16,9 @@ import (
 // config.Load, which also collects non-fatal diagnostics into cfg.Warnings.
 // Both the root command and validate subcommand use this helper.
 func loadConfig(cmd *cobra.Command) (config.Config, error) {
+	// Only explicitly passed App flags select App mode. Binding their zero
+	// defaults would manufacture an empty App config for existing PAT users.
+	bindGitHubAppFlags(viper.GetViper(), cmd.Flags())
 	if configFile, _ := cmd.Flags().GetString("config"); configFile != "" {
 		viper.SetConfigFile(configFile)
 		if err := viper.ReadInConfig(); err != nil {

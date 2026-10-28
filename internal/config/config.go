@@ -17,7 +17,6 @@ import (
 	"charm.land/lipgloss/v2"
 	charmlog "charm.land/log/v2"
 	"github.com/actions/scaleset"
-	"github.com/hashicorp/go-retryablehttp"
 
 	"github.com/ysya/runscaler/internal/bytesize"
 )
@@ -67,15 +66,16 @@ type Config struct {
 // the map level: a key present in a [[scaleset]] entry always wins, even
 // when set to a zero value.
 type ScaleSetConfig struct {
-	RegistrationURL string   `mapstructure:"url"`
-	ScaleSetName    string   `mapstructure:"name"`
-	Token           string   `mapstructure:"token"`
-	MaxRunners      int      `mapstructure:"max-runners"`
-	MinRunners      int      `mapstructure:"min-runners"`
-	Labels          []string `mapstructure:"labels"`
-	RunnerGroup     string   `mapstructure:"runner-group"`
-	RunnerImage     string   `mapstructure:"runner-image"`
-	Provider        string   `mapstructure:"provider"`
+	RegistrationURL string           `mapstructure:"url"`
+	ScaleSetName    string           `mapstructure:"name"`
+	Token           string           `mapstructure:"token"`
+	MaxRunners      int              `mapstructure:"max-runners"`
+	MinRunners      int              `mapstructure:"min-runners"`
+	Labels          []string         `mapstructure:"labels"`
+	RunnerGroup     string           `mapstructure:"runner-group"`
+	RunnerImage     string           `mapstructure:"runner-image"`
+	Provider        string           `mapstructure:"provider"`
+	GitHubApp       *GitHubAppConfig `mapstructure:"github-app"`
 
 	// DisableUpdate stops GitHub from updating the runner binary inside the
 	// container or VM. Pointer: nil = inherit default (true), matching the
@@ -521,6 +521,9 @@ func (ss *ScaleSetConfig) IsTartCacheCleanupEnabled() bool {
 //   - Empty token with RUNNER_TOKEN env var set — uses that as fallback
 //     (the legacy RUNSCALER_TOKEN is still honored during the transition)
 func (ss *ScaleSetConfig) resolveEnvToken() {
+	if ss.GitHubApp != nil {
+		return // App selection must not acquire an ambient personal token.
+	}
 	if strings.HasPrefix(ss.Token, "env:") {
 		envName := strings.TrimPrefix(ss.Token, "env:")
 		ss.Token = os.Getenv(envName)
@@ -552,8 +555,8 @@ func (ss *ScaleSetConfig) Validate() error {
 	if ss.ScaleSetName == "" {
 		return fmt.Errorf("scale set name (name) is required")
 	}
-	if ss.Token == "" {
-		return fmt.Errorf("token is required")
+	if err := ss.validateAuthentication(); err != nil {
+		return err
 	}
 	if ss.MinRunners < 0 {
 		return fmt.Errorf("min-runners must be >= 0")
@@ -903,25 +906,6 @@ func (h *demoteHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 
 func (h *demoteHandler) WithGroup(name string) slog.Handler {
 	return &demoteHandler{inner: h.inner.WithGroup(name), demote: h.demote}
-}
-
-// NewScalesetClient creates a scaleset.Client using PAT authentication.
-func NewScalesetClient(registrationURL, token string, logger *slog.Logger) (*scaleset.Client, error) {
-	httpClient := retryablehttp.NewClient()
-	httpClient.Logger = nil // suppress noisy "performing request" debug lines
-
-	client, err := scaleset.NewClientWithPersonalAccessToken(
-		scaleset.NewClientWithPersonalAccessTokenConfig{
-			GitHubConfigURL:     registrationURL,
-			PersonalAccessToken: token,
-		},
-		scaleset.WithLogger(logger),
-		scaleset.WithRetryableHTTPClint(httpClient),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create scaleset client: %w", err)
-	}
-	return client, nil
 }
 
 // BuildLabels converts string labels to scaleset.Label slice.

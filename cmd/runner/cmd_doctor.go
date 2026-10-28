@@ -152,20 +152,20 @@ func checkScalesetAPI(ctx context.Context, cfg *config.Config) {
 		return
 	}
 
-	// Use the first scale set with a token for the connectivity check
+	// Use the first scale set with configured credentials for the check.
 	var ss config.ScaleSetConfig
 	for _, s := range scaleSets {
-		if s.Token != "" && s.RegistrationURL != "" {
+		if (s.Token != "" || s.GitHubApp != nil) && s.RegistrationURL != "" {
 			ss = s
 			break
 		}
 	}
-	if ss.Token == "" {
-		fmt.Println("  - Scaleset API: no token configured (skipping)")
+	if ss.Token == "" && ss.GitHubApp == nil {
+		fmt.Println("  - Scaleset API: no credentials configured (skipping)")
 		return
 	}
 
-	client, err := config.NewScalesetClient(ss.RegistrationURL, ss.Token, nil)
+	client, err := ss.NewScalesetClient(nil)
 	if err != nil {
 		fmt.Printf("  ✗ Scaleset API: failed to create client: %s\n", err)
 		return

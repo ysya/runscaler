@@ -59,6 +59,7 @@ func init() {
 	flags.String("url", "", "Registration URL (e.g. https://github.com/org)")
 	flags.String("name", "", "Name of the scale set (also used as runs-on label)")
 	flags.String("token", "", "Personal access token")
+	registerGitHubAppFlags(flags)
 	flags.Int("max-runners", config.DefaultMaxRunners, "Maximum number of runners")
 	flags.Int("min-runners", 0, "Minimum number of runners")
 	flags.StringSlice("labels", nil, "Runner labels (comma-separated)")
@@ -593,7 +594,7 @@ func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) e
 // pre-job-start check, see controller.WithDiskChecker below.
 func runScaleSetController(ctx context.Context, drain <-chan struct{}, drainTimeout time.Duration, ss config.ScaleSetConfig, dockerClient *dockerclient.Client, logger *slog.Logger, h *health.HealthServer, tartCoordinator *provider.TartHostCoordinator, guard *diskguard.Guard, capacityAllocator *capacity.Allocator) error {
 	// Create scaleset client
-	scalesetClient, err := config.NewScalesetClient(ss.RegistrationURL, ss.Token, logger)
+	scalesetClient, err := ss.NewScalesetClient(logger)
 	if err != nil {
 		return fmt.Errorf("failed to create scaleset client: %w", err)
 	}

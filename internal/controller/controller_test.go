@@ -198,17 +198,39 @@ func (m *mockProvider) removedCount() int {
 }
 
 type mockScaleset struct {
+	mu        sync.Mutex
 	generated int
+	// removeErr is what RemoveRunner returns for a runner ID; absent IDs succeed.
+	removeErr    map[int]error
+	deregistered []int
+}
+
+func (m *mockScaleset) RemoveRunner(_ context.Context, runnerID int64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.deregistered = append(m.deregistered, int(runnerID))
+	return m.removeErr[int(runnerID)]
+}
+
+func (m *mockScaleset) deregisteredIDs() []int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]int(nil), m.deregistered...)
 }
 
 func (m *mockScaleset) GenerateJitRunnerConfig(_ context.Context, _ *scaleset.RunnerScaleSetJitRunnerSetting, _ int) (*scaleset.RunnerScaleSetJitRunnerConfig, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.generated++
 	return &scaleset.RunnerScaleSetJitRunnerConfig{
+		Runner:           &scaleset.RunnerReference{ID: m.generated},
 		EncodedJITConfig: "mock-jit-config",
 	}, nil
 }
 
 type errorScaleset struct{ err error }
+
+func (s *errorScaleset) RemoveRunner(context.Context, int64) error { return nil }
 
 func (s *errorScaleset) GenerateJitRunnerConfig(context.Context, *scaleset.RunnerScaleSetJitRunnerSetting, int) (*scaleset.RunnerScaleSetJitRunnerConfig, error) {
 	return nil, s.err
@@ -369,7 +391,7 @@ func TestRunnerStateTracksProvisioningToRemoving(t *testing.T) {
 	if !rs.markBusy("runner-1", jobRef{}) {
 		t.Fatal("job start should be recorded while provider startup is in flight")
 	}
-	if remove, tracked := rs.markReady("runner-1", "instance-1"); remove || !tracked {
+	if remove, tracked := rs.markReady("runner-1", "instance-1", 0); remove || !tracked {
 		t.Fatalf("markReady() = remove %v tracked %v, want false/true", remove, tracked)
 	}
 	if phase, _ := rs.phase("runner-1"); phase != instanceBusy {

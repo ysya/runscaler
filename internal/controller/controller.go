@@ -22,6 +22,7 @@ import (
 // controller.
 type ScaleSetClient interface {
 	GenerateJitRunnerConfig(ctx context.Context, setting *scaleset.RunnerScaleSetJitRunnerSetting, scaleSetID int) (*scaleset.RunnerScaleSetJitRunnerConfig, error)
+	RemoveRunner(ctx context.Context, runnerID int64) error
 }
 
 // DiskChecker is the pre-job-start disk-pressure check startInstance consults
@@ -155,8 +156,7 @@ func (s *ScaleSetController) HandleJobStarted(ctx context.Context, jobInfo *scal
 		slog.String("jobId", jobInfo.JobID),
 		slog.String("runnerName", jobInfo.RunnerName),
 	)
-	marked := s.instances.markBusy(jobInfo.RunnerName, jobRefFrom(&jobInfo.JobMessageBase))
-	if !marked {
+	if !s.instances.markBusy(jobInfo.RunnerName, jobRefFrom(&jobInfo.JobMessageBase)) {
 		s.logger.Warn("Job started for unknown runner (already removed?)", slog.String("runnerName", jobInfo.RunnerName))
 	}
 	return nil
@@ -172,6 +172,14 @@ func (s *ScaleSetController) HandleJobCompleted(ctx context.Context, jobInfo *sc
 	)
 
 	_, ready, ok := s.instances.markDone(jobInfo.RunnerName, reasonJobCompleted, jobInfo.Result)
+	if !ok && s.instances.completeUnassignedRemoval(jobInfo.RunnerName, jobInfo.Result) {
+		// The runner's removal as idle is already under way and now proceeds
+		// as a completion. Hold the scale-up barrier like any completion.
+		s.desiredMu.Lock()
+		s.pendingCompletions++
+		s.desiredMu.Unlock()
+		return nil
+	}
 	if !ok {
 		s.logger.Warn("Job completed for unknown runner (already removed?)", slog.String("runnerName", jobInfo.RunnerName))
 		return nil
@@ -276,7 +284,15 @@ func (s *ScaleSetController) scaleTarget() (target int, canScale bool) {
 func (s *ScaleSetController) removeClaimedInstance(name, instanceID string) {
 	defer s.cleanupWG.Done()
 	removeCtx, cancel := context.WithTimeout(s.workCtx, 30*time.Second)
-	err := s.provider.RemoveInstance(removeCtx, instanceID)
+	keep, err := s.deregister(removeCtx, name, instanceID)
+	if keep {
+		cancel()
+		s.signalReconcile()
+		return
+	}
+	if err == nil {
+		err = s.provider.RemoveInstance(removeCtx, instanceID)
+	}
 	cancel()
 	if err == nil {
 		s.finishRemoval(name, instanceID)
@@ -293,6 +309,33 @@ func (s *ScaleSetController) removeClaimedInstance(name, instanceID string) {
 		slog.Any("error", err),
 	)
 	time.AfterFunc(delay, s.signalReconcile)
+}
+
+// deregister removes a runner that looks idle from GitHub before its instance
+// is destroyed. GitHub assigns a job to a runner before the listener delivers
+// JobStarted, sometimes minutes before, so local state can call a runner idle
+// while it already holds a job. GitHub refuses to remove a runner with a job,
+// which makes it the only reliable judge. keep reports that the runner holds a
+// job and was restored to busy, so the caller must not destroy it.
+func (s *ScaleSetController) deregister(ctx context.Context, name, instanceID string) (keep bool, err error) {
+	runnerID, needed := s.instances.deregistration(name, instanceID)
+	if !needed {
+		return false, nil
+	}
+	err = s.scalesetClient.RemoveRunner(ctx, int64(runnerID))
+	switch {
+	case err == nil, errors.Is(err, scaleset.RunnerNotFoundError):
+		return false, nil
+	case errors.Is(err, scaleset.JobStillRunningError):
+		if !s.instances.restoreBusy(name, instanceID) {
+			return false, nil // the job completed meanwhile
+		}
+		s.logger.Info("Runner holds a job GitHub assigned before JobStarted arrived; keeping it",
+			slog.String("name", name))
+		return true, nil
+	default:
+		return false, fmt.Errorf("deregister runner %s: %w", name, err)
+	}
 }
 
 func (s *ScaleSetController) signalReconcile() {
@@ -387,7 +430,11 @@ func (s *ScaleSetController) startInstanceWithLease(ctx context.Context, lease *
 		return fail("provider_start_failed", err)
 	}
 
-	removeNow, tracked := s.instances.markReady(name, instanceID)
+	runnerID := 0
+	if jit.Runner != nil {
+		runnerID = jit.Runner.ID
+	}
+	removeNow, tracked := s.instances.markReady(name, instanceID, runnerID)
 	if !tracked {
 		cleanCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 		_ = s.provider.RemoveInstance(cleanCtx, instanceID)
@@ -412,7 +459,14 @@ func (s *ScaleSetController) startInstanceWithLease(ctx context.Context, lease *
 			_, _, _ = s.instances.markDone(name, reasonDrain, "")
 		}
 		cleanCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-		err := s.provider.RemoveInstance(cleanCtx, instanceID)
+		keep, err := s.deregister(cleanCtx, name, instanceID)
+		if keep {
+			cancel()
+			return name, nil // Drain waits for its job like any busy runner
+		}
+		if err == nil {
+			err = s.provider.RemoveInstance(cleanCtx, instanceID)
+		}
 		cancel()
 		if err != nil {
 			return "", fmt.Errorf("remove runner started during shutdown: %w", err)
@@ -539,7 +593,14 @@ func (s *ScaleSetController) Drain(ctx context.Context) error {
 		return err
 	}
 	for name, instanceID := range s.instances.idleForRemoval() {
-		if err := s.provider.RemoveInstance(ctx, instanceID); err != nil {
+		keep, err := s.deregister(ctx, name, instanceID)
+		if keep {
+			continue
+		}
+		if err == nil {
+			err = s.provider.RemoveInstance(ctx, instanceID)
+		}
+		if err != nil {
 			s.logger.Warn("Failed to remove idle runner during drain",
 				slog.String("name", name),
 				slog.Any("error", err))

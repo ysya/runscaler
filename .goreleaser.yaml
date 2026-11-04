@@ -5,9 +5,13 @@ builds:
   - id: runner
     main: ./cmd/runner
     binary: runner
-    # ldflags/goos/goarch are shared with the compat build via this anchor so
+    # Build settings are shared with the compat build via this anchor so
     # the two cannot drift apart.
     <<: &common_build
+      # Keep release binaries independent of the C compiler's CPU baseline.
+      # GOAMD64=v1 does not constrain cgo, which can otherwise emit AVX.
+      env:
+        - CGO_ENABLED=0
       ldflags:
         - -s -w
         - -X main.version={{.Version}}

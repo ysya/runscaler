@@ -82,6 +82,7 @@ func init() {
 	flags.Int("tart-cpu", 0, "Number of CPU cores for each VM (0 = use image default)")
 	flags.Int("tart-memory", 0, "Memory in MB for each VM (0 = use image default)")
 	flags.Int("tart-pool-size", 0, "Number of pre-warmed VMs to keep ready (0 = disabled)")
+	flags.String("tart-net-bridged", "", "Host interface to bridge each VM to instead of Tart's NAT (e.g. en0)")
 
 	// Global
 	flags.String("log-level", config.DefaultLogLevel, "Log level (debug, info, warn, error)")
@@ -121,6 +122,7 @@ func init() {
 	viper.BindPFlag("tart.cpu", flags.Lookup("tart-cpu"))
 	viper.BindPFlag("tart.memory", flags.Lookup("tart-memory"))
 	viper.BindPFlag("tart.pool-size", flags.Lookup("tart-pool-size"))
+	viper.BindPFlag("tart.net-bridged", flags.Lookup("tart-net-bridged"))
 
 	// Register subcommands
 	cmd.AddCommand(initCmd, validateCmd, statusCmd, doctorCmd, versionCmd, serviceCmd, cacheCmd, runCommand)

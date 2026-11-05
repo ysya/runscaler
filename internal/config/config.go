@@ -394,6 +394,13 @@ type TartConfig struct {
 	// out, which proxies through the host and can stop answering after the
 	// host's VPN disconnects.
 	DNS []string `mapstructure:"dns"`
+	// NetBridged attaches each VM to this host interface (`tart run
+	// --net-bridged=<interface>`, e.g. "en0") instead of Tart's shared NAT,
+	// so the guest takes its address and route from the host's network. Use
+	// it when the host's NAT does not serve guests: macOS bootpd can fail to
+	// hand out a lease, leaving the guest on a 169.254.x.x address with no
+	// route out. Empty (default) keeps NAT.
+	NetBridged string `mapstructure:"net-bridged"`
 
 	// CacheCleanup enables periodic `tart prune` of the OCI/IPSW caches under
 	// TART_HOME. Pointer: nil = inherit default (true). Local VMs are never
@@ -614,6 +621,9 @@ func (ss *ScaleSetConfig) Validate() error {
 			if _, err := netip.ParseAddr(server); err != nil {
 				return fmt.Errorf("tart dns entry %q is not an IP address", server)
 			}
+		}
+		if b := ss.Tart.NetBridged; b != "" && (strings.HasPrefix(b, "-") || strings.ContainsAny(b, " \t\n=")) {
+			return fmt.Errorf("tart net-bridged %q is not a host interface name", b)
 		}
 	default:
 		return fmt.Errorf("unsupported provider %q (must be %q or \"tart\")", ss.Provider, DefaultProvider)

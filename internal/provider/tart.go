@@ -107,6 +107,7 @@ func (c *TartHostCoordinator) release(idx int) { c.slots <- idx }
 //  2. tart set <name> --cpu/--memory      — configure VM resources (if specified)
 //  3. Set deterministic MAC address       — prevent DHCP lease exhaustion
 //  4. tart run <name> --no-graphics       — boot VM in background goroutine
+//     (--net-bridged=<interface> when configured)
 //  5. tart exec <name> true               — poll until Guest Agent is ready
 //  6. tart exec <name> ... run.sh         — start runner with JIT config
 //  7. tart stop + tart delete on removal
@@ -129,6 +130,7 @@ type TartProvider struct {
 	// Guest network, applied before each runner starts (see TartConfig).
 	mtu        int      // 0 = auto, -1 = off, otherwise a fixed MTU
 	dns        []string // guest resolvers; empty = keep what Tart's NAT hands out
+	netBridged string   // host interface to bridge VMs to; empty = Tart's NAT
 	githubHost string   // the host whose route decides the auto MTU
 	mtuLogMu   sync.Mutex
 	lastMTULog string // last MTU and reason logged at Info; repeats go to Debug
@@ -176,9 +178,19 @@ func NewTartProviderWithCoordinator(ss config.ScaleSetConfig, logger *slog.Logge
 		coordinator: coordinator,
 		mtu:         ss.Tart.MTU,
 		dns:         ss.Tart.DNS,
+		netBridged:  ss.Tart.NetBridged,
 		githubHost:  registrationHost(ss.RegistrationURL),
 	}
 	return p
+}
+
+// runArgs is the `tart run` command line that boots a VM.
+func (p *TartProvider) runArgs(name string) []string {
+	args := []string{"run", name, "--no-graphics"}
+	if p.netBridged != "" {
+		args = append(args, "--net-bridged="+p.netBridged)
+	}
+	return args
 }
 
 // StartPool begins pre-warming VMs in the background.
@@ -324,7 +336,7 @@ func (p *TartProvider) bootVM(ctx context.Context, name string) (*warmVM, error)
 	go func() {
 		defer vmCancel()
 		defer close(vmDone)
-		if _, err := p.cmd.Run(vmCtx, "tart", "run", name, "--no-graphics"); err != nil {
+		if _, err := p.cmd.Run(vmCtx, "tart", p.runArgs(name)...); err != nil {
 			if vmCtx.Err() == nil {
 				p.logger.Error("VM exited unexpectedly", slog.String("name", name), slog.Any("error", err))
 			}

@@ -5,6 +5,8 @@
 [![License](https://img.shields.io/github/license/ysya/runscaler)](LICENSE)
 [![Go Report Card](https://goreportcard.com/badge/github.com/ysya/runscaler)](https://goreportcard.com/report/github.com/ysya/runscaler)
 
+[English](README.md) | [繁體中文](README.zh-TW.md)
+
 Auto-scale GitHub Actions self-hosted runners as Docker containers or macOS VMs. Powered by [actions/scaleset](https://github.com/actions/scaleset).
 
 Runners are **ephemeral** — each container/VM handles exactly one job and is removed upon completion. No Kubernetes required.

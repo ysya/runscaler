@@ -1,17 +1,153 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"os"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
+
+	runnerlock "github.com/ysya/runscaler/internal/lock"
 )
+
+func TestExplainLockError(t *testing.T) {
+	const fix = "sudo /usr/local/bin/runner service install --user=false --force"
+	readOnly := explainLockError(fmt.Errorf("open runner lock /tmp/runner.lock: %w", syscall.EROFS), fix)
+	if !errors.Is(readOnly, syscall.EROFS) || !strings.Contains(readOnly.Error(), fix) {
+		t.Errorf("read-only lock error should keep its cause and include the fix:\n%v", readOnly)
+	}
+
+	held := explainLockError(&runnerlock.AlreadyRunningError{Path: "/tmp/runner.lock"}, fix)
+	if !errors.Is(held, runnerlock.ErrAlreadyRunning) || !strings.Contains(held.Error(), "Only one runner may run per machine") {
+		t.Errorf("held lock error should keep its cause and explain the single-instance rule:\n%v", held)
+	}
+
+	other := errors.New("permission denied")
+	if got := explainLockError(other, fix); got != other {
+		t.Errorf("unrelated lock error = %v, want it unchanged", got)
+	}
+}
+
+func TestHandleShutdownSignals_DrainsThenCancelsThenForces(t *testing.T) {
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	signals := make(chan os.Signal, 3)
+	drained := make(chan struct{})
+	canceled := make(chan struct{})
+	forced := make(chan struct{})
+	var cancelOnce sync.Once
+
+	go handleShutdownSignals(ctx, signals, func() { close(drained) }, func() {
+		cancelOnce.Do(func() { close(canceled) })
+	}, func() { close(forced) })
+
+	signals <- syscall.SIGTERM
+	awaitClosed(t, drained, "SIGTERM did not request drain")
+	assertOpen(t, canceled, "first SIGTERM canceled the run instead of draining")
+
+	signals <- syscall.SIGQUIT
+	awaitClosed(t, canceled, "second signal did not request immediate shutdown")
+	assertOpen(t, forced, "second signal forced process exit")
+
+	signals <- os.Interrupt
+	awaitClosed(t, forced, "third signal did not force process exit")
+}
+
+func TestHandleShutdownSignals_SIGINTStopsImmediatelyWithoutDrain(t *testing.T) {
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	signals := make(chan os.Signal, 1)
+	drained := make(chan struct{})
+	canceled := make(chan struct{})
+
+	go handleShutdownSignals(ctx, signals, func() { close(drained) }, func() { close(canceled) }, func() {})
+	signals <- os.Interrupt
+	awaitClosed(t, canceled, "SIGINT did not stop immediately")
+	assertOpen(t, drained, "SIGINT must never request drain")
+}
+
+type blockingDrainer struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (d *blockingDrainer) Drain(ctx context.Context) error {
+	close(d.started)
+	select {
+	case <-d.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func TestWatchScaleSetDrain_KeepsListenerAliveUntilDrainReturns(t *testing.T) {
+	listenCtx, cancelListen := context.WithCancel(context.Background())
+	defer cancelListen()
+	drain := make(chan struct{})
+	d := &blockingDrainer{started: make(chan struct{}), release: make(chan struct{})}
+
+	go watchScaleSetDrain(listenCtx, drain, time.Minute, d, cancelListen, slog.New(slog.DiscardHandler))
+	close(drain)
+	awaitClosed(t, d.started, "Drain was not started")
+	if listenCtx.Err() != nil {
+		t.Fatal("listener was canceled before Drain returned; job completions would be lost")
+	}
+	close(d.release)
+	awaitDone(t, listenCtx, "listener was not canceled after Drain returned")
+}
+
+func TestWatchScaleSetDrain_ZeroTimeoutStopsImmediately(t *testing.T) {
+	listenCtx, cancelListen := context.WithCancel(context.Background())
+	defer cancelListen()
+	drain := make(chan struct{})
+	d := &blockingDrainer{started: make(chan struct{}), release: make(chan struct{})}
+
+	go watchScaleSetDrain(listenCtx, drain, 0, d, cancelListen, slog.New(slog.DiscardHandler))
+	close(drain)
+	awaitDone(t, listenCtx, "disabled drain did not stop listener immediately")
+	assertOpen(t, d.started, "disabled drain still called Drain")
+}
+
+func awaitClosed(t *testing.T, ch <-chan struct{}, failure string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(2 * time.Second):
+		t.Fatal(failure)
+	}
+}
+
+func awaitDone(t *testing.T, ctx context.Context, failure string) {
+	t.Helper()
+	select {
+	case <-ctx.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal(failure)
+	}
+}
+
+func assertOpen(t *testing.T, ch <-chan struct{}, failure string) {
+	t.Helper()
+	select {
+	case <-ch:
+		t.Fatal(failure)
+	default:
+	}
+}
 
 func TestRootBareInvocationDoesNotStart(t *testing.T) {
 	called := false
-	orig := startScaling
-	startScaling = func(c *cobra.Command) error { called = true; return nil }
-	defer func() { startScaling = orig }()
+	orig := startManager
+	startManager = func(c *cobra.Command) error { called = true; return nil }
+	defer func() { startManager = orig }()
 	defer func() {
 		if f := cmd.PersistentFlags().Lookup("config"); f != nil {
 			f.Changed = false
@@ -34,9 +170,9 @@ func TestRootBareInvocationDoesNotStart(t *testing.T) {
 
 func TestRootConfigInvocationStartsViaDropIn(t *testing.T) {
 	called := false
-	orig := startScaling
-	startScaling = func(c *cobra.Command) error { called = true; return nil }
-	defer func() { startScaling = orig }()
+	orig := startManager
+	startManager = func(c *cobra.Command) error { called = true; return nil }
+	defer func() { startManager = orig }()
 	defer func() {
 		if f := cmd.PersistentFlags().Lookup("config"); f != nil {
 			f.Changed = false
@@ -71,7 +207,7 @@ func TestRunSubcommandRegistered(t *testing.T) {
 }
 
 func TestRunOwnsStartFlags(t *testing.T) {
-	for _, name := range []string{"url", "name", "token", "max-runners", "backend", "health-port", "dry-run"} {
+	for _, name := range []string{"url", "name", "token", "max-runners", "concurrent", "provider", "backend", "health-port", "dry-run"} {
 		if runCommand.Flags().Lookup(name) == nil {
 			t.Errorf("`run` must own the --%s start flag", name)
 		}

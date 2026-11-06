@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 )
 
 // Legacy identifiers from before the runscaler→runner rename, kept for upgrade
@@ -16,6 +17,7 @@ var (
 	legacySystemdUnit  = "runscaler.service"
 	legacyServiceName  = "runscaler"
 	legacyLaunchdPlist = "com.runscaler.agent.plist"
+	legacyLaunchdLabel = "com.runscaler.agent"
 	legacySharedVolume = "runscaler-shared"
 	legacyTokenEnv     = "RUNSCALER_TOKEN"
 )
@@ -39,6 +41,18 @@ func legacyLaunchdPlistPath(user bool) string {
 // given level (current OS only).
 func legacyServiceInstalled(user bool) bool {
 	return serviceFilePresent(user, legacySystemdUnit, legacyLaunchdPlist)
+}
+
+// removeLegacyServiceFile stops and removes a pre-rename service definition.
+func removeLegacyServiceFile(user bool) error {
+	switch runtime.GOOS {
+	case "linux":
+		return removeSystemdUnit(user, legacySystemdUnit, legacyServiceName)
+	case "darwin":
+		return removeLaunchdPlist(legacyLaunchdPlistPath(user))
+	default:
+		return fmt.Errorf("unsupported platform: %s", runtime.GOOS)
+	}
 }
 
 // warnLegacy prints a one-line deprecation notice to stderr.

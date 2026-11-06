@@ -2,7 +2,55 @@ package config
 
 import (
 	"testing"
+	"time"
 )
+
+func TestEffectiveDrainTimeout(t *testing.T) {
+	zero := time.Duration(0)
+	negative := -time.Second
+	tenMin := 10 * time.Minute
+	tests := []struct {
+		name string
+		set  *time.Duration
+		want time.Duration
+	}{
+		{"unset inherits default", nil, DefaultDrainTimeout},
+		{"explicit zero disables drain", &zero, 0},
+		{"negative disables drain", &negative, negative},
+		{"explicit value wins", &tenMin, tenMin},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := Config{DrainTimeout: tt.set}
+			if got := c.EffectiveDrainTimeout(); got != tt.want {
+				t.Errorf("EffectiveDrainTimeout() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestEffectiveConcurrent(t *testing.T) {
+	sets := []ScaleSetConfig{{MaxRunners: 3}, {MaxRunners: 7}}
+	if got := (&Config{}).EffectiveConcurrent(sets); got != 10 {
+		t.Fatalf("automatic EffectiveConcurrent() = %d, want 10", got)
+	}
+	if got := (&Config{Concurrent: 4}).EffectiveConcurrent(sets); got != 4 {
+		t.Fatalf("explicit EffectiveConcurrent() = %d, want 4", got)
+	}
+}
+
+func TestValidateConcurrent(t *testing.T) {
+	sets := []ScaleSetConfig{{MinRunners: 2}, {MinRunners: 1}}
+	if err := (&Config{Concurrent: 3}).ValidateConcurrent(sets); err != nil {
+		t.Fatalf("ValidateConcurrent() unexpected error: %v", err)
+	}
+	if err := (&Config{Concurrent: 2}).ValidateConcurrent(sets); err == nil {
+		t.Fatal("ValidateConcurrent() succeeded below the total min-runners floor")
+	}
+	if err := (&Config{}).ValidateConcurrent(sets); err != nil {
+		t.Fatalf("automatic concurrent should remain valid: %v", err)
+	}
+}
 
 func validScaleSetConfig() ScaleSetConfig {
 	return ScaleSetConfig{
@@ -11,8 +59,17 @@ func validScaleSetConfig() ScaleSetConfig {
 		Token:           "ghp_test",
 		MaxRunners:      10,
 		MinRunners:      0,
-		Backend:         DefaultBackend,
+		Provider:        DefaultProvider,
+		RunnerImage:     DefaultRunnerImage,
 	}
+}
+
+// validTart turns a validScaleSetConfig into a valid Tart scale set, so a
+// table row only has to state the one Tart field it is exercising.
+func validTart(c *ScaleSetConfig) {
+	c.Provider = "tart"
+	c.RunnerImage = "macos-base:latest"
+	c.MaxRunners = 2
 }
 
 func TestScaleSetConfigValidate(t *testing.T) {
@@ -101,6 +158,31 @@ func TestScaleSetConfigValidate(t *testing.T) {
 	}
 }
 
+func TestScaleSetConfigValidateRejectsMalformedDockerPlatform(t *testing.T) {
+	c := validScaleSetConfig()
+	c.Docker.Platform = "linux"
+	if err := c.Validate(); err == nil || !contains(err.Error(), "platform") {
+		t.Fatalf("Validate() error = %v, want platform error", err)
+	}
+}
+
+func TestValidateGlobal(t *testing.T) {
+	valid := Config{LogLevel: "info", LogFormat: "text", HealthPort: 8080}
+	if err := valid.ValidateGlobal(); err != nil {
+		t.Fatalf("valid global config: %v", err)
+	}
+	for _, cfg := range []Config{
+		{LogLevel: "verbose", LogFormat: "text", HealthPort: 8080},
+		{LogLevel: "info", LogFormat: "yaml", HealthPort: 8080},
+		{LogLevel: "info", LogFormat: "text", HealthPort: 70000},
+		{LogLevel: "info", LogFormat: "text", HealthPort: 8080, Concurrent: -1},
+	} {
+		if err := cfg.ValidateGlobal(); err == nil {
+			t.Fatalf("ValidateGlobal(%+v) succeeded, want error", cfg)
+		}
+	}
+}
+
 func TestBuildLabels(t *testing.T) {
 	t.Run("custom labels", func(t *testing.T) {
 		labels := BuildLabels("my-runners", []string{"linux", "x64", "docker"})
@@ -167,14 +249,14 @@ func TestResolveScaleSets_Legacy(t *testing.T) {
 	if !sets[0].IsDinD() {
 		t.Error("IsDinD() = false, want true")
 	}
-	if sets[0].Backend != DefaultBackend {
-		t.Errorf("Backend = %q, want %q", sets[0].Backend, DefaultBackend)
+	if sets[0].Provider != DefaultProvider {
+		t.Errorf("Provider = %q, want %q", sets[0].Provider, DefaultProvider)
 	}
 }
 
-// --- Tart backend validation tests ---
+// --- Tart provider validation tests ---
 
-func TestScaleSetConfigValidate_TartBackend(t *testing.T) {
+func TestScaleSetConfigValidate_TartProvider(t *testing.T) {
 	tests := []struct {
 		name    string
 		modify  func(*ScaleSetConfig)
@@ -183,24 +265,77 @@ func TestScaleSetConfigValidate_TartBackend(t *testing.T) {
 		{
 			name: "valid tart config",
 			modify: func(c *ScaleSetConfig) {
-				c.Backend = "tart"
+				c.Provider = "tart"
+				c.RunnerImage = "macos-base:latest"
+				c.MaxRunners = 2
+			},
+		},
+		{
+			name: "tart exceeds host limit",
+			modify: func(c *ScaleSetConfig) {
+				c.Provider = "tart"
 				c.RunnerImage = "macos-base:latest"
 			},
+			wantErr: "max-runners must be <= 2",
 		},
 		{
 			name: "tart missing image",
 			modify: func(c *ScaleSetConfig) {
-				c.Backend = "tart"
+				c.Provider = "tart"
 				c.RunnerImage = ""
 			},
 			wantErr: "runner-image is required",
 		},
 		{
-			name: "unsupported backend",
+			name: "unsupported provider",
 			modify: func(c *ScaleSetConfig) {
-				c.Backend = "podman"
+				c.Provider = "podman"
 			},
-			wantErr: "unsupported backend",
+			wantErr: "unsupported provider",
+		},
+		{
+			name:   "tart mtu off",
+			modify: func(c *ScaleSetConfig) { validTart(c); c.Tart.MTU = -1 },
+		},
+		{
+			name:   "tart mtu at IPv6 minimum",
+			modify: func(c *ScaleSetConfig) { validTart(c); c.Tart.MTU = 1280 },
+		},
+		{
+			name:   "tart mtu at ethernet maximum",
+			modify: func(c *ScaleSetConfig) { validTart(c); c.Tart.MTU = 1500 },
+		},
+		{
+			name:    "tart mtu below IPv6 minimum",
+			modify:  func(c *ScaleSetConfig) { validTart(c); c.Tart.MTU = 1279 },
+			wantErr: "tart mtu",
+		},
+		{
+			name:    "tart mtu above ethernet maximum",
+			modify:  func(c *ScaleSetConfig) { validTart(c); c.Tart.MTU = 1501 },
+			wantErr: "tart mtu",
+		},
+		{
+			name:    "tart mtu negative other than off",
+			modify:  func(c *ScaleSetConfig) { validTart(c); c.Tart.MTU = -2 },
+			wantErr: "tart mtu",
+		},
+		{
+			name: "tart dns accepts IPv4 and IPv6",
+			modify: func(c *ScaleSetConfig) {
+				validTart(c)
+				c.Tart.DNS = []string{"1.1.1.1", "2606:4700:4700::1111"}
+			},
+		},
+		{
+			name:    "tart dns rejects hostname",
+			modify:  func(c *ScaleSetConfig) { validTart(c); c.Tart.DNS = []string{"one.one.one.one"} },
+			wantErr: "tart dns",
+		},
+		{
+			name:    "tart dns rejects empty entry",
+			modify:  func(c *ScaleSetConfig) { validTart(c); c.Tart.DNS = []string{""} },
+			wantErr: "tart dns",
 		},
 	}
 
@@ -234,7 +369,7 @@ func TestTartDefaults(t *testing.T) {
 			ScaleSetName:    "macos-runners",
 			Token:           "ghp_test",
 			MaxRunners:      2,
-			Backend:         "tart",
+			Provider:        "tart",
 			RunnerImage:     "macos-base:latest",
 		},
 	}
@@ -362,13 +497,163 @@ func TestParseCacheVolumes(t *testing.T) {
 			})
 		}
 	})
+
+	t.Run("long form entry with budget and on-exceed", func(t *testing.T) {
+		dc := DockerConfig{Cache: []CacheVolumeSpec{
+			{Name: "ccache", Path: "/home/runner/.ccache", Budget: "20GB", OnExceed: "wipe"},
+		}}
+		mounts, err := dc.ParseCacheVolumes()
+		if err != nil {
+			t.Fatalf("ParseCacheVolumes() error: %v", err)
+		}
+		want := CacheVolumeMount{Volume: "ccache", Path: "/home/runner/.ccache", BudgetBytes: 20 * 1024 * 1024 * 1024, OnExceed: "wipe"}
+		if len(mounts) != 1 || mounts[0] != want {
+			t.Errorf("mounts = %+v, want [%+v]", mounts, want)
+		}
+	})
+
+	t.Run("long form entry with no budget resolves to zero, same as the short form", func(t *testing.T) {
+		dc := DockerConfig{Cache: []CacheVolumeSpec{{Name: "ccache", Path: "/home/runner/.ccache"}}}
+		mounts, err := dc.ParseCacheVolumes()
+		if err != nil {
+			t.Fatalf("ParseCacheVolumes() error: %v", err)
+		}
+		want := CacheVolumeMount{Volume: "ccache", Path: "/home/runner/.ccache"}
+		if len(mounts) != 1 || mounts[0] != want {
+			t.Errorf("mounts = %+v, want [%+v]", mounts, want)
+		}
+	})
+
+	t.Run("same name in both forms: long form wins entirely, not merged field by field", func(t *testing.T) {
+		dc := DockerConfig{
+			CacheVolumes: []string{"ccache:/home/runner/.ccache-short"},
+			Cache: []CacheVolumeSpec{
+				{Name: "ccache", Path: "/home/runner/.ccache-long", Budget: "5GB", OnExceed: "warn"},
+			},
+		}
+		mounts, err := dc.ParseCacheVolumes()
+		if err != nil {
+			t.Fatalf("ParseCacheVolumes() error: %v", err)
+		}
+		want := CacheVolumeMount{Volume: "ccache", Path: "/home/runner/.ccache-long", BudgetBytes: 5 * 1024 * 1024 * 1024, OnExceed: "warn"}
+		if len(mounts) != 1 || mounts[0] != want {
+			t.Errorf("mounts = %+v, want [%+v] (the short-form entry must be fully discarded)", mounts, want)
+		}
+	})
+
+	t.Run("short and long form entries with distinct names both survive, short form ordered first", func(t *testing.T) {
+		dc := DockerConfig{
+			CacheVolumes: []string{"gradle-cache:/home/runner/.gradle"},
+			Cache:        []CacheVolumeSpec{{Name: "ccache", Path: "/home/runner/.ccache", Budget: "20GB"}},
+		}
+		mounts, err := dc.ParseCacheVolumes()
+		if err != nil {
+			t.Fatalf("ParseCacheVolumes() error: %v", err)
+		}
+		if len(mounts) != 2 || mounts[0].Volume != "gradle-cache" || mounts[1].Volume != "ccache" {
+			t.Errorf("mounts = %+v, want [gradle-cache, ccache] in that order", mounts)
+		}
+	})
+
+	t.Run("on-exceed empty string is valid (behaves as warn downstream)", func(t *testing.T) {
+		dc := DockerConfig{Cache: []CacheVolumeSpec{{Name: "x", Path: "/x", Budget: "1GB"}}}
+		mounts, err := dc.ParseCacheVolumes()
+		if err != nil {
+			t.Fatalf("ParseCacheVolumes() unexpected error: %v", err)
+		}
+		if len(mounts) != 1 || mounts[0].OnExceed != "" {
+			t.Errorf("mounts = %+v, want OnExceed \"\" preserved as-is", mounts)
+		}
+	})
+
+	t.Run("duplicate container path across the two forms", func(t *testing.T) {
+		dc := DockerConfig{
+			CacheVolumes: []string{"a:/shared-path"},
+			Cache:        []CacheVolumeSpec{{Name: "b", Path: "/shared-path"}},
+		}
+		if _, err := dc.ParseCacheVolumes(); err == nil {
+			t.Error("ParseCacheVolumes() expected a duplicate-path error")
+		}
+	})
+
+	// Fix round 1: a rewrite regression let a repeated volume name within
+	// one form silently keep only the last entry (cache-volumes =
+	// ["cache:/a", "cache:/b"] used to yield two mounts, then started
+	// yielding one) instead of erroring — and internal/provider/docker.go
+	// mounts exactly what ParseCacheVolumes returns, so the dropped path
+	// never reached the runner container with no warning anywhere. These
+	// two pin that it is now a rejected config, not a silent drop, and the
+	// third pins that the *intentional* same-name case (a long-form entry
+	// overriding a short-form one) still isn't affected by that rejection.
+	t.Run("duplicate volume name within the short form is rejected, not silently dropped", func(t *testing.T) {
+		dc := DockerConfig{CacheVolumes: []string{"cache:/a", "cache:/b"}}
+		mounts, err := dc.ParseCacheVolumes()
+		if err == nil {
+			t.Fatalf("ParseCacheVolumes() = %+v, want an error", mounts)
+		}
+		if !contains(err.Error(), "cache-volumes") || !contains(err.Error(), "duplicate") || !contains(err.Error(), "cache") {
+			t.Errorf("error = %q, want it to name cache-volumes, duplicate, and the volume name %q", err.Error(), "cache")
+		}
+	})
+
+	t.Run("duplicate volume name within the long form is rejected, not silently dropped", func(t *testing.T) {
+		dc := DockerConfig{Cache: []CacheVolumeSpec{
+			{Name: "ccache", Path: "/a"},
+			{Name: "ccache", Path: "/b"},
+		}}
+		mounts, err := dc.ParseCacheVolumes()
+		if err == nil {
+			t.Fatalf("ParseCacheVolumes() = %+v, want an error", mounts)
+		}
+		if !contains(err.Error(), "[[docker.cache]]") || !contains(err.Error(), "duplicate") || !contains(err.Error(), "ccache") {
+			t.Errorf("error = %q, want it to name [[docker.cache]], duplicate, and the volume name %q", err.Error(), "ccache")
+		}
+	})
+
+	t.Run("cross-form same name is an override, not a rejected duplicate", func(t *testing.T) {
+		dc := DockerConfig{
+			CacheVolumes: []string{"ccache:/short-path"},
+			Cache:        []CacheVolumeSpec{{Name: "ccache", Path: "/long-path", Budget: "1GB"}},
+		}
+		mounts, err := dc.ParseCacheVolumes()
+		if err != nil {
+			t.Fatalf("ParseCacheVolumes() unexpected error: %v", err)
+		}
+		want := CacheVolumeMount{Volume: "ccache", Path: "/long-path", BudgetBytes: 1024 * 1024 * 1024}
+		if len(mounts) != 1 || mounts[0] != want {
+			t.Errorf("mounts = %+v, want [%+v] (long form wins, cross-form repeat is not an error)", mounts, want)
+		}
+	})
+
+	t.Run("long form validation errors", func(t *testing.T) {
+		tests := []struct {
+			name string
+			spec CacheVolumeSpec
+		}{
+			{name: "missing name", spec: CacheVolumeSpec{Path: "/x"}},
+			{name: "missing path", spec: CacheVolumeSpec{Name: "x"}},
+			{name: "invalid volume name", spec: CacheVolumeSpec{Name: "bad/name", Path: "/x"}},
+			{name: "relative path", spec: CacheVolumeSpec{Name: "x", Path: "relative"}},
+			{name: "percentage budget rejected", spec: CacheVolumeSpec{Name: "x", Path: "/x", Budget: "10%"}},
+			{name: "unparseable budget", spec: CacheVolumeSpec{Name: "x", Path: "/x", Budget: "lots"}},
+			{name: "bad on-exceed", spec: CacheVolumeSpec{Name: "x", Path: "/x", OnExceed: "delete"}},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				dc := DockerConfig{Cache: []CacheVolumeSpec{tt.spec}}
+				if mounts, err := dc.ParseCacheVolumes(); err == nil {
+					t.Errorf("ParseCacheVolumes() expected error for %+v, got mounts %v", tt.spec, mounts)
+				}
+			})
+		}
+	})
 }
 
-func TestApplyDefaults_BackendDefault(t *testing.T) {
-	ss := ScaleSetConfig{} // Backend is ""
+func TestApplyDefaults_ProviderDefault(t *testing.T) {
+	ss := ScaleSetConfig{} // Provider is ""
 	ss.applyDefaults()
-	if ss.Backend != DefaultBackend {
-		t.Errorf("applyDefaults() Backend = %q, want %q", ss.Backend, DefaultBackend)
+	if ss.Provider != DefaultProvider {
+		t.Errorf("applyDefaults() Provider = %q, want %q", ss.Provider, DefaultProvider)
 	}
 }
 
@@ -387,6 +672,23 @@ func TestIsTartCacheCleanupEnabled(t *testing.T) {
 	ss.Tart.CacheCleanup = &fa
 	if ss.IsTartCacheCleanupEnabled() {
 		t.Errorf("explicit false should be disabled")
+	}
+}
+
+func TestDaemonWideDockerCleanupDefaultsOff(t *testing.T) {
+	var ss ScaleSetConfig
+	if ss.IsBuildxCleanupEnabled() {
+		t.Error("buildx cleanup must be opt-in")
+	}
+	if ss.IsDockerPruneEnabled() {
+		t.Error("Docker prune must be opt-in")
+	}
+
+	on := true
+	ss.Docker.BuildxCleanup = &on
+	ss.Docker.Prune = &on
+	if !ss.IsBuildxCleanupEnabled() || !ss.IsDockerPruneEnabled() {
+		t.Error("explicit cleanup opt-in was ignored")
 	}
 }
 
@@ -430,4 +732,115 @@ func searchString(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+func TestIsUpdateDisabled(t *testing.T) {
+	tr, fa := true, false
+	tests := []struct {
+		name string
+		set  *bool
+		want bool
+	}{
+		{"unset inherits default", nil, DefaultDisableUpdate},
+		{"explicit true", &tr, true},
+		{"explicit false allows self-update", &fa, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ss := ScaleSetConfig{DisableUpdate: tt.set}
+			if got := ss.IsUpdateDisabled(); got != tt.want {
+				t.Errorf("IsUpdateDisabled() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestDiskConfigValidate(t *testing.T) {
+	tests := []struct {
+		name    string
+		disk    DiskConfig
+		wantErr string
+	}{
+		{name: "defaults are valid", disk: DiskConfig{}},
+		{name: "min >= target rejected",
+			disk:    DiskConfig{MinFree: "30%", TargetFree: "20%"},
+			wantErr: "min-free must be less than target-free"},
+		{name: "equal rejected",
+			disk:    DiskConfig{MinFree: "20%", TargetFree: "20%"},
+			wantErr: "min-free must be less than target-free"},
+		{name: "bad threshold rejected",
+			disk:    DiskConfig{MinFree: "lots"},
+			wantErr: "invalid threshold"},
+		{name: "bad target threshold rejected",
+			disk:    DiskConfig{TargetFree: "lots"},
+			wantErr: "invalid threshold"},
+		{name: "max-tier out of range",
+			disk:    DiskConfig{MaxTier: 9},
+			wantErr: "max-tier must be between 1 and 4"},
+		{name: "max-tier negative rejected",
+			disk:    DiskConfig{MaxTier: -1},
+			wantErr: "max-tier must be between 1 and 4"},
+		{name: "max-tier 1 through 4 all valid",
+			disk: DiskConfig{MaxTier: 1}},
+		{name: "mixed units rejected",
+			disk:    DiskConfig{MinFree: "10%", TargetFree: "20GB"},
+			wantErr: "must both be percentages or both be sizes"},
+		{name: "byte thresholds compared correctly",
+			disk: DiskConfig{MinFree: "10GB", TargetFree: "20GB"}},
+		{name: "byte thresholds min >= target rejected",
+			disk:    DiskConfig{MinFree: "2048MB", TargetFree: "1GB"}, // 2048MB == 2GB > 1GB
+			wantErr: "min-free must be less than target-free"},
+		{name: "only min-free overridden still compared against default target",
+			disk:    DiskConfig{MinFree: "25%"}, // default target-free is 20%
+			wantErr: "min-free must be less than target-free"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.disk.Validate()
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Errorf("Validate() unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil || !contains(err.Error(), tt.wantErr) {
+				t.Errorf("Validate() = %v, want error containing %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestIsDiskGuardEnabled(t *testing.T) {
+	tr, fa := true, false
+	tests := []struct {
+		name string
+		set  *bool
+		want bool
+	}{
+		{"unset inherits default", nil, DefaultDiskGuard},
+		{"explicit true", &tr, true},
+		{"explicit false disables the guard", &fa, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := Config{Disk: DiskConfig{Guard: tt.set}}
+			if got := c.IsDiskGuardEnabled(); got != tt.want {
+				t.Errorf("IsDiskGuardEnabled() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestValidateGlobal_RejectsInvalidDisk pins down that ValidateGlobal — the
+// single call site used by both `runner validate` and `runner run` — fails
+// on a bad [disk] section rather than merely warning (see DiskConfig's
+// Validate doc comment for why an inverted MinFree/TargetFree pair is more
+// than cosmetic: it can underflow the guard's shortfall calculation).
+func TestValidateGlobal_RejectsInvalidDisk(t *testing.T) {
+	cfg := Config{LogLevel: "info", LogFormat: "text", HealthPort: 8080,
+		Disk: DiskConfig{MinFree: "20%", TargetFree: "10%"}}
+	err := cfg.ValidateGlobal()
+	if err == nil || !contains(err.Error(), "min-free must be less than target-free") {
+		t.Errorf("ValidateGlobal() = %v, want min-free/target-free error", err)
+	}
 }

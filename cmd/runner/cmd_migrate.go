@@ -1,77 +1,165 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
+	"unicode"
 
-	dockerclient "github.com/docker/docker/client"
+	dockerclient "github.com/moby/moby/client"
 	"github.com/spf13/cobra"
+
+	"github.com/ysya/runscaler/internal/layout"
 )
 
 // newConfigPath is the destination for migrated config (var for testability).
 var newConfigPath = defaultConfigPath // "/etc/runner/config.toml"
 
+// migrateServiceForCommand is a test seam for the config/service transaction.
+var migrateServiceForCommand = migrateService
+
 var migrateCmd = &cobra.Command{
 	Use:   "migrate",
 	Short: "Migrate an existing runscaler install to runner",
-	Long: `Copy config from /etc/runscaler to /etc/runner (the legacy file is
-removed only after the service migration succeeds), reinstall the service under
-the new name, and clean up the old docker volume. Idempotent — safe to run
-multiple times; a fresh install has nothing to migrate.`,
+	Long: `Back up and canonicalize an existing runscaler config, validate it,
+move it to the runner config location, and switch the service with rollback on
+failure. Idempotent — safe to run multiple times. Destructive legacy Docker
+volume cleanup is opt-in with --cleanup.`,
 	RunE: runMigrate,
 }
 
 func init() {
-	migrateCmd.Flags().Bool("user", false, "Migrate user-level service")
+	migrateCmd.Flags().Bool("user", defaultUserService(), "Migrate user-level service (default on macOS; --user=false for system scope)")
+	migrateCmd.Flags().Bool("dry-run", false, "Validate and show the migration plan without changing anything")
+	migrateCmd.Flags().Bool("cleanup", false, "Remove the legacy Docker volume after a successful migration")
+	migrateCmd.Flags().String("backup-dir", "", "Directory for versioned config backups (default: /var/lib/runner/backups for system scope, $XDG_STATE_HOME/runner/backups for --user)")
 	cmd.AddCommand(migrateCmd)
+}
+
+// migrateScopeError rejects system-scope migration on macOS, where runner
+// only runs as the logged-in user.
+func migrateScopeError(goos string, user bool) error {
+	if goos == "darwin" && !user {
+		return errors.New("system-level migration is not supported on macOS: runner runs as the logged-in user.\n\n  Run 'runner migrate --user', then remove the old LaunchDaemon with 'sudo runner service uninstall --user=false'")
+	}
+	return nil
 }
 
 func runMigrate(c *cobra.Command, _ []string) error {
 	user, _ := c.Flags().GetBool("user")
-	if err := checkPrivileges(user); err != nil {
+	dryRun, _ := c.Flags().GetBool("dry-run")
+	cleanup, _ := c.Flags().GetBool("cleanup")
+	if err := refuseDarwinRoot(runtime.GOOS, os.Geteuid(), "migrate the runner service", pathExists); err != nil {
+		return err
+	}
+	if err := migrateScopeError(runtime.GOOS, user); err != nil {
+		return err
+	}
+	if !dryRun {
+		if err := checkPrivileges(user); err != nil {
+			return err
+		}
+	}
+	paths, err := resolveConfigMigrationPaths(c, user)
+	if err != nil {
 		return err
 	}
 
 	did := false
-
-	copied, err := migrateConfig()
+	configResult, err := migrateConfigFile(paths, dryRun)
 	if err != nil {
 		return fmt.Errorf("config migration failed: %w", err)
 	}
-	if copied {
-		fmt.Printf("  ✓ Copied config %s → %s\n", legacyConfigPath, newConfigPath)
-		did = true
-	}
-
-	migratedSvc, err := migrateService(user)
-	if err != nil {
-		return fmt.Errorf("service migration failed: %w", err)
-	}
-	if migratedSvc {
-		fmt.Printf("  ✓ Reinstalled service under the new name\n")
-		did = true
-	}
-
-	// Service migration succeeded (or there was none) — now safe to remove the
-	// legacy config, but only if the new config is in place. Stat-based so a
-	// re-run also cleans it up.
-	if _, lerr := os.Stat(legacyConfigPath); lerr == nil {
-		if _, nerr := os.Stat(newConfigPath); nerr == nil {
-			if err := os.Remove(legacyConfigPath); err == nil {
-				fmt.Printf("  ✓ Removed legacy config %s\n", legacyConfigPath)
-				did = true
+	legacyInstalled := legacyServiceInstalled(user)
+	if configResult.Found {
+		if dryRun {
+			fmt.Printf("  • Would back up %s under %s (%s, UTC timestamp, SHA-256)\n",
+				configResult.Source, paths.BackupDir, migrationVersionLabel())
+			if configResult.TargetChanged {
+				fmt.Printf("  • Would write validated config %s → %s\n", configResult.Source, configResult.Target)
 			}
+			for _, change := range configResult.Changes {
+				fmt.Printf("  • Would canonicalize %s\n", change)
+			}
+		} else {
+			fmt.Printf("  ✓ Original config backed up at %s\n", configResult.BackupPath)
+			fmt.Printf("    Manifest: %s\n", configResult.ManifestPath)
+			fmt.Printf("    Restore: install -m 600 %s %s\n",
+				shellQuotePath(configResult.BackupPath), shellQuotePath(configResult.Target))
+			if configResult.TargetChanged {
+				fmt.Printf("  ✓ Wrote validated config %s\n", configResult.Target)
+			}
+			for _, change := range configResult.Changes {
+				fmt.Printf("  ✓ Canonicalized %s\n", change)
+			}
+			did = did || configResult.BackupCreated || configResult.TargetChanged
+		}
+	} else if legacyInstalled {
+		return fmt.Errorf("legacy service is installed but no config was found at %s; use --config to specify its config", paths.Source)
+	}
+
+	if dryRun {
+		if configResult.Found || legacyInstalled {
+			printServiceMigrationPlan(user)
+		} else {
+			fmt.Println("  • No service migration needed")
+		}
+		if cleanup {
+			fmt.Printf("  • Would remove legacy Docker volume %s after successful migration\n", legacySharedVolume)
+		}
+		if !configResult.Found && !legacyInstalled && !newServiceInstalled(user) {
+			fmt.Println("  ✓ Nothing to migrate")
+		}
+		return nil
+	}
+
+	if configResult.Found || legacyInstalled {
+		migratedSvc, cutover, err := migrateServiceForCommand(user, paths.Target)
+		if err != nil {
+			if !cutover {
+				if rollbackErr := rollbackConfigMigration(configResult); rollbackErr != nil {
+					err = errors.Join(err, fmt.Errorf("config rollback failed: %w", rollbackErr))
+				}
+			}
+			var ub *untrustedBinaryError
+			if errors.As(err, &ub) {
+				configFlag, _ := c.Flags().GetString("config")
+				backupDirFlag, _ := c.Flags().GetString("backup-dir")
+				return fmt.Errorf("service migration failed: %w%s", err, untrustedBinaryHint(ub.Path, migrateRetryCommand(user, configFlag, backupDirFlag, cleanup)))
+			}
+			return fmt.Errorf("service migration failed: %w", err)
+		}
+		if migratedSvc {
+			fmt.Printf("  ✓ Switched service to runner\n")
+			did = true
 		}
 	}
 
-	if cleaned := migrateVolume(c.Context()); cleaned {
-		fmt.Printf("  ✓ Removed legacy docker volume %s\n", legacySharedVolume)
-		did = true
+	// The original is removed only after the new service is running (or no
+	// service existed), and only for known legacy default paths. Explicit
+	// --config sources are never deleted.
+	if configResult.Found && configResult.RemoveSource && !sameFilePath(configResult.Source, configResult.Target) {
+		if err := os.Remove(configResult.Source); err == nil {
+			fmt.Printf("  ✓ Removed legacy config %s (backup retained)\n", configResult.Source)
+			did = true
+		} else if !os.IsNotExist(err) {
+			warnLegacy("migration succeeded but legacy config %s could not be removed: %v", configResult.Source, err)
+		}
+	}
+
+	if cleanup {
+		if cleaned := migrateVolume(c.Context()); cleaned {
+			fmt.Printf("  ✓ Removed legacy Docker volume %s\n", legacySharedVolume)
+			did = true
+		}
 	}
 
 	if os.Getenv(legacyTokenEnv) != "" {
@@ -84,135 +172,562 @@ func runMigrate(c *cobra.Command, _ []string) error {
 	return nil
 }
 
-// copyFile copies src to dst atomically: it writes to a temp file in the
-// destination directory and renames it into place, so a partial copy never
-// leaves a corrupt dst (a re-run would otherwise mistake it for a finished
-// config). The file is created 0600 because the config may contain a token.
-// dst must not already exist (the caller checks).
-func copyFile(src, dst string) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
+// migrateRetryCommand reruns migrate with the root-only copy of the binary and
+// the options of the failed run; an empty path is an option that was not set.
+func migrateRetryCommand(user bool, configPath, backupDir string, cleanup bool) string {
+	parts := []string{"sudo", rootBinaryPath, "migrate"}
+	if user {
+		parts = append(parts, "--user")
+	} else {
+		parts = append(parts, "--user=false")
 	}
-	defer in.Close()
-	tmp, err := os.CreateTemp(filepath.Dir(dst), ".runner-config-*")
-	if err != nil {
-		return err
+	if configPath != "" {
+		parts = append(parts, "--config", shellQuotePath(configPath))
 	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName) // no-op once renamed; cleans up on any failure
-	if _, err := io.Copy(tmp, in); err != nil {
-		tmp.Close()
-		return err
+	if backupDir != "" {
+		parts = append(parts, "--backup-dir", shellQuotePath(backupDir))
 	}
-	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
-		return err
+	if cleanup {
+		parts = append(parts, "--cleanup")
 	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmpName, dst)
+	return strings.Join(parts, " ")
 }
 
-// migrateConfig copies the legacy config to the new path, KEEPING the legacy
-// file so an old service still works if a later step fails. runMigrate removes
-// the legacy config only after the service migration succeeds. Returns whether
-// it copied. No-op if legacy absent or target already exists.
-func migrateConfig() (bool, error) {
-	if _, err := os.Stat(legacyConfigPath); err != nil {
-		if os.IsNotExist(err) {
-			return false, nil
+func resolveConfigMigrationPaths(c *cobra.Command, user bool) (configMigrationPaths, error) {
+	paths := configMigrationPaths{Mode: "system", Target: newConfigPath, DirPerm: 0o755, RemoveSource: true}
+	if user {
+		target, err := userConfigPath("runner")
+		if err != nil {
+			return paths, err
 		}
-		return false, err
+		paths.Mode = "user"
+		paths.DirPerm = 0o700
+		paths.Target = target
 	}
-	if _, err := os.Stat(newConfigPath); err == nil {
-		warnLegacy("legacy config %s exists but %s is already present — leaving both, not overwriting", legacyConfigPath, newConfigPath)
-		return false, nil
-	} else if !os.IsNotExist(err) {
-		return false, err
-	}
-	if err := os.MkdirAll(filepath.Dir(newConfigPath), 0o755); err != nil {
-		return false, err
-	}
-	if err := copyFile(legacyConfigPath, newConfigPath); err != nil {
-		return false, err
-	}
-	return true, nil
-}
-
-// migrateService migrates the service atomically: install the new service
-// (without starting) BEFORE removing the legacy one, so a failure leaves the
-// OLD service intact and the migration re-runnable. Returns whether it acted.
-func migrateService(user bool) (bool, error) {
-	if !legacyServiceInstalled(user) {
-		// If the new service is installed but a previous migration's start step
-		// failed, ensure it's running (idempotent). Otherwise nothing to migrate.
-		if newServiceInstalled(user) {
-			if mgr, err := newServiceManager(); err == nil {
-				_ = mgr.start(user)
+	explicitSource, _ := c.Flags().GetString("config")
+	if explicitSource != "" {
+		absolute, err := filepath.Abs(explicitSource)
+		if err != nil {
+			return paths, fmt.Errorf("resolve source config: %w", err)
+		}
+		paths.Source = absolute
+		paths.RemoveSource = false
+	} else if invocation, discoverErr := discoverLegacyServiceInvocation(user); discoverErr == nil && invocation.ConfigPath != "" {
+		paths.Source = invocation.ConfigPath
+		paths.RemoveSource = isDefaultLegacyConfigPath(invocation.ConfigPath, user)
+	} else if user {
+		source, err := userConfigPath("runscaler")
+		paths.Source = source
+		if err != nil {
+			return paths, err
+		}
+		// Some user services historically referenced the system legacy config.
+		// It is safe to copy when readable, but a user migration must never try
+		// to remove a root-owned source.
+		if _, err := os.Stat(paths.Source); os.IsNotExist(err) {
+			// Prefer the migrated user config on repeated runs. System paths
+			// are read-only fallbacks, including installs already named runner.
+			for _, candidate := range []string{paths.Target, legacyConfigPath, newConfigPath} {
+				if _, candidateErr := os.Stat(candidate); candidateErr == nil || !os.IsNotExist(candidateErr) {
+					paths.Source = candidate
+					paths.RemoveSource = false
+					break
+				}
 			}
 		}
-		return false, nil
+	} else {
+		paths.Source = legacyConfigPath
 	}
-	mgr, err := newServiceManager()
-	if err != nil {
-		return false, err
-	}
-	// 1. Install the new service (not started) if not already present. On
-	//    failure the legacy service is untouched — host keeps running, re-runnable.
-	if !newServiceInstalled(user) {
-		binaryPath, err := os.Executable()
+	backupDir, _ := c.Flags().GetString("backup-dir")
+	if backupDir != "" {
+		absolute, err := filepath.Abs(backupDir)
 		if err != nil {
-			return false, fmt.Errorf("cannot detect binary path: %w", err)
+			return paths, fmt.Errorf("resolve backup directory: %w", err)
 		}
-		if resolved, rerr := filepath.EvalSymlinks(binaryPath); rerr == nil {
-			binaryPath = resolved
+		paths.BackupDir = absolute
+	} else {
+		id := layout.CurrentIdentity()
+		// The migration scope, not the invoking user, owns the backups: a
+		// --user=false dry run by a user still plans system locations.
+		id.Root = !user
+		lay, err := layout.For(id)
+		if err != nil {
+			return paths, fmt.Errorf("resolve backup directory: %w", err)
 		}
-		if err := mgr.install(installOpts{
-			user:       user,
-			configPath: newConfigPath,
-			binaryPath: binaryPath,
-			backend:    detectBackend(newConfigPath),
-			noStart:    true,
-		}); err != nil {
-			return false, err
-		}
+		paths.BackupDir = lay.BackupDir
 	}
-	// 2. Remove the legacy service now that the new one is in place.
+	return paths, nil
+}
+
+type legacyServiceInvocation struct {
+	BinaryPath string
+	ConfigPath string
+}
+
+func discoverLegacyServiceInvocation(user bool) (legacyServiceInvocation, error) {
+	var servicePath string
 	switch runtime.GOOS {
 	case "linux":
-		if err := removeSystemdUnit(user, legacySystemdUnit, legacyServiceName); err != nil {
-			return true, err
+		unitDir := systemdSystemDir
+		if user {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				return legacyServiceInvocation{}, err
+			}
+			unitDir = filepath.Join(home, ".config", "systemd", "user")
 		}
+		servicePath = filepath.Join(unitDir, legacySystemdUnit)
 	case "darwin":
-		if err := removeLaunchdPlist(legacyLaunchdPlistPath(user)); err != nil {
-			return true, err
+		servicePath = legacyLaunchdPlistPath(user)
+	default:
+		return legacyServiceInvocation{}, fmt.Errorf("unsupported platform: %s", runtime.GOOS)
+	}
+	data, err := os.ReadFile(servicePath)
+	if err != nil {
+		return legacyServiceInvocation{}, err
+	}
+	if runtime.GOOS == "linux" {
+		return parseSystemdServiceInvocation(data)
+	}
+	return parseLaunchdServiceInvocation(data)
+}
+
+func parseSystemdServiceInvocation(data []byte) (legacyServiceInvocation, error) {
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "ExecStart=") {
+			continue
+		}
+		args, err := splitSystemdCommand(strings.TrimPrefix(line, "ExecStart="))
+		if err != nil {
+			return legacyServiceInvocation{}, err
+		}
+		return invocationFromArgs(args)
+	}
+	return legacyServiceInvocation{}, errors.New("legacy systemd unit has no ExecStart")
+}
+
+// splitSystemdCommand splits an ExecStart value into words, undoing the
+// quoting systemdExecArg and systemdExecutable apply and accepting the
+// unquoted form older releases wrote. Word 0 (the executable) only undoes the
+// %% doubling: systemd never expands $VARIABLES in the executable path, so
+// systemdExecutable never doubled a literal $ there. Every later word undoes
+// both %% and $$, matching systemdExecArg.
+func splitSystemdCommand(s string) ([]string, error) {
+	var (
+		words   []string
+		current strings.Builder
+		quote   rune
+		inWord  bool
+	)
+	runes := []rune(s)
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
+		switch {
+		case quote != 0 && r == '\\':
+			if i+1 >= len(runes) {
+				return nil, errors.New("ExecStart ends with a dangling backslash")
+			}
+			i++
+			current.WriteRune(runes[i])
+		case quote != 0 && r == quote:
+			quote = 0
+		case quote == 0 && (r == '"' || r == '\''):
+			quote, inWord = r, true
+		case quote == 0 && unicode.IsSpace(r):
+			if inWord {
+				words = append(words, current.String())
+				current.Reset()
+				inWord = false
+			}
+		default:
+			current.WriteRune(r)
+			inWord = true
+		}
+	}
+	if quote != 0 {
+		return nil, errors.New("ExecStart has an unterminated quote")
+	}
+	if inWord {
+		words = append(words, current.String())
+	}
+	executableUnescape := strings.NewReplacer("%%", "%")
+	argUnescape := strings.NewReplacer("%%", "%", "$$", "$")
+	for i, word := range words {
+		if i == 0 {
+			words[i] = executableUnescape.Replace(word)
+		} else {
+			words[i] = argUnescape.Replace(word)
+		}
+	}
+	return words, nil
+}
+
+func parseLaunchdServiceInvocation(data []byte) (legacyServiceInvocation, error) {
+	decoder := xml.NewDecoder(bytes.NewReader(data))
+	var (
+		lastKey        string
+		inProgramArray bool
+		args           []string
+	)
+	for {
+		token, err := decoder.Token()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return legacyServiceInvocation{}, fmt.Errorf("parse legacy launchd plist: %w", err)
+		}
+		switch element := token.(type) {
+		case xml.StartElement:
+			switch element.Name.Local {
+			case "key":
+				if err := decoder.DecodeElement(&lastKey, &element); err != nil {
+					return legacyServiceInvocation{}, err
+				}
+			case "array":
+				inProgramArray = lastKey == "ProgramArguments"
+			case "string":
+				if inProgramArray {
+					var value string
+					if err := decoder.DecodeElement(&value, &element); err != nil {
+						return legacyServiceInvocation{}, err
+					}
+					args = append(args, value)
+				}
+			}
+		case xml.EndElement:
+			if element.Name.Local == "array" && inProgramArray {
+				inProgramArray = false
+			}
+		}
+	}
+	return invocationFromArgs(args)
+}
+
+func invocationFromArgs(args []string) (legacyServiceInvocation, error) {
+	if len(args) == 0 {
+		return legacyServiceInvocation{}, errors.New("legacy service has no program arguments")
+	}
+	invocation := legacyServiceInvocation{BinaryPath: args[0]}
+	for i, arg := range args[1:] {
+		switch {
+		case arg == "--config" && i+2 < len(args):
+			invocation.ConfigPath = args[i+2]
+		case strings.HasPrefix(arg, "--config="):
+			invocation.ConfigPath = strings.TrimPrefix(arg, "--config=")
+		}
+	}
+	if invocation.ConfigPath == "" {
+		return invocation, errors.New("legacy service has no --config argument")
+	}
+	return invocation, nil
+}
+
+func isDefaultLegacyConfigPath(path string, user bool) bool {
+	if sameFilePath(path, legacyConfigPath) {
+		return !user
+	}
+	if !user {
+		return false
+	}
+	legacy, err := userConfigPath("runscaler")
+	return err == nil && sameFilePath(path, legacy)
+}
+
+func printServiceMigrationPlan(user bool) {
+	switch {
+	case legacyServiceInstalled(user):
+		fmt.Println("  • Would install runner service, stop runscaler, start runner, verify cutover, then remove runscaler")
+	case newServiceInstalled(user):
+		fmt.Println("  • Would verify the existing runner service is running")
+	default:
+		fmt.Println("  • No service migration needed")
+	}
+}
+
+// migrateService performs a rollback-capable cutover. The legacy service is
+// stopped but not removed until runner has started and is observable. cutover
+// is true once runner owns the service role; callers must not roll back its
+// config after that point even if legacy file cleanup reports an error.
+func migrateService(user bool, configPath string) (acted, cutover bool, err error) {
+	return migrateServiceWithDeps(user, configPath, defaultMigrationServiceDeps())
+}
+
+type migrationServiceDeps struct {
+	legacyInstalled   func(bool) bool
+	newInstalled      func(bool) bool
+	legacyRunning     func(bool) bool
+	newRunning        func(bool) bool
+	waitNew           func(bool) bool
+	validateNewConfig func(bool, string) error
+	newManager        func() (serviceManager, error)
+	executable        func() (string, error)
+	prepareInstall    func(user bool, configPath, binaryPath string) (installOpts, error)
+	validateBinary    func(user bool, path string) (string, error)
+	stopLegacy        func(bool) error
+	startLegacy       func(bool) error
+	removeLegacyFile  func(bool) error
+}
+
+func defaultMigrationServiceDeps() migrationServiceDeps {
+	return migrationServiceDeps{
+		legacyInstalled:   legacyServiceInstalled,
+		newInstalled:      newServiceInstalled,
+		legacyRunning:     legacyServiceRunning,
+		newRunning:        newServiceRunning,
+		waitNew:           func(user bool) bool { return waitForNewService(user, 2*time.Second) },
+		validateNewConfig: validateInstalledNewServiceConfig,
+		newManager:        newServiceManager,
+		executable:        os.Executable,
+		prepareInstall: func(user bool, configPath, binaryPath string) (installOpts, error) {
+			// Migration has already written and validated the target config.
+			opts, warnings, err := buildInstallOpts(user, configPath, binaryPath, true, os.Getenv)
+			for _, w := range warnings {
+				warnLegacy("%s", w)
+			}
+			return opts, err
+		},
+		validateBinary:   validateServiceBinaryFor,
+		stopLegacy:       stopLegacyService,
+		startLegacy:      startLegacyService,
+		removeLegacyFile: removeLegacyServiceFile,
+	}
+}
+
+func migrateServiceWithDeps(user bool, configPath string, deps migrationServiceDeps) (acted, cutover bool, err error) {
+	if deps.newInstalled(user) {
+		if err := deps.validateNewConfig(user, configPath); err != nil {
+			return false, false, err
+		}
+	}
+	if !deps.legacyInstalled(user) {
+		if deps.newInstalled(user) {
+			if deps.newRunning(user) {
+				return false, true, nil
+			}
+			mgr, err := deps.newManager()
+			if err != nil {
+				return false, false, err
+			}
+			if err := mgr.start(user); err != nil {
+				return false, false, err
+			}
+			if !deps.waitNew(user) {
+				return false, false, errors.New("runner service start returned success but service is not active")
+			}
+			return true, true, nil
+		}
+		return false, true, nil
+	}
+	mgr, err := deps.newManager()
+	if err != nil {
+		return false, false, err
+	}
+	installedNew := false
+	if !deps.newInstalled(user) {
+		binaryPath, err := deps.executable()
+		if err != nil {
+			return false, false, fmt.Errorf("cannot detect binary path: %w", err)
+		}
+		opts, err := deps.prepareInstall(user, configPath, binaryPath)
+		if err != nil {
+			return false, false, err
+		}
+		opts.noStart = true
+		if err := installService(mgr, opts, deps.validateBinary); err != nil {
+			// install may have written the service file before a daemon command
+			// failed. Remove only the unit this attempt created.
+			if deps.newInstalled(user) {
+				_ = mgr.uninstall(user)
+			}
+			return false, false, err
+		}
+		installedNew = true
+	}
+
+	legacyWasRunning := deps.legacyRunning(user)
+	if legacyWasRunning {
+		if err := deps.stopLegacy(user); err != nil {
+			if installedNew {
+				_ = mgr.uninstall(user)
+			}
+			return installedNew, false, fmt.Errorf("stop legacy service: %w", err)
+		}
+	}
+
+	if !deps.newRunning(user) {
+		if err := mgr.start(user); err != nil {
+			return installedNew, false, rollbackServiceCutover(user, mgr, installedNew, legacyWasRunning, deps.startLegacy, err)
+		}
+	}
+	if !deps.waitNew(user) {
+		return installedNew, false, rollbackServiceCutover(user, mgr, installedNew, legacyWasRunning, deps.startLegacy,
+			errors.New("runner service start returned success but service is not active"))
+	}
+
+	// runner is active. Only now remove the stopped legacy service definition.
+	if err := deps.removeLegacyFile(user); err != nil {
+		return true, true, err
+	}
+	return true, true, nil
+}
+
+func validateInstalledNewServiceConfig(user bool, migrationTarget string) error {
+	invocation, err := discoverNewServiceInvocation(user)
+	if err != nil {
+		return fmt.Errorf("inspect existing runner service: %w", err)
+	}
+	if sameFilePath(invocation.ConfigPath, migrationTarget) {
+		return nil
+	}
+	userFlag := ""
+	if user {
+		userFlag = " --user"
+	}
+	return fmt.Errorf("existing runner service uses config %s, but migration target is %s; run `runner service uninstall%s` and rerun migration",
+		invocation.ConfigPath, migrationTarget, userFlag)
+}
+
+func discoverNewServiceInvocation(user bool) (legacyServiceInvocation, error) {
+	var servicePath string
+	switch runtime.GOOS {
+	case "linux":
+		unitDir := systemdSystemDir
+		if user {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				return legacyServiceInvocation{}, err
+			}
+			unitDir = filepath.Join(home, ".config", "systemd", "user")
+		}
+		servicePath = filepath.Join(unitDir, systemdUnitFile)
+	case "darwin":
+		if user {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				return legacyServiceInvocation{}, err
+			}
+			servicePath = filepath.Join(home, "Library", "LaunchAgents", launchdPlistFile)
+		} else {
+			servicePath = filepath.Join(launchdSystemDir, launchdPlistFile)
 		}
 	default:
-		return true, fmt.Errorf("unsupported platform: %s", runtime.GOOS)
+		return legacyServiceInvocation{}, fmt.Errorf("unsupported platform: %s", runtime.GOOS)
 	}
-	// 3. Start the new service.
-	if err := mgr.start(user); err != nil {
-		return true, fmt.Errorf("new service installed but failed to start (run `runner service start` to retry): %w", err)
+	data, err := os.ReadFile(servicePath)
+	if err != nil {
+		return legacyServiceInvocation{}, err
 	}
-	return true, nil
+	if runtime.GOOS == "linux" {
+		return parseSystemdServiceInvocation(data)
+	}
+	return parseLaunchdServiceInvocation(data)
+}
+
+func rollbackServiceCutover(user bool, mgr serviceManager, installedNew, legacyWasRunning bool, startLegacy func(bool) error, cause error) error {
+	var rollbackErrors []error
+	if installedNew {
+		if err := mgr.uninstall(user); err != nil {
+			rollbackErrors = append(rollbackErrors, fmt.Errorf("remove new service: %w", err))
+		}
+	} else {
+		if err := mgr.stop(user); err != nil {
+			rollbackErrors = append(rollbackErrors, fmt.Errorf("stop new service: %w", err))
+		}
+	}
+	if legacyWasRunning {
+		if err := startLegacy(user); err != nil {
+			rollbackErrors = append(rollbackErrors, fmt.Errorf("restart legacy service: %w", err))
+		}
+	}
+	if len(rollbackErrors) == 0 {
+		return fmt.Errorf("runner service failed to start; legacy service restored: %w", cause)
+	}
+	return errors.Join(append([]error{fmt.Errorf("runner service failed to start: %w", cause)}, rollbackErrors...)...)
+}
+
+func legacyServiceRunning(user bool) bool {
+	switch runtime.GOOS {
+	case "linux":
+		args := append(systemdUserFlag(user), "is-active", "--quiet", legacyServiceName)
+		return runCmd("systemctl", args...) == nil
+	case "darwin":
+		label := strings.TrimSuffix(legacyLaunchdPlist, filepath.Ext(legacyLaunchdPlist))
+		return runCmd("launchctl", "list", label) == nil
+	default:
+		return false
+	}
+}
+
+func newServiceRunning(user bool) bool {
+	switch runtime.GOOS {
+	case "linux":
+		args := append(systemdUserFlag(user), "is-active", "--quiet", serviceName)
+		return runCmd("systemctl", args...) == nil
+	case "darwin":
+		return runCmd("launchctl", "list", launchdLabel) == nil
+	default:
+		return false
+	}
+}
+
+func waitForNewService(user bool, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	var activeSince time.Time
+	for {
+		if newServiceRunning(user) {
+			if activeSince.IsZero() {
+				activeSince = time.Now()
+			} else if time.Since(activeSince) >= 500*time.Millisecond {
+				return true
+			}
+		} else {
+			activeSince = time.Time{}
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func stopLegacyService(user bool) error {
+	switch runtime.GOOS {
+	case "linux":
+		return runCmd("systemctl", append(systemdUserFlag(user), "stop", legacyServiceName)...)
+	case "darwin":
+		return runCmd("launchctl", "unload", legacyLaunchdPlistPath(user))
+	default:
+		return fmt.Errorf("unsupported platform: %s", runtime.GOOS)
+	}
+}
+
+func startLegacyService(user bool) error {
+	switch runtime.GOOS {
+	case "linux":
+		return runCmd("systemctl", append(systemdUserFlag(user), "start", legacyServiceName)...)
+	case "darwin":
+		return runCmd("launchctl", "load", "-w", legacyLaunchdPlistPath(user))
+	default:
+		return fmt.Errorf("unsupported platform: %s", runtime.GOOS)
+	}
 }
 
 // migrateVolume removes the legacy shared docker volume. Best-effort; returns
 // whether it removed anything.
 func migrateVolume(ctx context.Context) bool {
-	client, err := dockerclient.NewClientWithOpts(dockerclient.FromEnv, dockerclient.WithAPIVersionNegotiation())
+	client, err := dockerclient.New(dockerclient.FromEnv)
 	if err != nil {
 		return false
 	}
-	defer client.Close()
-	if _, err := client.VolumeInspect(ctx, legacySharedVolume); err != nil {
+	defer func() { _ = client.Close() }()
+	if _, err := client.VolumeInspect(ctx, legacySharedVolume, dockerclient.VolumeInspectOptions{}); err != nil {
 		return false
 	}
 	rmCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	if err := client.VolumeRemove(rmCtx, legacySharedVolume, true); err != nil {
+	if _, err := client.VolumeRemove(rmCtx, legacySharedVolume, dockerclient.VolumeRemoveOptions{Force: true}); err != nil {
 		warnLegacy("found legacy volume %s but could not remove it: %v", legacySharedVolume, err)
 		return false
 	}

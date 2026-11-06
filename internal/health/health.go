@@ -6,15 +6,27 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"sort"
 	"sync"
 	"time"
 
 	"github.com/ysya/runscaler/internal/metrics"
 )
 
-// RunnerCounter provides runner count information.
-type RunnerCounter interface {
-	RunnerCounts() (idle, busy int)
+// InstanceCounter provides runner count information.
+type InstanceCounter interface {
+	InstanceCounts() (idle, busy int)
+}
+
+// InstanceLifecycleCounter optionally exposes transient controller phases.
+// Health integrations implementing only InstanceCounter remain compatible.
+type InstanceLifecycleCounter interface {
+	InstanceLifecycleCounts() (provisioning, idle, busy, removing int)
+}
+
+// RuntimeStatusProvider optionally reports provisioning and drain state.
+type RuntimeStatusProvider interface {
+	RuntimeStatus() metrics.RuntimeStatus
 }
 
 // MetricsProvider provides a snapshot of listener metrics for a scale set.
@@ -24,21 +36,36 @@ type MetricsProvider interface {
 
 // HealthServer provides /healthz and /readyz endpoints for monitoring.
 type HealthServer struct {
-	server    *http.Server
-	startTime time.Time
-	version   string
-	logger    *slog.Logger
-	mu        sync.RWMutex
-	scalers   map[string]RunnerCounter
-	metrics   map[string]MetricsProvider
+	server      *http.Server
+	startTime   time.Time
+	version     string
+	logger      *slog.Logger
+	mu          sync.RWMutex
+	controllers map[string]InstanceCounter
+	metrics     map[string]MetricsProvider
+	states      map[string]connectionState
+	diskFn      func() []DiskStatus
+	capacityFn  func() CapacityStatus
+}
+
+type connectionState struct {
+	Ready         bool
+	LastError     string
+	LastConnected time.Time
 }
 
 // ScaleSetStatus represents the status of a single scale set.
 type ScaleSetStatus struct {
-	Name    string         `json:"name"`
-	Idle    int            `json:"idle"`
-	Busy    int            `json:"busy"`
-	Metrics *MetricsStatus `json:"metrics,omitempty"`
+	Name          string                 `json:"name"`
+	Ready         bool                   `json:"ready"`
+	LastError     string                 `json:"last_error,omitempty"`
+	LastConnected string                 `json:"last_connected,omitempty"`
+	Idle          int                    `json:"idle"`
+	Busy          int                    `json:"busy"`
+	Provisioning  int                    `json:"provisioning,omitempty"`
+	Removing      int                    `json:"removing,omitempty"`
+	Metrics       *MetricsStatus         `json:"metrics,omitempty"`
+	Runtime       *metrics.RuntimeStatus `json:"runtime,omitempty"`
 }
 
 // MetricsStatus holds listener-level metrics for a scale set.
@@ -51,22 +78,46 @@ type MetricsStatus struct {
 	RunningJobs    int   `json:"running_jobs,omitempty"`
 }
 
+// DiskStatus reports capacity for one filesystem a configured
+// cachestore.CacheStore lives on. It is populated from
+// internal/diskguard.StatFor only — a plain statfs — never from a store's
+// Measure, which can be expensive (it may walk a volume or spawn a helper
+// container): /healthz can be polled, so its disk section must stay cheap
+// on every call. For each store's actual measured usage, see the
+// 'runner cache' command instead.
+type DiskStatus struct {
+	Filesystem  string  `json:"filesystem"`
+	FreePercent float64 `json:"free_percent"`
+	FreeBytes   uint64  `json:"free_bytes"`
+	TotalBytes  uint64  `json:"total_bytes"`
+}
+
+// CapacityStatus reports process-wide runner capacity leased across all scale
+// sets.
+type CapacityStatus struct {
+	Limit int `json:"limit"`
+	InUse int `json:"in_use"`
+}
+
 // HealthResponse is the JSON response for /healthz.
 type HealthResponse struct {
 	Status    string           `json:"status"`
 	Version   string           `json:"version"`
 	Uptime    string           `json:"uptime"`
 	ScaleSets []ScaleSetStatus `json:"scale_sets"`
+	Disk      []DiskStatus     `json:"disk,omitempty"`
+	Capacity  *CapacityStatus  `json:"capacity,omitempty"`
 }
 
 // NewHealthServer creates a new health check HTTP server.
 func NewHealthServer(port int, version string, logger *slog.Logger) *HealthServer {
 	h := &HealthServer{
-		startTime: time.Now(),
-		version:   version,
-		logger:    logger,
-		scalers:   make(map[string]RunnerCounter),
-		metrics:   make(map[string]MetricsProvider),
+		startTime:   time.Now(),
+		version:     version,
+		logger:      logger,
+		controllers: make(map[string]InstanceCounter),
+		metrics:     make(map[string]MetricsProvider),
+		states:      make(map[string]connectionState),
 	}
 
 	mux := http.NewServeMux()
@@ -74,7 +125,11 @@ func NewHealthServer(port int, version string, logger *slog.Logger) *HealthServe
 	mux.HandleFunc("GET /readyz", h.handleReadyz)
 
 	h.server = &http.Server{
-		Handler: mux,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 	return h
 }
@@ -89,18 +144,39 @@ func (h *HealthServer) Shutdown(ctx context.Context) error {
 	return h.server.Shutdown(ctx)
 }
 
-// RegisterScaler adds a scaler to be reported in health checks.
-func (h *HealthServer) RegisterScaler(name string, s RunnerCounter) {
+// RegisterController adds a scale set controller to health reporting.
+func (h *HealthServer) RegisterController(name string, controller InstanceCounter) {
 	h.mu.Lock()
-	h.scalers[name] = s
+	h.controllers[name] = controller
+	h.states[name] = connectionState{}
 	h.mu.Unlock()
 }
 
-// UnregisterScaler removes a scaler from health reporting.
-func (h *HealthServer) UnregisterScaler(name string) {
+// UnregisterController removes a scale set controller from health reporting.
+func (h *HealthServer) UnregisterController(name string) {
 	h.mu.Lock()
-	delete(h.scalers, name)
+	delete(h.controllers, name)
 	delete(h.metrics, name)
+	delete(h.states, name)
+	h.mu.Unlock()
+}
+
+func (h *HealthServer) MarkConnected(name string) {
+	h.mu.Lock()
+	state := h.states[name]
+	state.Ready = true
+	state.LastError = ""
+	state.LastConnected = time.Now()
+	h.states[name] = state
+	h.mu.Unlock()
+}
+
+func (h *HealthServer) MarkDisconnected(name, reason string) {
+	h.mu.Lock()
+	state := h.states[name]
+	state.Ready = false
+	state.LastError = reason
+	h.states[name] = state
 	h.mu.Unlock()
 }
 
@@ -108,6 +184,27 @@ func (h *HealthServer) UnregisterScaler(name string) {
 func (h *HealthServer) RegisterMetrics(name string, m MetricsProvider) {
 	h.mu.Lock()
 	h.metrics[name] = m
+	h.mu.Unlock()
+}
+
+// SetDiskProvider registers the function /healthz calls to populate its
+// disk section — see DiskStatus's doc comment for why it must stay cheap.
+// main wires this to a function that calls internal/diskguard.StatFor per
+// configured cachestore.CacheStore, never Measure. Until this is called,
+// /healthz reports no disk section at all (Disk stays nil, omitted by its
+// omitempty tag) — the same "empty until registered" shape RegisterController
+// gives ScaleSets before any scale set has started.
+func (h *HealthServer) SetDiskProvider(fn func() []DiskStatus) {
+	h.mu.Lock()
+	h.diskFn = fn
+	h.mu.Unlock()
+}
+
+// SetCapacityProvider registers the cheap process-wide capacity snapshot used
+// by /healthz. The callback must not block.
+func (h *HealthServer) SetCapacityProvider(fn func() CapacityStatus) {
+	h.mu.Lock()
+	h.capacityFn = fn
 	h.mu.Unlock()
 }
 
@@ -119,15 +216,48 @@ func (h *HealthServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		Status:    "ok",
 		Version:   h.version,
 		Uptime:    time.Since(h.startTime).Truncate(time.Second).String(),
-		ScaleSets: make([]ScaleSetStatus, 0, len(h.scalers)),
+		ScaleSets: make([]ScaleSetStatus, 0, len(h.controllers)),
+	}
+	if h.diskFn != nil {
+		resp.Disk = h.diskFn()
+	}
+	if h.capacityFn != nil {
+		capacity := h.capacityFn()
+		resp.Capacity = &capacity
 	}
 
-	for name, s := range h.scalers {
-		idle, busy := s.RunnerCounts()
+	names := make([]string, 0, len(h.controllers))
+	for name := range h.controllers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		controller := h.controllers[name]
+		idle, busy := controller.InstanceCounts()
 		ss := ScaleSetStatus{
 			Name: name,
 			Idle: idle,
 			Busy: busy,
+		}
+		if lifecycle, ok := controller.(InstanceLifecycleCounter); ok {
+			ss.Provisioning, ss.Idle, ss.Busy, ss.Removing = lifecycle.InstanceLifecycleCounts()
+		}
+		state := h.states[name]
+		ss.Ready = state.Ready
+		ss.LastError = state.LastError
+		if runtime, ok := controller.(RuntimeStatusProvider); ok {
+			snapshot := runtime.RuntimeStatus()
+			ss.Runtime = &snapshot
+			ss.Ready = ss.Ready && !snapshot.Draining && !snapshot.Degraded
+			if snapshot.Degraded && ss.LastError == "" {
+				ss.LastError = "runner startup failed: " + snapshot.FailureReason
+			}
+		}
+		if !ss.Ready {
+			resp.Status = "degraded"
+		}
+		if !state.LastConnected.IsZero() {
+			ss.LastConnected = state.LastConnected.Format(time.RFC3339)
 		}
 		if m, ok := h.metrics[name]; ok {
 			snap := m.Snapshot()
@@ -154,7 +284,20 @@ func (h *HealthServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
 
 func (h *HealthServer) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	h.mu.RLock()
-	ready := len(h.scalers) > 0
+	ready := len(h.controllers) > 0
+	for name := range h.controllers {
+		if !h.states[name].Ready {
+			ready = false
+			break
+		}
+		if runtime, ok := h.controllers[name].(RuntimeStatusProvider); ok {
+			status := runtime.RuntimeStatus()
+			if status.Draining || status.Degraded {
+				ready = false
+				break
+			}
+		}
+	}
 	h.mu.RUnlock()
 
 	w.Header().Set("Content-Type", "application/json")

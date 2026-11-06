@@ -5,19 +5,67 @@
 
 log-level = "info"
 log-format = "text"
+concurrent = 0                          # host-wide limit; 0 = sum of all max-runners
+health-address = "127.0.0.1"              # set 0.0.0.0 explicitly for remote monitoring
 health-port = 8080
+# drain-timeout = "2h"                    # SIGTERM/SIGQUIT wait for busy jobs; "0s" disables drain
+# log-file = "/var/log/runner/runner.log" # default: /var/log/runner/runner.log (root), ~/.local/state/runner/runner.log (Linux), ~/Library/Logs/runner/runner.log (macOS); "" disables
 
 # --- Defaults (inherited by all scale sets unless overridden) ---
 # A key set in a [[scaleset]] always wins, even with a zero/empty value:
 # e.g. `memory = 0` (unlimited) or `shared-volume = ""` override the default.
 
-# Backend: "docker" (Linux containers) or "tart" (macOS VMs)
-backend = "docker"
+# Instance provider: "docker" (Linux containers) or "tart" (macOS VMs)
+provider = "docker"
 
 # Default runner image and group
 runner-image = "ghcr.io/actions/actions-runner:latest"
 runner-group = "default"
 max-runners = 10
+
+# disable-update = true   # bar GitHub from updating the runner binary in the
+#                         # image/VM (default). false does not survive runner
+#                         # retirement: each runner starts at the image's
+#                         # version and GitHub refuses a retired one before any
+#                         # update — keep the image's runner current instead.
+
+# --- Single scale set mode ---
+# Use top-level fields when managing a single org/repo.
+# These are ignored when [[scaleset]] entries exist.
+#
+# Placed here, before [disk]/[docker]/[tart] below, on purpose: TOML has no
+# way to "close" a table other than opening the next one, so bare keys like
+# these must never directly follow an active table — see the note above
+# [[docker.cache]] for the same rule applied inside [docker].
+
+# url = "https://github.com/your-org"
+# name = "my-runners"
+# token = "ghp_xxx"
+# Or use GitHub App authentication instead of token:
+# github-app.client-id = "Iv1.example"
+# github-app.installation-id = 123456
+# github-app.private-key-file = "/absolute/path/to/runner-app.pem"
+# Use exactly one key source; the environment variable contains the full RSA PEM:
+# github-app.private-key-env = "RUNNER_GITHUB_APP_KEY"
+# App configuration disables ambient RUNNER_TOKEN/RUNSCALER_TOKEN fallback.
+# Explicit token + App configuration is rejected.
+# max-runners = 10
+# min-runners = 0
+# labels = ["self-hosted", "linux"]
+
+# --- Disk guard ---
+# Host-wide: watches every scale set's stores grouped by filesystem, not
+# part of any one scale set. Reclaims space only under real pressure — see
+# README's Caching section for the three-layer model this fits into
+# (guard / each store's own retention settings / `runner cache` visibility).
+# All values below are the defaults; uncomment only what you want to change.
+
+# [disk]
+# guard = true         # reclaim under disk pressure; set false if this host's disk isn't runner's to manage
+# min-free = "10%"     # free-space floor that triggers reclamation: a percentage of the filesystem, or a size like "20GB"
+# target-free = "20%"  # free-space level reclamation aims to restore before stopping; must be greater than min-free
+# interval = "1h"      # how often the periodic check runs
+# max-tier = 3         # highest reclaim tier allowed (1-4); tier 4 wipes cache volumes, so it needs explicit opt-in
 
 [docker]
 socket = "/var/run/docker.sock"
@@ -32,13 +80,29 @@ dind = true
 #   "gradle-cache:/home/runner/.gradle",
 #   "pnpm-store:/home/runner/.local/share/pnpm/store",
 # ]
-# shared-volume-ttl = "168h"               # delete shared-volume files older than this; 0 = disabled
-# shared-volume-cleanup-interval = "6h"    # how often to run the TTL sweep
-# prune = true                             # periodic prune of the shared daemon (assumes it is dedicated to runners); default: on
+# shared-volume-max-age = "168h"           # delete shared-volume files older than this; unset = never reclaimed
+# shared-volume-cleanup-interval = "6h"    # how often to run the cleanup sweep
+# buildx-cleanup = true                    # daemon-wide; opt in only when dedicated to runners
+# buildx-cleanup-ttl = "24h"
+# buildx-cleanup-interval = "6h"
+# prune = true                             # daemon-wide; opt in only when dedicated to runners
 # prune-interval = "6h"                    # how often the runtime prune sweep runs
 # prune-ttl = "24h"                        # remove stopped containers and dangling images older than this
 # build-cache-max-age = "168h"             # prune build cache entries not used within this window
 # build-cache-budget = 0                   # cap daemon build cache to N GB (LRU-evicted down to the cap); 0 = no cap
+
+# Long form of cache-volumes, for an entry that needs a retention budget. A
+# name also listed in cache-volumes above is replaced entirely by its
+# [[docker.cache]] entry, not merged field by field. Keep this the LAST
+# [docker] entry in the file: TOML has no way to "close" a table other than
+# opening the next one, so every bare key below an array-of-tables header
+# belongs to that array entry, not back to [docker] — see [tart] right
+# after this for where the table actually ends.
+# [[docker.cache]]
+# name = "ccache"
+# path = "/home/runner/.ccache"
+# budget = "20GB"                          # absolute size only (no percentages); enforced independently of disk pressure
+# on-exceed = "warn"                       # warn (default: log only, leave data for the tool's own LRU) | wipe (delete everything)
 
 # [tart]
 # runner-dir = "/Users/admin/actions-runner"
@@ -46,25 +110,16 @@ dind = true
 # memory = 0     # MB, 0 = use image default
 # pool-size = 0  # pre-warmed VMs, 0 = disabled
 # home = "/Users/admin/.tart"             # TART_HOME for tart CLI ("" = ~/.tart)
-# cache-space-budget = 0                  # cap OCI/IPSW cache size in GB; 0 = disabled
+# cache-budget = 0                        # cap OCI/IPSW cache size in GB; 0 = disabled
 # cache-cleanup-interval = "24h"          # how often to run `tart prune --space-budget`
-
-# --- Single scale set mode ---
-# Use top-level fields when managing a single org/repo.
-# These are ignored when [[scaleset]] entries exist.
-
-# url = "https://github.com/your-org"
-# name = "my-runners"
-# token = "ghp_xxx"
-# max-runners = 10
-# min-runners = 0
-# labels = ["self-hosted", "linux"]
+# mtu = 0                                 # guest MTU: 0 = match the host's route to GitHub when it is a VPN tunnel, -1 = off, 1280-1500 = fixed
+# dns = ["1.1.1.1", "8.8.8.8"]            # guest resolvers; [] = keep the one Tart's NAT proxies through the host
 
 # --- Multiple scale sets mode ---
 # Use [[scaleset]] entries to manage multiple orgs/repos from one process.
 # Each entry inherits runner-image, runner-group, max-runners, [docker],
 # and [tart] from the defaults above unless explicitly overridden.
-# Identity fields (url, name, token, labels, min-runners) are per-scaleset
+# Identity fields (url, name, token, github-app, labels, min-runners) are per-scaleset
 # and never inherited from the top level.
 # Unknown keys warn at startup and fail `runner validate`.
 
@@ -72,6 +127,10 @@ dind = true
 # url = "https://github.com/org-a"
 # name = "runners-a"
 # token = "ghp_aaa"
+# For App auth, remove token and set all App references in this entry:
+# github-app.client-id = "Iv1.example"
+# github-app.installation-id = 123456
+# github-app.private-key-env = "ORG_A_APP_KEY"
 # max-runners = 5
 
 # [[scaleset]]
@@ -85,6 +144,6 @@ dind = true
 # url = "https://github.com/org-c"
 # name = "macos-runners"
 # token = "env:TOKEN_ORG_C"
-# backend = "tart"
+# provider = "tart"
 # max-runners = 2
 # runner-image = "ghcr.io/cirruslabs/macos-sequoia-xcode:latest"

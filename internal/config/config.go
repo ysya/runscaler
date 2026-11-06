@@ -4,9 +4,12 @@ import (
 	"context"
 	"fmt"
 	"image/color"
+	"io"
 	"log/slog"
+	"net/netip"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -14,7 +17,8 @@ import (
 	"charm.land/lipgloss/v2"
 	charmlog "charm.land/log/v2"
 	"github.com/actions/scaleset"
-	"github.com/hashicorp/go-retryablehttp"
+
+	"github.com/ysya/runscaler/internal/bytesize"
 )
 
 // Config holds the complete runner configuration.
@@ -25,14 +29,27 @@ import (
 // when no [[scaleset]] entries exist.
 type Config struct {
 	// Global settings (not inherited by scale sets)
-	LogLevel   string `mapstructure:"log-level"`
-	LogFormat  string `mapstructure:"log-format"`
-	HealthPort int    `mapstructure:"health-port"`
-	DryRun     bool   `mapstructure:"dry-run"`
+	LogLevel      string  `mapstructure:"log-level"`
+	LogFormat     string  `mapstructure:"log-format"`
+	HealthPort    int     `mapstructure:"health-port"`
+	HealthAddress string  `mapstructure:"health-address"`
+	DryRun        bool    `mapstructure:"dry-run"`
+	LogFile       *string `mapstructure:"log-file"`
+	// Concurrent is the GitLab Runner-style process-wide instance limit. Zero
+	// automatically uses the sum of resolved scale-set max-runners values.
+	Concurrent int `mapstructure:"concurrent"`
+	// DrainTimeout is a pointer so an omitted value can inherit the two-hour
+	// default while an explicit "0s" can disable draining.
+	DrainTimeout *time.Duration `mapstructure:"drain-timeout"`
 
 	// Default values for scale sets + single-mode fields.
-	// Squashed so TOML keys (url, name, backend, etc.) stay at the top level.
+	// Squashed so TOML keys (url, name, provider, etc.) stay at the top level.
 	Defaults ScaleSetConfig `mapstructure:",squash"`
+
+	// Disk configures the periodic disk-pressure guard (see DiskConfig).
+	// Global like the fields above: one guard watches every scale set's
+	// stores host-wide, grouped by filesystem rather than by scale set.
+	Disk DiskConfig `mapstructure:"disk"`
 
 	// Multi-scaleset mode: entries as produced by Load, with map-level
 	// inheritance from the top-level defaults already applied.
@@ -49,24 +66,38 @@ type Config struct {
 // the map level: a key present in a [[scaleset]] entry always wins, even
 // when set to a zero value.
 type ScaleSetConfig struct {
-	RegistrationURL string   `mapstructure:"url"`
-	ScaleSetName    string   `mapstructure:"name"`
-	Token           string   `mapstructure:"token"`
-	MaxRunners      int      `mapstructure:"max-runners"`
-	MinRunners      int      `mapstructure:"min-runners"`
-	Labels          []string `mapstructure:"labels"`
-	RunnerGroup     string   `mapstructure:"runner-group"`
-	RunnerImage     string   `mapstructure:"runner-image"`
-	Backend         string   `mapstructure:"backend"`
+	RegistrationURL string           `mapstructure:"url"`
+	ScaleSetName    string           `mapstructure:"name"`
+	Token           string           `mapstructure:"token"`
+	MaxRunners      int              `mapstructure:"max-runners"`
+	MinRunners      int              `mapstructure:"min-runners"`
+	Labels          []string         `mapstructure:"labels"`
+	RunnerGroup     string           `mapstructure:"runner-group"`
+	RunnerImage     string           `mapstructure:"runner-image"`
+	Provider        string           `mapstructure:"provider"`
+	GitHubApp       *GitHubAppConfig `mapstructure:"github-app"`
 
-	// Docker backend settings
+	// DisableUpdate stops GitHub from updating the runner binary inside the
+	// container or VM. Pointer: nil = inherit default (true), matching the
+	// image-based model — the runner is refreshed by rebuilding the image, and
+	// ephemeral runners skip a download on every job.
+	//
+	// Setting false does not protect an image from runner retirement: every
+	// ephemeral runner starts at the image's version, and GitHub refuses a
+	// retired version ("Runner version vX is deprecated and cannot receive
+	// messages") on the same message poll that would carry the update. It
+	// only makes a still-supported runner fetch the latest release before its
+	// first job.
+	DisableUpdate *bool `mapstructure:"disable-update"`
+
+	// Docker provider settings
 	Docker DockerConfig `mapstructure:"docker"`
 
-	// Tart VM backend settings
+	// Tart VM provider settings
 	Tart TartConfig `mapstructure:"tart"`
 }
 
-// DockerConfig holds Docker-specific backend settings.
+// DockerConfig holds Docker-specific provider settings.
 type DockerConfig struct {
 	Socket       string `mapstructure:"socket"`
 	DinD         *bool  `mapstructure:"dind"` // pointer: nil = inherit default (true)
@@ -96,20 +127,54 @@ type DockerConfig struct {
 	// e.g. "gradle-cache:/home/runner/.gradle". Cache volumes are persistent
 	// caches: they are deliberately never removed at exit and never swept by
 	// any TTL. Same name across scalesets = shared cache, different = isolated.
+	//
+	// This is the short form. See Cache for the long form, which adds an
+	// optional retention budget; ParseCacheVolumes merges the two.
 	CacheVolumes []string `mapstructure:"cache-volumes"`
 
-	// SharedVolumeTTL deletes files in shared-volume older than this duration.
-	// 0 (default) disables TTL cleanup. Accepts Go duration strings, e.g. "168h".
-	SharedVolumeTTL time.Duration `mapstructure:"shared-volume-ttl"`
-	// SharedVolumeCleanupInterval is how often the TTL sweep runs while
-	// runner is up. Ignored when SharedVolumeTTL is 0. Defaults to
+	// Cache is the long form of CacheVolumes — [[docker.cache]] tables
+	// instead of "name:/path" strings — for entries that need a retention
+	// budget. An entry here whose Name also appears in CacheVolumes replaces
+	// it entirely (see ParseCacheVolumes); the two are never merged field by
+	// field.
+	Cache []CacheVolumeSpec `mapstructure:"cache"`
+
+	// SharedVolumeMaxAge deletes files in shared-volume older than this
+	// duration. Accepts Go duration strings, e.g. "168h". It must exceed
+	// the longest workflow run on this host: the volume holds handoff data
+	// a later job in the same run still reads.
+	//
+	// 0 (default) is not "cleanup off, everything else unchanged" — it is
+	// the only retention policy this volume has. runner stopped removing
+	// the volume at exit (that broke runs in flight across a restart), and
+	// the disk guard cannot reclaim un-expired scratch data at any tier, so
+	// with no max-age nothing ever frees it. The volume is still measured
+	// and listed by `runner cache`, and startup warns about the missing
+	// setting.
+	SharedVolumeMaxAge time.Duration `mapstructure:"shared-volume-max-age"`
+	// SharedVolumeTTL is this field's pre-2026-08-14 name.
+	//
+	// Deprecated: superseded by SharedVolumeMaxAge; config loading never
+	// populates this field. Load's applyAliases step (load.go) always moves
+	// a configured shared-volume-ttl value onto shared-volume-max-age and
+	// deletes the old key from the settings map before any decode runs, so
+	// a live mapstructure tag here would never fire in the working case —
+	// and if applyAliases ever regressed, a live tag would silently swallow
+	// a legacy config's value into this field (which nothing reads) instead
+	// of surfacing the regression as the loud "unknown config key" warning
+	// it should. mapstructure:"-" makes that the only possible outcome.
+	// Kept only so Go code that still constructs
+	// DockerConfig{SharedVolumeTTL: …} directly (not through config
+	// loading) keeps compiling; read SharedVolumeMaxAge instead.
+	SharedVolumeTTL time.Duration `mapstructure:"-"`
+	// SharedVolumeCleanupInterval is how often the cleanup sweep runs while
+	// runner is up. Ignored when SharedVolumeMaxAge is 0. Defaults to
 	// DefaultSharedVolumeCleanupInterval when unset.
 	SharedVolumeCleanupInterval time.Duration `mapstructure:"shared-volume-cleanup-interval"`
 
 	// BuildxCleanup enables automatic removal of orphaned buildx BuildKit
-	// builder containers and their state volumes. Pointer: nil = inherit
-	// default (true). Disable (false) only if you run a persistent builder
-	// via `keep-state` + a fixed builder name, which this sweep would reclaim.
+	// builder containers and their state volumes. Pointer: nil = inherit the
+	// safe default (false). Enable only on a daemon dedicated to runners.
 	BuildxCleanup *bool `mapstructure:"buildx-cleanup"`
 	// BuildxCleanupTTL removes buildx builders older than this duration.
 	// Defaults to DefaultBuildxCleanupTTL when unset. Set generously above
@@ -121,8 +186,8 @@ type DockerConfig struct {
 
 	// Prune enables the periodic runtime prune of the shared Docker daemon:
 	// stopped containers and dangling images older than PruneTTL, plus
-	// age/budget-based build cache retention. Pointer: nil = inherit default
-	// (true). Like buildx-cleanup, this assumes the daemon is dedicated to
+	// age/budget-based build cache retention. Pointer: nil = inherit the safe
+	// default (false). Like buildx-cleanup, this assumes the daemon is dedicated to
 	// runners: stopped containers and dangling images older than the TTL are
 	// treated as garbage regardless of what created them.
 	Prune *bool `mapstructure:"prune"`
@@ -144,48 +209,191 @@ type DockerConfig struct {
 	BuildCacheBudgetGB int `mapstructure:"build-cache-budget"`
 }
 
-// CacheVolumeMount is one parsed cache-volumes entry: a named Docker volume
-// and the absolute container path it is mounted at.
+// CacheVolumeSpec is one [[docker.cache]] long-form cache-volume entry: like
+// a CacheVolumes short-form "name:/path" string, plus an optional retention
+// budget. See ParseCacheVolumes for how it merges with the short form and
+// what each field validates to.
+type CacheVolumeSpec struct {
+	Name     string `mapstructure:"name"`
+	Path     string `mapstructure:"path"`
+	Budget   string `mapstructure:"budget"`
+	OnExceed string `mapstructure:"on-exceed"`
+}
+
+// CacheVolumeMount is one resolved cache-volumes entry — merged from the
+// short and long forms by ParseCacheVolumes — naming a Docker volume, the
+// absolute container path it mounts at, and its optional retention budget.
+// BudgetBytes 0 means no budget is configured (every short-form entry, and
+// a long-form entry whose Budget is ""); OnExceed only matters when
+// BudgetBytes != 0.
 type CacheVolumeMount struct {
-	Volume string
-	Path   string
+	Volume      string
+	Path        string
+	BudgetBytes uint64
+	OnExceed    string
 }
 
 // volumeNameRe matches Docker's volume-name pattern.
 var volumeNameRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
 
-// ParseCacheVolumes parses the "volume-name:/absolute/container/path" entries
-// in CacheVolumes. The entry is split on the first colon; an entry with an
-// empty volume name or path, a non-absolute path, or a volume name outside
-// Docker's volume-name pattern is an error.
-func (dc DockerConfig) ParseCacheVolumes() ([]CacheVolumeMount, error) {
-	if len(dc.CacheVolumes) == 0 {
-		return nil, nil
+// validateVolumeName reports whether name matches Docker's volume-name
+// pattern.
+func validateVolumeName(name string) error {
+	if !volumeNameRe.MatchString(name) {
+		return fmt.Errorf("invalid volume name %q", name)
 	}
-	mounts := make([]CacheVolumeMount, 0, len(dc.CacheVolumes))
+	return nil
+}
+
+// validateContainerPath reports whether path is a clean absolute path other
+// than "/" — the shape every cache-volume mount target must have.
+func validateContainerPath(path string) error {
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path || path == "/" {
+		return fmt.Errorf("container path %q must be absolute", path)
+	}
+	return nil
+}
+
+// parseCacheVolumeBudget parses a [[docker.cache]] entry's Budget string
+// into bytes. "" means unconfigured (0, no error) — the short form's only
+// option. A percentage (e.g. "10%") is rejected: unlike [disk]'s
+// thresholds — which internal/diskguard resolves against a fresh statfs on
+// every sweep — there is no live filesystem to resolve a percentage against
+// at config-parse time, so letting bytesize.ParseThreshold's percentage
+// branch through would silently produce a permanently-zero budget (0% of an
+// unknown total).
+func parseCacheVolumeBudget(budget string) (uint64, error) {
+	if budget == "" {
+		return 0, nil
+	}
+	if strings.HasSuffix(budget, "%") {
+		return 0, fmt.Errorf("budget %q must be an absolute size like \"20GB\" (percentages are not supported for cache volumes)", budget)
+	}
+	th, err := bytesize.ParseThreshold(budget)
+	if err != nil {
+		return 0, fmt.Errorf("invalid budget %q: want a size like \"20GB\"", budget)
+	}
+	return th.Bytes, nil
+}
+
+// ParseCacheVolumes parses and merges CacheVolumes (short form) and Cache
+// (long form) into one list of mounts, ordered by first appearance across
+// both. An entry present in both forms is resolved entirely from its
+// long-form entry — path, budget, and on-exceed all come from there, and
+// the short-form entry of the same name is discarded rather than partially
+// merged — matching docker-compose's own short/long merge convention (see
+// section E of docs/superpowers/specs/2026-08-13-cache-architecture-design.md).
+//
+// Errors: an empty volume name or path, a non-absolute/non-clean container
+// path, a volume name outside Docker's volume-name pattern, the same volume
+// name repeated within one form (CacheVolumes or Cache — but not across the
+// two; see above), two entries (from either form) resolving to the same
+// container path, a long-form Budget that fails to parse or names a
+// percentage (see parseCacheVolumeBudget), or a long-form OnExceed other
+// than "", "warn", "wipe".
+func (dc DockerConfig) ParseCacheVolumes() ([]CacheVolumeMount, error) {
+	order := make([]string, 0, len(dc.CacheVolumes)+len(dc.Cache))
+	byName := make(map[string]CacheVolumeMount, len(dc.CacheVolumes)+len(dc.Cache))
+
+	seenShort := make(map[string]bool, len(dc.CacheVolumes))
 	for _, entry := range dc.CacheVolumes {
 		name, path, ok := strings.Cut(entry, ":")
 		if !ok || name == "" || path == "" {
 			return nil, fmt.Errorf("cache-volumes entry %q must be \"volume-name:/absolute/container/path\"", entry)
 		}
-		if !volumeNameRe.MatchString(name) {
-			return nil, fmt.Errorf("cache-volumes entry %q: invalid volume name %q", entry, name)
+		if err := validateVolumeName(name); err != nil {
+			return nil, fmt.Errorf("cache-volumes entry %q: %w", entry, err)
 		}
-		if !strings.HasPrefix(path, "/") {
-			return nil, fmt.Errorf("cache-volumes entry %q: container path %q must be absolute", entry, path)
+		if err := validateContainerPath(path); err != nil {
+			return nil, fmt.Errorf("cache-volumes entry %q: %w", entry, err)
 		}
-		mounts = append(mounts, CacheVolumeMount{Volume: name, Path: path})
+		// A repeated name within this same list is rejected rather than
+		// silently resolving to whichever entry is seen last: two different
+		// paths under one volume name almost always means a copy-pasted
+		// entry whose name the operator forgot to change, not a deliberate
+		// request to mount one named volume at two paths. Cross-form
+		// repeats (a long-form entry naming a short-form one) are the
+		// opposite — a deliberate override — and stay unrestricted below.
+		if seenShort[name] {
+			return nil, fmt.Errorf("cache-volumes contains duplicate volume name %q", name)
+		}
+		seenShort[name] = true
+		order = append(order, name)
+		byName[name] = CacheVolumeMount{Volume: name, Path: path}
+	}
+
+	seenLong := make(map[string]bool, len(dc.Cache))
+	for _, spec := range dc.Cache {
+		if spec.Name == "" {
+			return nil, fmt.Errorf("[[docker.cache]] entry has an empty name")
+		}
+		if err := validateVolumeName(spec.Name); err != nil {
+			return nil, fmt.Errorf("[[docker.cache]] entry %q: %w", spec.Name, err)
+		}
+		if err := validateContainerPath(spec.Path); err != nil {
+			return nil, fmt.Errorf("[[docker.cache]] entry %q: %w", spec.Name, err)
+		}
+		budgetBytes, err := parseCacheVolumeBudget(spec.Budget)
+		if err != nil {
+			return nil, fmt.Errorf("[[docker.cache]] entry %q: %w", spec.Name, err)
+		}
+		switch spec.OnExceed {
+		case "", "warn", "wipe":
+		default:
+			return nil, fmt.Errorf("[[docker.cache]] entry %q: on-exceed must be \"warn\" or \"wipe\", got %q", spec.Name, spec.OnExceed)
+		}
+		// Same rationale as seenShort above, scoped to this form only.
+		if seenLong[spec.Name] {
+			return nil, fmt.Errorf("[[docker.cache]] contains duplicate volume name %q", spec.Name)
+		}
+		seenLong[spec.Name] = true
+
+		if _, exists := byName[spec.Name]; !exists {
+			order = append(order, spec.Name)
+		}
+		byName[spec.Name] = CacheVolumeMount{
+			Volume: spec.Name, Path: spec.Path, BudgetBytes: budgetBytes, OnExceed: spec.OnExceed,
+		}
+	}
+
+	if len(order) == 0 {
+		return nil, nil
+	}
+
+	mounts := make([]CacheVolumeMount, 0, len(order))
+	pathOwner := make(map[string]string, len(order))
+	for _, name := range order {
+		m := byName[name]
+		if owner, dup := pathOwner[m.Path]; dup {
+			return nil, fmt.Errorf("cache volumes %q and %q both mount container path %q", owner, name, m.Path)
+		}
+		pathOwner[m.Path] = name
+		mounts = append(mounts, m)
 	}
 	return mounts, nil
 }
 
-// TartConfig holds Tart VM-specific backend settings.
+// TartConfig holds Tart VM-specific provider settings.
 type TartConfig struct {
 	Home      string `mapstructure:"home"`       // TART_HOME for tart CLI ("" = default ~/.tart)
 	RunnerDir string `mapstructure:"runner-dir"` // Runner binary path in VM
 	CPU       int    `mapstructure:"cpu"`        // Number of CPU cores (0 = use image default)
 	Memory    int    `mapstructure:"memory"`     // Memory in MB (0 = use image default)
 	PoolSize  int    `mapstructure:"pool-size"`  // Pre-warmed VM count (0 = disabled)
+
+	// MTU is applied to the guest's network interface before the runner
+	// starts. A host whose route to GitHub runs through a tunnel (Cloudflare
+	// WARP, a VPN) cannot carry the 1500-byte packets a default guest asks
+	// for, so TLS handshakes from the VM stall while the host itself works.
+	// 0 (default) = auto: match the host's route MTU to the scale set's
+	// GitHub host when it is below 1500, otherwise leave the guest alone.
+	// -1 = never touch it. 1280–1500 = always use this value.
+	MTU int `mapstructure:"mtu"`
+	// DNS replaces the guest's resolvers (e.g. ["1.1.1.1", "8.8.8.8"]) before
+	// the runner starts. Empty (default) keeps the resolver Tart's NAT hands
+	// out, which proxies through the host and can stop answering after the
+	// host's VPN disconnects.
+	DNS []string `mapstructure:"dns"`
 
 	// CacheCleanup enables periodic `tart prune` of the OCI/IPSW caches under
 	// TART_HOME. Pointer: nil = inherit default (true). Local VMs are never
@@ -195,11 +403,19 @@ type TartConfig struct {
 	// `tart prune --older-than`. Defaults to DefaultTartCacheMaxAge when unset.
 	// Granularity is whole days; sub-day values floor to 1 day.
 	CacheMaxAge time.Duration `mapstructure:"cache-max-age"`
-	// CacheSpaceBudgetGB is an optional hard cap on the OCI/IPSW cache size
-	// (in GB), enforced via `tart prune --space-budget` on top of the age-based
+	// CacheBudgetGB is an optional hard cap on the OCI/IPSW cache size (in
+	// GB), enforced via `tart prune --space-budget` on top of the age-based
 	// sweep — least-recently-used entries are removed until the total fits.
 	// 0 (default) means no size cap (age-based cleanup still runs).
-	CacheSpaceBudgetGB int `mapstructure:"cache-space-budget"`
+	CacheBudgetGB int `mapstructure:"cache-budget"`
+	// CacheSpaceBudgetGB is this field's pre-2026-08-14 name.
+	//
+	// Deprecated: superseded by CacheBudgetGB, for the same reason and in
+	// the same way DockerConfig.SharedVolumeTTL is deprecated in favor of
+	// SharedVolumeMaxAge — see that field's doc comment. mapstructure:"-"
+	// because Load's applyAliases step (load.go) always moves a configured
+	// cache-space-budget value onto CacheBudgetGB before decoding.
+	CacheSpaceBudgetGB int `mapstructure:"-"`
 	// CacheCleanupInterval is how often the prune sweep runs while runner
 	// is up. Ignored when cache cleanup is disabled. Defaults to
 	// DefaultTartCacheCleanupInterval when unset.
@@ -209,7 +425,7 @@ type TartConfig struct {
 // ResolveScaleSets returns the resolved list of scale set configs.
 // [[scaleset]] entries arrive from Load with inheritance already applied at
 // the map level (a key present in an entry wins, even when zero), so multi
-// mode only applies backend-dependent defaults and token resolution here.
+// mode only applies provider-dependent defaults and token resolution here.
 // Without [[scaleset]] entries, Defaults itself is the single scale set.
 func (c *Config) ResolveScaleSets() []ScaleSetConfig {
 	if len(c.ScaleSets) > 0 {
@@ -227,13 +443,16 @@ func (c *Config) ResolveScaleSets() []ScaleSetConfig {
 	return []ScaleSetConfig{ss}
 }
 
-// applyDefaults fills in backend-specific defaults that depend on
-// the backend selection (e.g. TartRunnerDir when backend is "tart").
+// applyDefaults fills in provider-specific defaults that depend on
+// the provider selection (e.g. TartRunnerDir when provider is "tart").
 func (ss *ScaleSetConfig) applyDefaults() {
-	if ss.Backend == "" {
-		ss.Backend = DefaultBackend
+	if ss.Provider == "" {
+		ss.Provider = DefaultProvider
 	}
-	if ss.Backend == "tart" && ss.Tart.RunnerDir == "" {
+	if ss.Provider == DefaultProvider && ss.Docker.Socket == "" {
+		ss.Docker.Socket = DefaultDockerSocket
+	}
+	if ss.Provider == "tart" && ss.Tart.RunnerDir == "" {
 		ss.Tart.RunnerDir = DefaultTartRunnerDir
 	}
 }
@@ -255,13 +474,13 @@ func (ss *ScaleSetConfig) SharedVolumeName() string {
 	return DefaultSharedVolumeName
 }
 
-// IsTart returns whether this scale set uses the Tart VM backend.
+// IsTart returns whether this scale set uses the Tart VM provider.
 func (ss *ScaleSetConfig) IsTart() bool {
-	return ss.Backend == "tart"
+	return ss.Provider == "tart"
 }
 
 // IsBuildxCleanupEnabled reports whether orphaned buildx builder cleanup is
-// enabled (default true unless explicitly disabled).
+// enabled (default false unless explicitly enabled).
 func (ss *ScaleSetConfig) IsBuildxCleanupEnabled() bool {
 	if ss.Docker.BuildxCleanup != nil {
 		return *ss.Docker.BuildxCleanup
@@ -269,8 +488,17 @@ func (ss *ScaleSetConfig) IsBuildxCleanupEnabled() bool {
 	return DefaultBuildxCleanup
 }
 
+// IsUpdateDisabled reports whether GitHub is barred from updating the runner
+// binary inside the container or VM (default true unless explicitly enabled).
+func (ss *ScaleSetConfig) IsUpdateDisabled() bool {
+	if ss.DisableUpdate != nil {
+		return *ss.DisableUpdate
+	}
+	return DefaultDisableUpdate
+}
+
 // IsDockerPruneEnabled reports whether the periodic Docker runtime prune is
-// enabled (default true unless explicitly disabled).
+// enabled (default false unless explicitly enabled).
 func (ss *ScaleSetConfig) IsDockerPruneEnabled() bool {
 	if ss.Docker.Prune != nil {
 		return *ss.Docker.Prune
@@ -293,6 +521,9 @@ func (ss *ScaleSetConfig) IsTartCacheCleanupEnabled() bool {
 //   - Empty token with RUNNER_TOKEN env var set — uses that as fallback
 //     (the legacy RUNSCALER_TOKEN is still honored during the transition)
 func (ss *ScaleSetConfig) resolveEnvToken() {
+	if ss.GitHubApp != nil {
+		return // App selection must not acquire an ambient personal token.
+	}
 	if strings.HasPrefix(ss.Token, "env:") {
 		envName := strings.TrimPrefix(ss.Token, "env:")
 		ss.Token = os.Getenv(envName)
@@ -314,14 +545,18 @@ func (ss *ScaleSetConfig) Validate() error {
 	if ss.RegistrationURL == "" {
 		return fmt.Errorf("registration URL (url) is required")
 	}
-	if _, err := url.ParseRequestURI(ss.RegistrationURL); err != nil {
+	parsedURL, err := url.ParseRequestURI(ss.RegistrationURL)
+	if err != nil {
 		return fmt.Errorf("invalid registration URL: %w", err)
+	}
+	if parsedURL.Scheme != "https" || parsedURL.Host == "" || parsedURL.User != nil {
+		return fmt.Errorf("registration URL must be an HTTPS URL without embedded credentials")
 	}
 	if ss.ScaleSetName == "" {
 		return fmt.Errorf("scale set name (name) is required")
 	}
-	if ss.Token == "" {
-		return fmt.Errorf("token is required")
+	if err := ss.validateAuthentication(); err != nil {
+		return err
 	}
 	if ss.MinRunners < 0 {
 		return fmt.Errorf("min-runners must be >= 0")
@@ -332,18 +567,220 @@ func (ss *ScaleSetConfig) Validate() error {
 	if ss.MinRunners > ss.MaxRunners {
 		return fmt.Errorf("min-runners (%d) must be <= max-runners (%d)", ss.MinRunners, ss.MaxRunners)
 	}
+	if ss.RunnerImage == "" {
+		return fmt.Errorf("runner-image is required")
+	}
 
-	switch ss.Backend {
-	case DefaultBackend:
-		if _, err := ss.Docker.ParseCacheVolumes(); err != nil {
+	switch ss.Provider {
+	case DefaultProvider:
+		if ss.Docker.Platform != "" {
+			parts := strings.Split(ss.Docker.Platform, "/")
+			if (len(parts) != 2 && len(parts) != 3) || parts[0] == "" || parts[1] == "" || (len(parts) == 3 && parts[2] == "") {
+				return fmt.Errorf("docker platform must be os/arch or os/arch/variant")
+			}
+		}
+		mounts, err := ss.Docker.ParseCacheVolumes()
+		if err != nil {
 			return err
 		}
+		if ss.Docker.Memory < 0 || ss.Docker.CPU < 0 || ss.Docker.PidsLimit < 0 || ss.Docker.BuildCacheBudgetGB < 0 {
+			return fmt.Errorf("docker resource limits and cache budget must be >= 0")
+		}
+		if ss.Docker.SharedVolumeName != "" && !volumeNameRe.MatchString(ss.Docker.SharedVolumeName) {
+			return fmt.Errorf("invalid shared-volume-name %q", ss.Docker.SharedVolumeName)
+		}
+		if ss.Docker.SharedVolume != "" {
+			if !filepath.IsAbs(ss.Docker.SharedVolume) || filepath.Clean(ss.Docker.SharedVolume) != ss.Docker.SharedVolume || ss.Docker.SharedVolume == "/" {
+				return fmt.Errorf("shared-volume must be a clean absolute container path other than /")
+			}
+			for _, mount := range mounts {
+				if mount.Path == ss.Docker.SharedVolume {
+					return fmt.Errorf("shared-volume conflicts with cache-volumes path %q", mount.Path)
+				}
+			}
+		}
 	case "tart":
-		if ss.RunnerImage == "" {
-			return fmt.Errorf("runner-image is required when backend is \"tart\"")
+		if ss.MaxRunners > 2 {
+			return fmt.Errorf("max-runners must be <= 2 for the Tart provider (Apple host limit)")
+		}
+		if ss.Tart.PoolSize < 0 || ss.Tart.PoolSize > ss.MaxRunners {
+			return fmt.Errorf("tart pool-size must be between 0 and max-runners")
+		}
+		// Below 1280 the guest loses IPv6; above 1500 the NAT cannot carry it.
+		if ss.Tart.MTU != 0 && ss.Tart.MTU != -1 && (ss.Tart.MTU < 1280 || ss.Tart.MTU > 1500) {
+			return fmt.Errorf("tart mtu must be 0 (auto), -1 (off), or between 1280 and 1500")
+		}
+		for _, server := range ss.Tart.DNS {
+			if _, err := netip.ParseAddr(server); err != nil {
+				return fmt.Errorf("tart dns entry %q is not an IP address", server)
+			}
 		}
 	default:
-		return fmt.Errorf("unsupported backend %q (must be %q or \"tart\")", ss.Backend, DefaultBackend)
+		return fmt.Errorf("unsupported provider %q (must be %q or \"tart\")", ss.Provider, DefaultProvider)
+	}
+
+	return nil
+}
+
+// ValidateGlobal checks process-wide settings that are not part of any scale
+// set and therefore would otherwise bypass ScaleSetConfig.Validate.
+func (c *Config) ValidateGlobal() error {
+	switch strings.ToLower(c.LogLevel) {
+	case "debug", "info", "warn", "error":
+	default:
+		return fmt.Errorf("log-level must be debug, info, warn, or error")
+	}
+	switch strings.ToLower(c.LogFormat) {
+	case "text", "json":
+	default:
+		return fmt.Errorf("log-format must be text or json")
+	}
+	if c.HealthPort < 0 || c.HealthPort > 65535 {
+		return fmt.Errorf("health-port must be between 0 and 65535")
+	}
+	if c.Concurrent < 0 {
+		return fmt.Errorf("concurrent must be >= 0")
+	}
+	if err := c.Disk.Validate(); err != nil {
+		return fmt.Errorf("disk: %w", err)
+	}
+	return nil
+}
+
+// EffectiveConcurrent returns the process-wide instance limit. An omitted or
+// zero value preserves historical behavior by allowing the sum of every scale
+// set's own maximum.
+func (c *Config) EffectiveConcurrent(scaleSets []ScaleSetConfig) int {
+	if c.Concurrent > 0 {
+		return c.Concurrent
+	}
+	total := 0
+	for _, ss := range scaleSets {
+		total += ss.MaxRunners
+	}
+	return total
+}
+
+// ValidateConcurrent ensures an explicit host-wide limit can satisfy every
+// scale set's promised warm floor. Local max-runners values may sum above the
+// global limit; the broker arbitrates that normal oversubscription case.
+func (c *Config) ValidateConcurrent(scaleSets []ScaleSetConfig) error {
+	if c.Concurrent == 0 {
+		return nil
+	}
+	totalMin := 0
+	for _, ss := range scaleSets {
+		totalMin += ss.MinRunners
+	}
+	if c.Concurrent < totalMin {
+		return fmt.Errorf("concurrent (%d) must be >= the sum of min-runners (%d)", c.Concurrent, totalMin)
+	}
+	return nil
+}
+
+// EffectiveDrainTimeout returns the configured process-wide drain budget.
+// Nil inherits DefaultDrainTimeout; zero or a negative duration explicitly
+// disables draining and preserves immediate-shutdown behavior.
+func (c *Config) EffectiveDrainTimeout() time.Duration {
+	if c.DrainTimeout != nil {
+		return *c.DrainTimeout
+	}
+	return DefaultDrainTimeout
+}
+
+// DiskConfig configures the periodic disk-pressure guard (internal/diskguard):
+// the free-space thresholds that trigger and bound reclamation, how often it
+// sweeps, and the highest cachestore.Tier it may reach. See package
+// diskguard's Config and Guard for what these drive at runtime.
+type DiskConfig struct {
+	// Guard enables the periodic disk guard. Pointer: nil = inherit default
+	// (true) — see DefaultDiskGuard's doc comment for why leaving it on is
+	// safe even though it deletes data.
+	Guard *bool `mapstructure:"guard"`
+	// MinFree is the free-space threshold that triggers reclamation: a
+	// percentage like "10%" (of the filesystem's total capacity) or an
+	// absolute size like "20GB". Defaults to DefaultDiskMinFree when unset.
+	MinFree string `mapstructure:"min-free"`
+	// TargetFree is the free-space level reclamation aims to restore before
+	// stopping; must be strictly greater than MinFree (see Validate).
+	// Defaults to DefaultDiskTargetFree when unset.
+	TargetFree string `mapstructure:"target-free"`
+	// Interval is the period between guard sweeps. <= 0 (unset) resolves to
+	// DefaultDiskGuardInterval at the call site, matching every other sweep
+	// interval in this package (e.g. PruneInterval).
+	Interval time.Duration `mapstructure:"interval"`
+	// MaxTier is the highest cachestore.Tier the guard may reclaim at while
+	// chasing TargetFree; must be between 1 and 4 (see Validate). 0 (unset)
+	// resolves to DefaultDiskMaxTier.
+	MaxTier int `mapstructure:"max-tier"`
+}
+
+// IsDiskGuardEnabled reports whether the periodic disk guard is enabled
+// (default true unless explicitly disabled).
+func (c *Config) IsDiskGuardEnabled() bool {
+	if c.Disk.Guard != nil {
+		return *c.Disk.Guard
+	}
+	return DefaultDiskGuard
+}
+
+// Validate checks that the disk guard's thresholds are parseable and that
+// MinFree is strictly less than TargetFree, and that MaxTier is a real tier
+// (1-4). Both matter more than they look: MinFree >= TargetFree makes every
+// sweep both trigger immediately and never satisfy its own target, and
+// MaxTier outside 1-4 (in particular the zero value) silently disables the
+// tier ladder — see diskguard.Guard.sweepFilesystem's target/free
+// subtraction, which assumes the ladder ran at least one tier.
+//
+// A zero-value DiskConfig (the operator never touched [disk]) must pass:
+// defaults are substituted before parsing, not compared as raw zero values.
+func (dc DiskConfig) Validate() error {
+	minFree := dc.MinFree
+	if minFree == "" {
+		minFree = DefaultDiskMinFree
+	}
+	targetFree := dc.TargetFree
+	if targetFree == "" {
+		targetFree = DefaultDiskTargetFree
+	}
+
+	min, err := bytesize.ParseThreshold(minFree)
+	if err != nil {
+		return fmt.Errorf("min-free: %w", err)
+	}
+	target, err := bytesize.ParseThreshold(targetFree)
+	if err != nil {
+		return fmt.Errorf("target-free: %w", err)
+	}
+
+	// bytesize.Threshold doesn't itself record whether it came from a
+	// percentage or an absolute size (ParseThreshold sets exactly one of
+	// Percent/Bytes — see its doc comment), and BytesOf's own "Bytes != 0
+	// means absolute" heuristic isn't precise enough here: it would treat a
+	// literal "0%" as indistinguishable from an absolute zero-byte
+	// threshold, a distinction BytesOf's caller (the guard, which always
+	// has a real totalBytes to scale a percentage against) never needs to
+	// make but this comparison does. Reading the "%" suffix off the
+	// original strings instead is exact.
+	minIsPercent := strings.HasSuffix(minFree, "%")
+	targetIsPercent := strings.HasSuffix(targetFree, "%")
+	if minIsPercent != targetIsPercent {
+		return fmt.Errorf("min-free and target-free must both be percentages or both be sizes to compare")
+	}
+	if minIsPercent {
+		if min.Percent >= target.Percent {
+			return fmt.Errorf("min-free must be less than target-free")
+		}
+	} else if min.Bytes >= target.Bytes {
+		return fmt.Errorf("min-free must be less than target-free")
+	}
+
+	maxTier := dc.MaxTier
+	if maxTier == 0 {
+		maxTier = DefaultDiskMaxTier
+	}
+	if maxTier < 1 || maxTier > 4 {
+		return fmt.Errorf("max-tier must be between 1 and 4")
 	}
 
 	return nil
@@ -368,6 +805,12 @@ func parseLogLevel(level string) charmlog.Level {
 // NewLogger creates a structured logger with the given level and format,
 // and sets it as the process-wide default.
 func NewLogger(level, format string) *slog.Logger {
+	return NewLoggerWithWriter(level, format, os.Stdout, nil)
+}
+
+// NewLoggerWithWriter creates a process logger writing to console and, when
+// file is non-nil, teeing to it. The writer may be shared with scale-set loggers.
+func NewLoggerWithWriter(level, format string, console *os.File, file io.Writer) *slog.Logger {
 	opts := charmlog.Options{
 		ReportTimestamp: true,
 		TimeFormat:      time.DateTime,
@@ -378,7 +821,8 @@ func NewLogger(level, format string) *slog.Logger {
 		opts.Formatter = charmlog.JSONFormatter
 	}
 
-	handler := charmlog.NewWithOptions(os.Stdout, opts)
+	handler := charmlog.NewWithOptions(outputWriter(console, file), opts)
+	handler.SetColorProfile(consoleColorProfile(console))
 	logger := slog.New(&demoteHandler{inner: handler, demote: demoteMessages})
 	slog.SetDefault(logger)
 	return logger
@@ -398,6 +842,13 @@ var scaleSetColors = []color.Color{
 // NewScaleSetLogger creates a logger with a colored prefix for the given scale set.
 // The color is determined by the index, cycling through the palette.
 func NewScaleSetLogger(level, format string, name string, index int) *slog.Logger {
+	return NewScaleSetLoggerWithWriter(level, format, name, index, os.Stdout, nil)
+}
+
+// NewScaleSetLoggerWithWriter creates a scale-set logger writing to console
+// and, when file is non-nil, teeing to it. The writer may be shared with the
+// process logger.
+func NewScaleSetLoggerWithWriter(level, format string, name string, index int, console *os.File, file io.Writer) *slog.Logger {
 	opts := charmlog.Options{
 		ReportTimestamp: true,
 		TimeFormat:      time.DateTime,
@@ -409,7 +860,8 @@ func NewScaleSetLogger(level, format string, name string, index int) *slog.Logge
 		opts.Formatter = charmlog.JSONFormatter
 	}
 
-	handler := charmlog.NewWithOptions(os.Stdout, opts)
+	handler := charmlog.NewWithOptions(outputWriter(console, file), opts)
+	handler.SetColorProfile(consoleColorProfile(console))
 
 	// Apply color only for text format (not JSON)
 	if strings.ToLower(format) != "json" {
@@ -454,25 +906,6 @@ func (h *demoteHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 
 func (h *demoteHandler) WithGroup(name string) slog.Handler {
 	return &demoteHandler{inner: h.inner.WithGroup(name), demote: h.demote}
-}
-
-// NewScalesetClient creates a scaleset.Client using PAT authentication.
-func NewScalesetClient(registrationURL, token string, logger *slog.Logger) (*scaleset.Client, error) {
-	httpClient := retryablehttp.NewClient()
-	httpClient.Logger = nil // suppress noisy "performing request" debug lines
-
-	client, err := scaleset.NewClientWithPersonalAccessToken(
-		scaleset.NewClientWithPersonalAccessTokenConfig{
-			GitHubConfigURL:     registrationURL,
-			PersonalAccessToken: token,
-		},
-		scaleset.WithLogger(logger),
-		scaleset.WithRetryableHTTPClint(httpClient),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create scaleset client: %w", err)
-	}
-	return client, nil
 }
 
 // BuildLabels converts string labels to scaleset.Label slice.

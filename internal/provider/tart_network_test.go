@@ -435,8 +435,7 @@ func TestTartProvider_RunUsesNATByDefault(t *testing.T) {
 
 func TestTartProvider_NetBridgedBootsVMOnHostInterface(t *testing.T) {
 	cmd := networkCmdRunner(routeGetHostNoVPN)
-	p := newTestTartProvider(cmd)
-	p.netBridged = "en0"
+	p := newBridgedTestTartProvider(t, cmd)
 
 	if _, err := p.StartInstance(context.Background(), "runner-abc", "jit"); err != nil {
 		t.Fatalf("StartInstance() error: %v", err)
@@ -452,8 +451,7 @@ func TestTartProvider_NetBridgedBootsVMOnHostInterface(t *testing.T) {
 // host route through a VPN tunnel must not lower the guest's MTU.
 func TestTartProvider_NetBridgedSkipsAutoMTU(t *testing.T) {
 	cmd := networkCmdRunner(routeGetHostWARP)
-	p := newTestTartProvider(cmd)
-	p.netBridged = "en0"
+	p := newBridgedTestTartProvider(t, cmd)
 
 	if _, err := p.StartInstance(context.Background(), "runner-abc", "jit"); err != nil {
 		t.Fatalf("StartInstance() error: %v", err)
@@ -463,15 +461,14 @@ func TestTartProvider_NetBridgedSkipsAutoMTU(t *testing.T) {
 	if n := countCallsContaining(calls, "/sbin/route -n get"); n != 0 {
 		t.Errorf("host route looked up %d times for a bridged guest, want 0", n)
 	}
-	if n := countCallsContaining(calls, "ifconfig"); n != 0 {
-		t.Errorf("ifconfig called %d times for a bridged guest in auto mode, want 0", n)
+	if n := countCallsContaining(calls, "/usr/bin/sudo -n /sbin/ifconfig"); n != 0 {
+		t.Errorf("guest ifconfig called %d times for a bridged guest in auto mode, want 0", n)
 	}
 }
 
 func TestTartProvider_NetBridgedKeepsFixedMTU(t *testing.T) {
 	cmd := networkCmdRunner(routeGetHostNoVPN)
-	p := newTestTartProvider(cmd)
-	p.netBridged = "en0"
+	p := newBridgedTestTartProvider(t, cmd)
 	p.mtu = 1400
 
 	if _, err := p.StartInstance(context.Background(), "runner-abc", "jit"); err != nil {

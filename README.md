@@ -438,14 +438,18 @@ give the guests resolvers of their own.
 host's `bootpd` to hand each guest a lease. When it does not, the guest comes
 up on a link-local `169.254.x.x` address with no route out, the runner never
 reaches GitHub, and jobs stay queued. Set `net-bridged` to a host interface
-(`net-bridged = "en0"`, the name `ifconfig` shows for the active Ethernet or
-Wi-Fi) and every VM boots with `tart run --net-bridged=<interface>`, taking
+(`net-bridged = "en0"`, the BSD device name `ifconfig` shows for the active
+Ethernet or Wi-Fi) and every VM boots with `tart run --net-bridged=<interface>`, taking
 its address from the host's network instead. The image must leave the guest's
 network service on DHCP. Bridged guests do not leave through the host's
 routing table, so `mtu = 0` no longer matches a host tunnel for them; a fixed
-`mtu` and `dns` still apply. Each VM slot keeps its fixed MAC address, which
-is now visible on that network: give each host its own segment or DHCP
-reservations when several hosts bridge onto one LAN.
+`mtu` and `dns` still apply. Bridged VM MAC addresses are derived from the host
+interface's hardware address and the shared host slot, avoiding the identical
+slot addresses used by separate hosts under NAT. The address stays stable for
+the same interface hardware address and slot, so DHCP leases can be reused;
+changing the host interface's hardware address changes the VM addresses.
+Startup fails and the clone is cleaned up if its bridged MAC cannot be read or
+written safely. Empty `net-bridged` keeps NAT and its existing slot addresses.
 
 **Runner start-up check.** A runner that dies or never reaches GitHub leaves
 its VM running, so runner hands a VM over only once the runner inside prints

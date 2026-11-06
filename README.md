@@ -60,6 +60,7 @@ flowchart LR
 - **Auto-scaling** — scales from 0 to N based on job demand via long-poll (no cron, no polling delay)
 - **Docker-in-Docker** — optional DinD support for workflows that build containers
 - **macOS VMs via Tart** — native Apple Virtualization.framework with APFS Copy-on-Write cloning
+- **Tart networking** — shared NAT by default, with optional host-interface bridging
 - **VM warm pool** — pre-boot macOS VMs for instant job pickup (~2s vs ~30s cold boot)
 - **Shared volumes** — cross-runner caching via named Docker volumes
 - **Multi-org support** — manage multiple scale sets from a single process, mixing Docker and Tart providers
@@ -87,7 +88,7 @@ flowchart LR
 
   > **Upgrading from the `cirruslabs/cli` tap:** Tart moved to `openai/tools`, so `brew upgrade` never gets past the last `cirruslabs/cli` release (2.32.x). Run `brew uninstall tart softnet`, then the two commands above, then remove the old tap. Homebrew will not untap formulae it does not trust, so trust them just for that: `brew trust --formula cirruslabs/cli/tart cirruslabs/cli/softnet && brew untap cirruslabs/cli && brew untrust --formula cirruslabs/cli/tart cirruslabs/cli/softnet`. Avoid `brew untap --force`, which uninstalls every formula it attributes to the tap.
 
-  > **Note:** Apple's Virtualization.framework limits each host to **2 concurrent macOS VMs**. Set `max-runners` accordingly. Each VM slot is assigned a deterministic MAC address to prevent DHCP lease exhaustion — no sudo required.
+  > **Note:** Apple's Virtualization.framework limits each host to **2 concurrent macOS VMs**. Set `max-runners` accordingly. Each VM slot reuses a deterministic MAC address to reduce DHCP lease churn — no sudo required for MAC assignment.
 
   The default VM resources from Cirrus Labs images:
 
@@ -434,22 +435,44 @@ allow). Set a fixed `mtu` if the tunnel only carries some destinations, or
 that proxy can stop answering after the host's VPN disconnects; set `dns` to
 give the guests resolvers of their own.
 
+**Choosing Tart networking (v0.12.0+).** Shared NAT remains the default. If
+your VMs already obtain an address and connect to GitHub, keep `net-bridged`
+unset or empty; upgrading does not require a networking change. NAT keeps
+the VMs on the host's private network rather than giving each VM an address
+on your LAN.
+
 **Hosts whose NAT does not serve guests.** Tart's shared NAT depends on the
 host's `bootpd` to hand each guest a lease. When it does not, the guest comes
 up on a link-local `169.254.x.x` address with no route out, the runner never
 reaches GitHub, and jobs stay queued. Set `net-bridged` to a host interface
 (`net-bridged = "en0"`, the BSD device name `ifconfig` shows for the active
 Ethernet or Wi-Fi) and every VM boots with `tart run --net-bridged=<interface>`, taking
-its address from the host's network instead. The image must leave the guest's
-network service on DHCP. Bridged guests do not leave through the host's
+its address from the LAN's DHCP server instead. Bridging connects each VM
+directly to that LAN; it does not create a private runner network. The image
+must leave the guest's network service on DHCP. The CLI equivalent is
+`runner run --config config.toml --tart-net-bridged en0`. In multi-scale-set
+configs, `[tart] net-bridged` is inherited; set `[scaleset.tart] net-bridged = ""`
+to return an individual scale set to NAT.
+
+Bridged guests do not leave through the host's
 routing table, so `mtu = 0` no longer matches a host tunnel for them; a fixed
 `mtu` and `dns` still apply. Bridged VM MAC addresses are derived from the host
-interface's hardware address and the shared host slot, avoiding the identical
-slot addresses used by separate hosts under NAT. The address stays stable for
-the same interface hardware address and slot, so DHCP leases can be reused;
+interface's hardware address and the shared host slot, rather than reusing
+the same fixed slot addresses on every host. The address stays stable for
+the same interface hardware address and slot, allowing DHCP lease reuse;
 changing the host interface's hardware address changes the VM addresses.
 Startup fails and the clone is cleaned up if its bridged MAC cannot be read or
-written safely. Empty `net-bridged` keeps NAT and its existing slot addresses.
+written safely. The DHCP server still controls IP allocation: this MAC policy
+does not guarantee a fixed IP or resolve duplicated DHCP client identifiers
+inside cloned images. Before relying on a bridged deployment, verify that
+two concurrent VMs obtain distinct addresses and complete jobs after repeated
+VM creation and removal; include multiple Mac hosts if they share the LAN.
+
+**Docker networking.** These Tart settings do not apply to Docker runners.
+They use Docker's default bridge unless `[docker] network` selects another
+existing network. Docker manages address allocation; a dedicated Docker
+bridge can already be selected with that setting (see
+[Security & Isolation](#security--isolation)).
 
 **Runner start-up check.** A runner that dies or never reaches GitHub leaves
 its VM running, so runner hands a VM over only once the runner inside prints

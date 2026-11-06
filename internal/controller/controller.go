@@ -338,15 +338,18 @@ func (s *ScaleSetController) signalReconcile() {
 	if s.draining.Load() {
 		return
 	}
+	s.acquireMu.Lock()
+	defer s.acquireMu.Unlock()
+	if s.cancelAcquire != nil {
+		s.cancelAcquire()
+	}
+	// Cancel the old wait before publishing the wakeup. Otherwise the worker
+	// can consume this signal, start a new wait, and have that wait cancelled
+	// by its own signal with no wakeup left to resume reconciliation.
 	select {
 	case s.reconcile <- struct{}{}:
 	default:
 	}
-	s.acquireMu.Lock()
-	if s.cancelAcquire != nil {
-		s.cancelAcquire()
-	}
-	s.acquireMu.Unlock()
 }
 
 // acquireCapacity waits for a host capacity lease but gives up as soon as the

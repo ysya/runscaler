@@ -172,14 +172,6 @@ func (s *ScaleSetController) HandleJobCompleted(ctx context.Context, jobInfo *sc
 	)
 
 	_, ready, ok := s.instances.markDone(jobInfo.RunnerName, reasonJobCompleted, jobInfo.Result)
-	if !ok && s.instances.completeUnassignedRemoval(jobInfo.RunnerName, jobInfo.Result) {
-		// The runner's removal as idle is already under way and now proceeds
-		// as a completion. Hold the scale-up barrier like any completion.
-		s.desiredMu.Lock()
-		s.pendingCompletions++
-		s.desiredMu.Unlock()
-		return nil
-	}
 	if !ok {
 		s.logger.Warn("Job completed for unknown runner (already removed?)", slog.String("runnerName", jobInfo.RunnerName))
 		return nil
@@ -223,7 +215,10 @@ func (s *ScaleSetController) reconcileOne() bool {
 	}
 	if name, instanceID, ok := s.instances.claimRemoval(time.Now()); ok {
 		s.cleanupWG.Add(1)
-		go s.removeClaimedInstance(name, instanceID)
+		go func() {
+			defer s.cleanupWG.Done()
+			s.removeClaimedInstance(s.workCtx, name, instanceID)
+		}()
 		return true
 	}
 	target, canScale := s.scaleTarget()
@@ -281,9 +276,8 @@ func (s *ScaleSetController) scaleTarget() (target int, canScale bool) {
 	return min(s.maxRunners, s.minRunners+desired), canScale
 }
 
-func (s *ScaleSetController) removeClaimedInstance(name, instanceID string) {
-	defer s.cleanupWG.Done()
-	removeCtx, cancel := context.WithTimeout(s.workCtx, 30*time.Second)
+func (s *ScaleSetController) removeClaimedInstance(ctx context.Context, name, instanceID string) {
+	removeCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	keep, err := s.deregister(removeCtx, name, instanceID)
 	if keep {
 		cancel()
@@ -300,7 +294,7 @@ func (s *ScaleSetController) removeClaimedInstance(name, instanceID string) {
 	}
 
 	delay, tracked := s.instances.retryRemoval(name, instanceID, time.Now())
-	if !tracked || s.workCtx.Err() != nil {
+	if !tracked || ctx.Err() != nil {
 		return
 	}
 	s.logger.Error("Failed to remove runner, will retry",
@@ -308,7 +302,9 @@ func (s *ScaleSetController) removeClaimedInstance(name, instanceID string) {
 		slog.Duration("retryIn", delay),
 		slog.Any("error", err),
 	)
-	time.AfterFunc(delay, s.signalReconcile)
+	if !s.draining.Load() {
+		time.AfterFunc(delay, s.signalReconcile)
+	}
 }
 
 // deregister removes a runner that looks idle from GitHub before its instance
@@ -573,9 +569,10 @@ func (s *ScaleSetController) watchInstance(ctx context.Context, watcher provider
 	s.signalReconcile()
 }
 
-// Drain stops taking new work and waits for in-flight jobs to finish. Idle
-// runners are removed immediately because they hold no work. It returns when
-// no busy runners remain or ctx expires, whichever comes first.
+// Drain stops taking new work and waits for in-flight jobs and runner cleanup.
+// Apparently idle runners are deregistered before their instances are removed,
+// so GitHub can retain runners it assigned before JobStarted arrived. Failed
+// cleanup is retried until it succeeds or ctx expires.
 //
 // The listener must remain running while this method waits: JobCompleted
 // messages delivered through the listener are what move busy runners to zero.
@@ -592,28 +589,10 @@ func (s *ScaleSetController) Drain(ctx context.Context) error {
 	if err := s.waitWorker(ctx); err != nil {
 		return err
 	}
-	for name, instanceID := range s.instances.idleForRemoval() {
-		keep, err := s.deregister(ctx, name, instanceID)
-		if keep {
-			continue
-		}
-		if err == nil {
-			err = s.provider.RemoveInstance(ctx, instanceID)
-		}
-		if err != nil {
-			s.logger.Warn("Failed to remove idle runner during drain",
-				slog.String("name", name),
-				slog.Any("error", err))
-			continue
-		}
-		s.finishRemoval(name, instanceID)
-	}
+	s.instances.idleForRemoval()
 
 	_, busy := s.instances.counts()
 	s.logger.Info("Draining runners", slog.Int("busy", busy))
-	if busy == 0 {
-		return nil
-	}
 
 	poll := time.NewTicker(time.Second)
 	defer poll.Stop()
@@ -621,24 +600,34 @@ func (s *ScaleSetController) Drain(ctx context.Context) error {
 	defer progress.Stop()
 
 	for {
+		// Reconciliation has stopped, so drain owns cleanup, including retries
+		// left by a scale-down or startup cancelled by stopWork.
+		for ctx.Err() == nil {
+			name, instanceID, ok := s.instances.claimRemoval(time.Now())
+			if !ok {
+				break
+			}
+			s.removeClaimedInstance(ctx, name, instanceID)
+		}
+		_, _, busy, removing := s.instances.lifecycleCounts()
+		if busy == 0 && removing == 0 {
+			s.logger.Info("Runner drain complete", slog.Duration("waited", time.Since(started)))
+			return nil
+		}
+
 		select {
 		case <-ctx.Done():
-			_, busy = s.instances.counts()
 			s.logger.Warn("Runner drain ended before all jobs completed",
 				slog.Int("busy", busy),
+				slog.Int("removing", removing),
 				slog.Duration("waited", time.Since(started)),
 				slog.Any("error", ctx.Err()))
 			return ctx.Err()
 		case <-poll.C:
-			_, busy = s.instances.counts()
-			if busy == 0 {
-				s.logger.Info("Runner drain complete", slog.Duration("waited", time.Since(started)))
-				return nil
-			}
 		case <-progress.C:
-			_, busy = s.instances.counts()
-			s.logger.Info("Waiting for in-flight jobs to finish",
+			s.logger.Info("Waiting for runner drain",
 				slog.Int("busy", busy),
+				slog.Int("removing", removing),
 				slog.Duration("waited", time.Since(started)))
 		}
 	}

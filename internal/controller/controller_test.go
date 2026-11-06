@@ -201,14 +201,19 @@ type mockScaleset struct {
 	mu        sync.Mutex
 	generated int
 	// removeErr is what RemoveRunner returns for a runner ID; absent IDs succeed.
-	removeErr    map[int]error
-	deregistered []int
+	removeErr     map[int]error
+	removeErrOnce map[int]error
+	deregistered  []int
 }
 
 func (m *mockScaleset) RemoveRunner(_ context.Context, runnerID int64) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.deregistered = append(m.deregistered, int(runnerID))
+	if err, ok := m.removeErrOnce[int(runnerID)]; ok {
+		delete(m.removeErrOnce, int(runnerID))
+		return err
+	}
 	return m.removeErr[int(runnerID)]
 }
 

@@ -818,6 +818,12 @@ The default `drain-timeout` is `2h`. Shutdown signals have distinct meanings:
 | Third signal | Exit without waiting for cleanup |
 | `SIGINT` / Ctrl-C | Stop immediately; never drain |
 
+Before removing an apparently idle runner during drain or scale-down, runner
+asks GitHub to deregister it. If GitHub has already assigned a job, the runner
+is kept until that job finishes, even when `JobStarted` has not arrived yet.
+Deregistration and cleanup failures are retried during drain until they succeed
+or the configured drain timeout expires.
+
 Interactive Ctrl-C intentionally keeps its conventional "stop now" meaning.
 To drain a foreground process, send TERM explicitly:
 

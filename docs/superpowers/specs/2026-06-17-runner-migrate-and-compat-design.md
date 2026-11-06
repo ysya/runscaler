@@ -1,5 +1,8 @@
 # 設計:`runner migrate` + 升級相容(漸進式 deprecation)
 
+> Historical record: rename migration and compatibility requirements in this document were superseded by [legacy retirement](../plans/2026-11-07-retire-legacy-compatibility.md). Do not execute the retired migration/compatibility steps. Current runner root/user installation behavior remains supported.
+
+
 - 日期:2026-06-17
 - 狀態:草案(待 review)
 - 前置:`runscaler`→`runner` 改名 refactor 已完成並 merge 到 main

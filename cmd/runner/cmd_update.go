@@ -8,7 +8,6 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -23,8 +22,9 @@ import (
 var updateCmd = &cobra.Command{
 	Use:   "update",
 	Short: "Update runner to the latest release",
-	Long: `Check GitHub for the latest release and, if newer, download and replace
-the current binary in-place. The checksum is verified before installation.`,
+	Long: `Check GitHub for the latest release and replace the installed service's
+binary, or the current binary when no service is installed. Use --binary-path
+for an explicit binary-only update. Checksums are verified before installation.`,
 	Example: `  runner update            # Update to latest release
   runner update --check    # Check for updates without installing`,
 	RunE: runUpdate,
@@ -32,44 +32,65 @@ the current binary in-place. The checksum is verified before installation.`,
 
 func init() {
 	updateCmd.Flags().Bool("check", false, "Check for updates without installing")
+	updateCmd.Flags().String("binary-path", "", "Update only this explicit binary, without selecting or restarting a service")
 	cmd.AddCommand(updateCmd)
 }
 
 func runUpdate(cmd *cobra.Command, _ []string) error {
 	checkOnly, _ := cmd.Flags().GetBool("check")
+	invoking, err := updateExecutablePath()
+	if err != nil {
+		return fmt.Errorf("cannot determine updater path: %w", err)
+	}
+	execPath, target, err := resolveUpdateDestination(cmd, invoking)
+	if err != nil {
+		return err
+	}
+	if !checkOnly {
+		if err := checkUpdateAccess(execPath, invoking); err != nil {
+			return err
+		}
+	}
+	current := version
+	if !sameFilePath(execPath, invoking) {
+		current, err = installedBinaryVersion(cmd.Context(), execPath)
+		if err != nil {
+			return err
+		}
+	}
+	if target != nil {
+		announceInstallation(cmd, target)
+	} else {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Update target: %s\n", execPath)
+	}
 
-	if version == "dev" {
+	if current == "dev" {
 		fmt.Fprintln(cmd.ErrOrStderr(), "Warning: running a dev build — version comparison may be inaccurate.")
 	}
 
 	fmt.Fprintln(cmd.OutOrStdout(), "Checking for updates...")
 
-	release, err := versioncheck.Latest(cmd.Context())
+	release, err := latestUpdateRelease(cmd.Context())
 	if err != nil {
 		return fmt.Errorf("could not check for updates: %w", err)
 	}
 
-	if !versioncheck.IsNewer(version, release.TagName) {
-		fmt.Fprintf(cmd.OutOrStdout(), "Already up to date (%s).\n", version)
+	if !versioncheck.IsNewer(current, release.TagName) {
+		fmt.Fprintf(cmd.OutOrStdout(), "Already up to date (%s).\n", current)
 		return nil
 	}
 
-	fmt.Fprintf(cmd.OutOrStdout(), "New version available: %s (current: %s)\n", release.TagName, version)
+	fmt.Fprintf(cmd.OutOrStdout(), "New version available: %s (current: %s)\n", release.TagName, current)
 
 	if checkOnly {
 		fmt.Fprintf(cmd.OutOrStdout(), "Run without --check to install.\n")
 		return nil
 	}
 
-	execPath, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("could not determine executable path: %w", err)
-	}
-
 	fmt.Fprintf(cmd.OutOrStdout(), "Downloading %s...\n", release.TagName)
 
-	if err := versioncheck.Update(cmd.Context(), release.TagName, execPath); err != nil {
-		return updateFailure(err, execPath)
+	if err := installUpdateRelease(cmd.Context(), release.TagName, execPath); err != nil {
+		return updateFailure(err, execPath, invoking)
 	}
 
 	fmt.Fprintf(cmd.OutOrStdout(), "Updated to %s.\n", release.TagName)
@@ -79,7 +100,11 @@ func runUpdate(cmd *cobra.Command, _ []string) error {
 	// explicit when it is observable; failure is best-effort because health may
 	// be disabled or no service may be running.
 	address, port := config.DefaultHealthAddress, config.DefaultHealthPort
-	if cfg, cfgErr := loadConfig(cmd); cfgErr == nil {
+	configPath := ""
+	if target != nil {
+		configPath = target.ConfigPath
+	}
+	if cfg, cfgErr := loadConfigAtPath(cmd, configPath); cfgErr == nil {
 		address, port = cfg.HealthAddress, cfg.HealthPort
 	}
 	running := fetchRunningVersion(cmd.Context(), address, port, &http.Client{Timeout: 2 * time.Second})
@@ -91,9 +116,9 @@ func runUpdate(cmd *cobra.Command, _ []string) error {
 
 // updateFailure adds a sudo hint when the binary lives in a directory only
 // root can write, as a system service's binary must.
-func updateFailure(err error, execPath string) error {
+func updateFailure(err error, execPath, updater string) error {
 	if errors.Is(err, fs.ErrPermission) {
-		return fmt.Errorf("update failed: %w\n\n  %s is not writable by this user; run: sudo runner update", err, filepath.Dir(execPath))
+		return fmt.Errorf("update failed: %w\n\n  %s is not writable by this user; %s", err, filepath.Dir(execPath), updatePermissionHint(updater, execPath, lstatFile))
 	}
 	return fmt.Errorf("update failed: %w", err)
 }

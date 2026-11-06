@@ -36,8 +36,6 @@ func init() {
 	registerGitHubAppFlags(flags)
 	flags.Int("max-runners", config.DefaultMaxRunners, "Maximum concurrent runners")
 	flags.String("provider", "", "Instance provider (docker or tart)")
-	flags.String("backend", "", "Deprecated alias for --provider")
-	_ = flags.MarkDeprecated("backend", "use --provider instead")
 	flags.String("runner-image", "", "Runner container or Tart VM image")
 	flags.Bool("dind", config.DefaultDinD, "Enable Docker-in-Docker")
 	flags.String("shared-volume", "", "Shared volume path (e.g. /shared)")
@@ -76,7 +74,6 @@ func runInit(cmd *cobra.Command, args []string) error {
 	app := githubAppFromFlags(cmd.Flags())
 	maxRunners, _ := cmd.Flags().GetInt("max-runners")
 	providerName, _ := cmd.Flags().GetString("provider")
-	legacyBackend, _ := cmd.Flags().GetString("backend")
 	runnerImage, _ := cmd.Flags().GetString("runner-image")
 	dind, _ := cmd.Flags().GetBool("dind")
 	// Interactive mode: prompt for missing values
@@ -107,16 +104,9 @@ func runInit(cmd *cobra.Command, args []string) error {
 	}
 
 	providerChanged := cmd.Flags().Lookup("provider") != nil && cmd.Flags().Changed("provider")
-	backendChanged := cmd.Flags().Lookup("backend") != nil && cmd.Flags().Changed("backend")
-	if providerChanged && backendChanged {
-		return fmt.Errorf("--provider and deprecated --backend cannot be used together")
-	}
-	if backendChanged {
-		providerName = legacyBackend
-	}
 
 	// Provider selection
-	if !providerChanged && !backendChanged {
+	if !providerChanged {
 		useTart, err := promptYN("Use Tart VM provider for macOS runners?", false)
 		if err != nil {
 			return err

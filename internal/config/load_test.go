@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
 )
 
@@ -93,7 +92,7 @@ token = "token-b"
 func resolveTOML(t *testing.T, src string) []ScaleSetConfig {
 	t.Helper()
 	t.Setenv("RUNNER_TOKEN", "")
-	t.Setenv("RUNSCALER_TOKEN", "")
+
 	cfg := loadTOML(t, src)
 	return cfg.ResolveScaleSets()
 }
@@ -428,249 +427,10 @@ token = "token-b"
 	}
 }
 
-func TestLoad_LegacyBackendKeyMapsToProvider(t *testing.T) {
-	cfg := loadTOML(t, `
-url = "https://github.com/org"
-name = "runners"
-token = "ghp_x"
-backend = "tart"
-runner-image = "macos:latest"
-max-runners = 2
-`)
-	if len(cfg.Warnings) != 0 {
-		t.Errorf("legacy backend key must remain compatible, got warnings %q", cfg.Warnings)
-	}
-	if got := cfg.ResolveScaleSets()[0].Provider; got != "tart" {
-		t.Errorf("Provider = %q, want tart from legacy backend key", got)
-	}
-}
-
-func TestLoad_UnchangedProviderFlagDoesNotOverrideLegacyBackendConfig(t *testing.T) {
-	flags := pflag.NewFlagSet("test", pflag.ContinueOnError)
-	flags.String("provider", "", "")
-	flags.String("backend", "", "")
-	v := viper.New()
-	if err := v.BindPFlag("provider", flags.Lookup("provider")); err != nil {
-		t.Fatal(err)
-	}
-	if err := v.BindPFlag("backend", flags.Lookup("backend")); err != nil {
-		t.Fatal(err)
-	}
-	v.SetConfigType("toml")
-	if err := v.ReadConfig(strings.NewReader(`
-url = "https://github.com/org"
-name = "runners"
-token = "ghp_x"
-backend = "tart"
-runner-image = "macos:latest"
-max-runners = 2
-`)); err != nil {
-		t.Fatal(err)
-	}
-	cfg, err := Load(v)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := cfg.ResolveScaleSets()[0].Provider; got != "tart" {
-		t.Errorf("Provider = %q, want tart; unchanged --provider must not override legacy config", got)
-	}
-}
-
-func TestLoad_LegacyBackendOverridesInheritedProvider(t *testing.T) {
-	cfg := loadTOML(t, `
-provider = "docker"
-
-[[scaleset]]
-url = "https://github.com/org"
-name = "macos-runners"
-token = "ghp_x"
-backend = "tart"
-runner-image = "macos:latest"
-max-runners = 2
-`)
-	if len(cfg.Warnings) != 0 {
-		t.Errorf("legacy per-scale-set backend key must remain compatible, got warnings %q", cfg.Warnings)
-	}
-	if got := cfg.ResolveScaleSets()[0].Provider; got != "tart" {
-		t.Errorf("Provider = %q, want tart from per-scale-set legacy backend key", got)
-	}
-}
-
-func TestLoad_ProviderWinsOverLegacyBackendWithWarning(t *testing.T) {
-	cfg := loadTOML(t, `
-url = "https://github.com/org"
-name = "runners"
-token = "ghp_x"
-backend = "tart"
-provider = "docker"
-`)
-	if got := cfg.ResolveScaleSets()[0].Provider; got != "docker" {
-		t.Errorf("Provider = %q, want canonical provider value", got)
-	}
-	if len(cfg.Warnings) != 1 || !strings.Contains(cfg.Warnings[0], "backend is deprecated in favor of provider") {
-		t.Errorf("Warnings = %q, want backend/provider conflict warning", cfg.Warnings)
-	}
-}
-
-// TestLoad_LegacyCacheKeysStillWork pins the hardest compatibility
-// requirement in the vocabulary-unification design: three production hosts
-// self-update their binary without their config files changing, so
-// shared-volume-ttl and cache-space-budget must keep loading with zero
-// warnings and their values must land on the new fields — not just decode
-// silently into a field nothing reads.
-func TestLoad_LegacyCacheKeysStillWork(t *testing.T) {
-	v := viper.New()
-	v.SetConfigType("toml")
-	if err := v.ReadConfig(strings.NewReader(`
-url = "https://github.com/org"
-name = "runners"
-token = "ghp_x"
-[docker]
-shared-volume = "/shared"
-shared-volume-ttl = "72h"
-[tart]
-cache-space-budget = 150
-`)); err != nil {
-		t.Fatalf("read config: %v", err)
-	}
-	cfg, err := Load(v)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if len(cfg.Warnings) != 0 {
-		t.Errorf("legacy keys must not warn, got %q", cfg.Warnings)
-	}
-	ss := cfg.ResolveScaleSets()[0]
-	if ss.Docker.SharedVolumeMaxAge != 72*time.Hour {
-		t.Errorf("shared-volume-ttl should map to shared-volume-max-age, got %v",
-			ss.Docker.SharedVolumeMaxAge)
-	}
-	if ss.Tart.CacheBudgetGB != 150 {
-		t.Errorf("cache-space-budget should map to cache-budget, got %d", ss.Tart.CacheBudgetGB)
-	}
-}
-
-func TestLoad_NewKeyWinsOverLegacyWithWarning(t *testing.T) {
-	v := viper.New()
-	v.SetConfigType("toml")
-	_ = v.ReadConfig(strings.NewReader(`
-url = "https://github.com/org"
-name = "runners"
-token = "ghp_x"
-[docker]
-shared-volume = "/shared"
-shared-volume-ttl = "24h"
-shared-volume-max-age = "72h"
-`))
-	cfg, err := Load(v)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	ss := cfg.ResolveScaleSets()[0]
-	if ss.Docker.SharedVolumeMaxAge != 72*time.Hour {
-		t.Errorf("new key must win, got %v", ss.Docker.SharedVolumeMaxAge)
-	}
-	if len(cfg.Warnings) == 0 {
-		t.Error("setting both the legacy and new key should warn")
-	}
-}
-
-// TestLoad_TopLevelAliasInheritedByScaleset pins the specific risk called
-// out for this alias design: a [[scaleset]] entry that sets neither the old
-// nor the new form of an aliased key must still inherit the top level's
-// value — under the new, canonical field — exactly as it would for any
-// other [docker]/[tart] key. This only holds if applyAliases runs on the
-// top-level settings map before scalesetDefaults clones it into the base
-// every entry merges onto; aliasing only the final per-scaleset decode
-// result would miss this case entirely.
-func TestLoad_TopLevelAliasInheritedByScaleset(t *testing.T) {
-	cfg := loadTOML(t, `
-[docker]
-shared-volume = "/shared"
-shared-volume-ttl = "72h"
-
-[tart]
-cache-space-budget = 150
-
-[[scaleset]]
-url = "https://github.com/org-a"
-name = "runners-a"
-token = "token-a"
-`)
-	if len(cfg.Warnings) != 0 {
-		t.Errorf("Warnings = %q, want none", cfg.Warnings)
-	}
-	sets := cfg.ResolveScaleSets()
-	if got := sets[0].Docker.SharedVolumeMaxAge; got != 72*time.Hour {
-		t.Errorf("SharedVolumeMaxAge = %v, want 72h inherited via the top-level alias", got)
-	}
-	if got := sets[0].Tart.CacheBudgetGB; got != 150 {
-		t.Errorf("CacheBudgetGB = %d, want 150 inherited via the top-level alias", got)
-	}
-}
-
-// TestLoad_ScalesetLevelAliasOverridesInherited pins the other direction: a
-// [[scaleset]] entry setting the deprecated key itself must override an
-// inherited (already-canonical) top-level value — not survive alongside it
-// as an unrelated second key, which is what would happen if entry were
-// merged onto base before being aliased instead of after.
-func TestLoad_ScalesetLevelAliasOverridesInherited(t *testing.T) {
-	cfg := loadTOML(t, `
-[docker]
-shared-volume = "/shared"
-shared-volume-max-age = "10h"
-
-[[scaleset]]
-url = "https://github.com/org-a"
-name = "runners-a"
-token = "token-a"
-
-[scaleset.docker]
-shared-volume-ttl = "5h"
-
-[[scaleset]]
-url = "https://github.com/org-b"
-name = "runners-b"
-token = "token-b"
-`)
-	if len(cfg.Warnings) != 0 {
-		t.Errorf("Warnings = %q, want none", cfg.Warnings)
-	}
-	sets := cfg.ResolveScaleSets()
-	if got := sets[0].Docker.SharedVolumeMaxAge; got != 5*time.Hour {
-		t.Errorf("sets[0] SharedVolumeMaxAge = %v, want 5h (scaleset's own deprecated-key override)", got)
-	}
-	if got := sets[1].Docker.SharedVolumeMaxAge; got != 10*time.Hour {
-		t.Errorf("sets[1] SharedVolumeMaxAge = %v, want 10h (inherited)", got)
-	}
-}
-
 // TestLoad_ScalesetLevelBothFormsWarns pins that a [[scaleset]] entry
 // setting both forms of an aliased key itself — not just at the top level —
 // is caught too, and the warning is scoped to that scaleset like every
 // other per-entry diagnostic in this package.
-func TestLoad_ScalesetLevelBothFormsWarns(t *testing.T) {
-	cfg := loadTOML(t, `
-[[scaleset]]
-url = "https://github.com/org-a"
-name = "runners-a"
-token = "token-a"
-
-[scaleset.docker]
-shared-volume-ttl = "5h"
-shared-volume-max-age = "9h"
-`)
-	if len(cfg.Warnings) != 1 {
-		t.Fatalf("Warnings = %q, want exactly one", cfg.Warnings)
-	}
-	if !strings.HasPrefix(cfg.Warnings[0], "scaleset[0]: ") {
-		t.Errorf("warning = %q, want it scoped to scaleset[0]", cfg.Warnings[0])
-	}
-	sets := cfg.ResolveScaleSets()
-	if got := sets[0].Docker.SharedVolumeMaxAge; got != 9*time.Hour {
-		t.Errorf("SharedVolumeMaxAge = %v, want 9h (new key wins)", got)
-	}
-}
 
 // TestLoad_DockerCacheLongForm covers the other half of this task: the
 // [[docker.cache]] long form decodes through the same map-merge pipeline as
@@ -716,7 +476,7 @@ token = "token-a"
 
 func TestLoad_IdentityKeysNotInherited(t *testing.T) {
 	t.Setenv("RUNNER_TOKEN", "")
-	t.Setenv("RUNSCALER_TOKEN", "")
+
 	cfg := loadTOML(t, `
 url = "https://github.com/top"
 name = "top-runners"

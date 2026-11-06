@@ -17,8 +17,7 @@ import (
 )
 
 const (
-	DefaultLogFileName = "runner.log"
-	DefaultLogMaxSize  = int64(10 * 1024 * 1024)
+	DefaultLogMaxSize = int64(10 * 1024 * 1024)
 )
 
 // LogFileWriter is a concurrency-safe rotating writer shared by every logger

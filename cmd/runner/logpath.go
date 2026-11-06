@@ -42,7 +42,7 @@ func resolveLogFile(cfg config.Config, id layout.Identity) logFileDecision {
 		return logFileDecision{Path: lay.LogFile, Enabled: true}
 	}
 	path := *cfg.LogFile
-	if !id.Root {
+	if !id.System() {
 		return logFileDecision{Path: path, Enabled: true}
 	}
 	if abs, err := filepath.Abs(path); err == nil {
@@ -111,20 +111,4 @@ func logConsole(stdoutDiscarded, fileOpen bool) *os.File {
 		return os.Stderr
 	}
 	return os.Stdout
-}
-
-// oldDefaultLogFile returns the log older releases wrote beside the config
-// when it still exists and is not where runner writes now.
-func oldDefaultLogFile(cfg config.Config, usedConfig, current string) string {
-	if cfg.LogFile != nil || usedConfig == "" || current == "" {
-		return ""
-	}
-	old := filepath.Join(filepath.Dir(usedConfig), config.DefaultLogFileName)
-	if sameFilePath(old, current) {
-		return ""
-	}
-	if info, err := os.Stat(old); err != nil || !info.Mode().IsRegular() {
-		return ""
-	}
-	return old
 }

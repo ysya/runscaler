@@ -12,7 +12,7 @@ import (
 	"github.com/ysya/runscaler/internal/config"
 )
 
-func TestLoadConfigKeepsLegacyBackendWhenProviderFlagIsUnchanged(t *testing.T) {
+func TestLoadConfigKeepsProviderWhenFlagIsUnchanged(t *testing.T) {
 	viper.Reset()
 	t.Cleanup(viper.Reset)
 
@@ -21,7 +21,7 @@ func TestLoadConfigKeepsLegacyBackendWhenProviderFlagIsUnchanged(t *testing.T) {
 url = "https://github.com/org"
 name = "runners"
 token = "ghp_x"
-backend = "tart"
+provider = "tart"
 runner-image = "macos:latest"
 max-runners = 2
 `), 0o600); err != nil {
@@ -31,7 +31,6 @@ max-runners = 2
 	c := &cobra.Command{}
 	c.Flags().String("config", path, "")
 	c.Flags().String("provider", config.DefaultProvider, "")
-	c.Flags().String("backend", "", "")
 	c.Flags().Lookup("config").Changed = true
 
 	cfg, err := loadConfig(c)
@@ -39,7 +38,7 @@ max-runners = 2
 		t.Fatal(err)
 	}
 	if got := cfg.ResolveScaleSets()[0].Provider; got != "tart" {
-		t.Errorf("Provider = %q, want tart from legacy config", got)
+		t.Errorf("Provider = %q, want tart from config", got)
 	}
 }
 
@@ -47,14 +46,11 @@ func TestLoadConfigSurfacesParseError(t *testing.T) {
 	viper.Reset()
 	t.Cleanup(viper.Reset)
 
-	legacyDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(legacyDir, "config.toml"),
+	configDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(configDir, "config.toml"),
 		[]byte("this is := not valid toml ===\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	origDir := legacyConfigDir
-	legacyConfigDir = legacyDir
-	defer func() { legacyConfigDir = origDir }()
 
 	emptyCwd := t.TempDir()
 	wd, _ := os.Getwd()
@@ -64,42 +60,10 @@ func TestLoadConfigSurfacesParseError(t *testing.T) {
 	defer func() { _ = os.Chdir(wd) }()
 
 	c := &cobra.Command{}
-	c.PersistentFlags().String("config", "", "")
+	c.Flags().String("config", filepath.Join(configDir, "config.toml"), "")
 
 	if _, err := loadConfig(c); err == nil {
 		t.Error("expected a parse error to surface, got nil")
-	}
-}
-
-func TestLoadConfigFallsBackToLegacyDir(t *testing.T) {
-	viper.Reset()
-	t.Cleanup(viper.Reset)
-
-	legacyDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(legacyDir, "config.toml"),
-		[]byte("url = \"https://github.com/org\"\nname = \"x\"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	origDir := legacyConfigDir
-	legacyConfigDir = legacyDir
-	defer func() { legacyConfigDir = origDir }()
-
-	emptyCwd := t.TempDir()
-	wd, _ := os.Getwd()
-	if err := os.Chdir(emptyCwd); err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = os.Chdir(wd) }()
-
-	c := &cobra.Command{}
-	c.PersistentFlags().String("config", "", "")
-
-	cfg, err := loadConfig(c)
-	if err != nil {
-		t.Fatalf("loadConfig: %v", err)
-	}
-	if cfg.Defaults.RegistrationURL != "https://github.com/org" {
-		t.Errorf("expected config loaded from legacy dir, got url=%q", cfg.Defaults.RegistrationURL)
 	}
 }
 

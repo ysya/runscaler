@@ -27,9 +27,5 @@ func configSearchPaths() ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	legacy, err := userConfigPath("runscaler")
-	if err != nil {
-		return nil, err
-	}
-	return []string{".", filepath.Dir(current), filepath.Dir(defaultConfigPath), filepath.Dir(legacy), legacyConfigDir}, nil
+	return []string{".", filepath.Dir(current), filepath.Dir(defaultConfigPath)}, nil
 }

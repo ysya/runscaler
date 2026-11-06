@@ -47,7 +47,7 @@ max-runners = 10
 # github-app.private-key-file = "/absolute/path/to/runner-app.pem"
 # Use exactly one key source; the environment variable contains the full RSA PEM:
 # github-app.private-key-env = "RUNNER_GITHUB_APP_KEY"
-# App configuration disables ambient RUNNER_TOKEN/RUNSCALER_TOKEN fallback.
+# App configuration disables ambient RUNNER_TOKEN fallback.
 # Explicit token + App configuration is rejected.
 # max-runners = 10
 # min-runners = 0

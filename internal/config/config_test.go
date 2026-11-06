@@ -708,21 +708,11 @@ func TestDaemonWideDockerCleanupDefaultsOff(t *testing.T) {
 
 func TestResolveEnvTokenPrefersRunnerToken(t *testing.T) {
 	t.Setenv("RUNNER_TOKEN", "new-token")
-	t.Setenv("RUNSCALER_TOKEN", "legacy-token")
+
 	ss := &ScaleSetConfig{}
 	ss.resolveEnvToken()
 	if ss.Token != "new-token" {
 		t.Errorf("Token = %q, want %q (RUNNER_TOKEN must win)", ss.Token, "new-token")
-	}
-}
-
-func TestResolveEnvTokenFallsBackToLegacy(t *testing.T) {
-	t.Setenv("RUNNER_TOKEN", "") // unset/empty → must fall back
-	t.Setenv("RUNSCALER_TOKEN", "legacy-token")
-	ss := &ScaleSetConfig{}
-	ss.resolveEnvToken()
-	if ss.Token != "legacy-token" {
-		t.Errorf("Token = %q, want %q (legacy RUNSCALER_TOKEN fallback)", ss.Token, "legacy-token")
 	}
 }
 

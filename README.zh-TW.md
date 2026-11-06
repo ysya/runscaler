@@ -40,8 +40,7 @@ runner 採用**短生命週期**模式 — 每個容器／VM 只處理一個工�
   - [正常關閉](#graceful-shutdown)
 - [建置](#building)
 - [架構](#architecture)
-- [升級至 v0.10](#upgrading-to-v010)
-- [從 runscaler 升級](#upgrading-from-runscaler)
+- [升級前準備](#upgrade-requirements)
 - [授權條款](#license)
 
 <a id="how-it-works"></a>
@@ -129,17 +128,21 @@ flowchart LR
 **Shell 指令碼（Linux／macOS）：**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ysya/runscaler/main/install.sh | sh
+# Linux: root-owned system binary (the service runs as non-root)
+curl -fsSL https://raw.githubusercontent.com/ysya/runscaler/main/install.sh | sudo sh
+
+# macOS: user binary; Linux: opt into a user installation
+curl -fsSL https://raw.githubusercontent.com/ysya/runscaler/main/install.sh | sh -s -- --user
 ```
 
-預設安裝至 `~/.local/bin`（不需要 sudo）；以 root 執行時（例如 `curl -fsSL https://raw.githubusercontent.com/ysya/runscaler/main/install.sh | sudo sh`），則會安裝至 `/usr/local/bin`，系統服務的執行檔必須放在此處。可設定 `INSTALL_DIR` 自訂位置，或以 `RUNNER_VERSION` 指定版本：
+Linux 預設為系統安裝，需以 root 將 binary 安裝至 `/usr/local/bin`。macOS 預設安裝至 `~/.local/bin`；Linux 的 `--user` 也使用此使用者路徑。指令碼只下載 binary，不會建立帳號或服務。系統 binary 也可使用其他絕對路徑，但檔案與所有上層目錄都必須只有 root 能修改。可設定 `INSTALL_DIR` 自訂位置，或以 `RUNNER_VERSION` 指定版本：
 
 ```bash
 # Install to a custom location (e.g. system-wide)
-curl -fsSL https://raw.githubusercontent.com/ysya/runscaler/main/install.sh | INSTALL_DIR=/usr/local/bin sh
+curl -fsSL https://raw.githubusercontent.com/ysya/runscaler/main/install.sh | sudo env INSTALL_DIR=/usr/local/bin sh
 
 # Pin a specific version
-curl -fsSL https://raw.githubusercontent.com/ysya/runscaler/main/install.sh | RUNNER_VERSION=v1.2.3 sh
+curl -fsSL https://raw.githubusercontent.com/ysya/runscaler/main/install.sh | RUNNER_VERSION=v1.2.3 sh -s -- --user
 ```
 
 **透過 Go 安裝：**
@@ -472,7 +475,7 @@ github-app.private-key-file = "/absolute/path/to/runner-app.pem"
 
 產生的服務定義不會從執行安裝的 shell 複製 App 金鑰環境變數。這些服務請使用金鑰檔案，或明確透過服務管理程式提供該變數。
 
-存在 App 設定時，`RUNNER_TOKEN` 與舊有的 `RUNSCALER_TOKEN` 備援變數都會被忽略。若明確設定 `token` 或 `--token`，又同時提供 App 設定，便會發生錯誤。App 設定不完整時也會失敗，不會無聲地改用 PAT 驗證。
+存在 App 設定時，`RUNNER_TOKEN` 備援變數會被忽略。若明確設定 `token` 或 `--token`，又同時提供 App 設定，便會發生錯誤。App 設定不完整時也會失敗，不會無聲地改用 PAT 驗證。
 
 與 PAT 憑證一樣，App 憑證絕不會由 `[[scaleset]]` 項目繼承。請個別設定每個安裝；使用 App 與 PAT 的 runner 規模集可以在同一個程序中執行：
 
@@ -507,7 +510,7 @@ runner init --url https://github.com/your-org --name app-runners \
 
 避免透過 CLI 旗標傳入權杖（會出現在 `ps` 輸出中）。可改用以下兩種方式：
 
-**方式 1：`RUNNER_TOKEN` 環境變數** — 未設定 `--token` 旗標或設定檔值時，會自動使用此變數（舊名稱 `RUNSCALER_TOKEN` 仍可使用，但已棄用）：
+**方式 1：`RUNNER_TOKEN` 環境變數** — 未設定 `--token` 旗標或設定檔值時，會自動使用此變數：
 
 ```bash
 export RUNNER_TOKEN=ghp_xxx
@@ -594,7 +597,7 @@ pool-size = 2
 
 與 GitLab Runner 相同，`concurrent` 是整個管理程序的上限，而各 runner 規模集的 `max-runners` 則是其個別上限。控制器會在 JIT／供應器 啟動前預留全域容量，因此多個組織，以及混合使用 Docker/Tart 的 runner 規模集，合計都無法超額占用主機容量。系統會先為每個 runner 規模集預留 `min-runners` 下限所需的容量，再以先進先出（FIFO）順序分配剩餘容量。將 `concurrent` 保持為 `0` 時，會以所有已設定的 `max-runners` 值總和作為上限，以維持向下相容的行為。
 
-為相容既有安裝，仍接受已棄用的 `backend` TOML 設定鍵與 `--backend` 旗標。新的設定與產生的檔案皆使用 `provider`。
+使用 `provider` TOML 設定鍵與 `--provider` 旗標選擇 Docker 或 Tart。
 
 <a id="caching"></a>
 
@@ -760,7 +763,7 @@ sudo runner service install --user=false --force --config-path /etc/runner/confi
 runner service install --user --force --config-path ~/.config/runner/config.toml               # user service
 ```
 
-`--force` 會先驗證設定與二進位檔，並產生新的定義內容，之後才碰觸已安裝的定義。當定義過時，runner 會在日誌中記錄修正指令，使用它目前執行時的確切設定與二進位檔路徑：可能是這個 `--force` 重新安裝指令；若由更名前的 `runscaler` 定義啟動，則是 `runner migrate`；若是 root 服務但二進位檔不屬於 root，則會先複製至 `/usr/local/bin`，再重新安裝。
+`--force` 會先驗證設定與二進位檔，並產生新的定義內容，之後才碰觸已安裝的定義。當定義過時，runner 會在日誌中記錄修正指令，使用它目前執行時的確切設定與二進位檔路徑。若是系統服務但二進位檔不屬於 root，則會先提示複製至 `/usr/local/bin`，再重新安裝。
 
 之後，一般升級流程如下：
 
@@ -773,9 +776,28 @@ runner service restart     # waits for active jobs automatically
 
 ### 服務配置
 
-- **Linux 系統服務**以 root 身分執行，且執行的二進位檔必須只有 root 能修改，例如 `/usr/local/bin/runner`；對於任何以 root 身分執行的服務（`--user=false`，或由 root 執行 `--user`），`runner service install` 與 `runner migrate` 都會拒絕不符合此條件的二進位檔。unit 設定了 `ProtectSystem=strict`：`/etc/runner` 維持唯讀，日誌寫入 `LogsDirectory=runner`（`/var/log/runner`），而只有 `/tmp` 可寫入，供執行鎖使用。
+- **Linux 新系統安裝**由 root 安裝，以專用的 `runscaler` 非登入帳號執行。binary 保持 root 擁有；config／App key 為 `root:runscaler`、`0640`，`/etc/runner` 為 `0750`。HOME 與工作目錄為 `/var/lib/runner`；state 與 log 目錄由服務帳號擁有、權限為 `0750`。`ProtectSystem=strict` 讓設定維持唯讀，只開放 `/tmp`、state 與 `/var/log` 下的有效日誌目錄寫入。安裝會拒絕衝突帳號、連結或共用的憑證檔，以及已有其他擁有者資料的目錄。
+- **Linux user 安裝**使用 `runner service install --scope user`（或 `--user`），沿用使用者的 XDG 路徑、憑證與 Docker socket，不需要 sudo。拒絕建立 root 的 user service。
 - **macOS** 僅支援已登入使用者的 LaunchAgent。它會在登入時啟動，因此無人值守的主機請啟用自動登入，並從本機 GUI 工作階段安裝，而非透過 SSH。runner 在 macOS 上會拒絕以 root 身分執行、初始化、安裝或遷移。launchd 啟動 agent 時使用精簡的 `PATH`；若 `/opt/homebrew/bin` 與 `/usr/local/bin` 存在，runner 會將其附加至路徑，以便找到透過 Homebrew 安裝的 `tart`。agent 會捨棄 stdout（runner 會自行寫入輪替日誌），並將 stderr 保留在 `~/Library/Logs/runner/stderr.log`；此檔案不會輪替。
 - `/tmp/runner.lock` 的執行鎖可避免意外啟動第二個 runner；它不是防範本機使用者的安全邊界。
+
+```bash
+# New Linux system installation: configure first, then prepare and start
+sudo /usr/local/bin/runner init --output /etc/runner/config.toml
+sudo /usr/local/bin/runner service install --config-path /etc/runner/config.toml
+
+# macOS, or Linux with a user-owned binary and provider
+runner init
+runner service install --scope user
+```
+
+系統憑證必須在設定中明確指定。若使用 `token="env:NAME"` 或 App 的 `private-key-env`，請透過 `--environment-file /etc/runner/credentials.env` 指定受 root 保護的 systemd 環境檔；不會保存安裝 shell 的私人憑證。寫入 unit 前，會以服務身分探測 GitHub 與 provider；離線準備可用 `--no-start` 跳過即時探測。rootful Docker socket 僅透過 unit 的 supplementary groups 授權，仍具有等同 root 的能力，與 rootless daemon 不同；不會接管其他使用者的 rootless socket。
+
+管理指令（`status`、`logs`、`doctor`、`service …`、`update`）會選擇唯一已安裝服務的 binary／config。可用 `--scope user|system` 明確選擇；`--user`、`--user=false` 保留為別名。auto 模式遇到兩份安裝或無法確認的服務資訊會停止；安裝也會拒絕建立第二個範圍。Linux 探索需要支援 JSON 的 systemd `busctl` 及對應的服務管理匯流排。明確 scope 不會退回其他安裝。完全沒有已安裝服務時，仍保留獨立執行的設定搜尋方式。
+
+`runner update` 更新選定服務的 binary，不會自動重啟。系統 binary 更新需要 root，且目前的 updater 必須位於受 root 保護的路徑；可寫入的 user binary 不需要 sudo。若只更新指定 binary（包括 macOS 的 root 擁有共用 binary），可用 `sudo /absolute/path/current-runner update --binary-path /absolute/path/target-runner`，不會選擇或操作 LaunchAgent。系統 `doctor`／`doctor --fix` 請使用錯誤訊息提供的 `sudo systemd-run …`，重現服務 UID、unit 群組與憑證來源；單純 `sudo -u` 可能缺少 Docker 群組。`--fix` 仍要求 manager 已停止並取得共用執行鎖。私人 inline 環境值不會放入命令列，需先移至受保護的 EnvironmentFile。
+
+既有 Linux root 服務是持續支援的安裝模式，在 `update`、`--force` 下保留 root 身分。升級不要求轉換執行身分；非 root 預設適用於新系統安裝。本次規劃不新增 root → 非 root 轉換指令；解除安裝再安裝也不會自動接管既有 root 資料。升級不會搬移或刪除既有設定與備份檔案。
 
 <a id="systemd"></a>
 
@@ -793,17 +815,22 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+User=runscaler
+Group=runscaler
+# SupplementaryGroups=<configured socket GID> is added when required.
+WorkingDirectory=/var/lib/runner
 ExecStart="/usr/local/bin/runner" run --config "/etc/runner/config.toml"
 Restart=on-failure
 RestartSec=10s
 # Must exceed runner's drain budget so systemd does not SIGKILL an in-flight job.
 TimeoutStopSec=7260
-Environment="RUNNER_SERVICE_VERSION=2"
+Environment="RUNNER_SERVICE_VERSION=3"
 Environment="RUNNER_SERVICE_STOP_TIMEOUT=7260"
+Environment="RUNNER_SERVICE_SCOPE=system"
+Environment="HOME=/var/lib/runner"
 NoNewPrivileges=true
 ProtectSystem=strict
-LogsDirectory=runner
-ReadWritePaths=/tmp
+ReadWritePaths=/tmp /var/lib/runner /var/log/runner
 
 [Install]
 WantedBy=multi-user.target
@@ -851,58 +878,24 @@ runner 程序是**管理者**。每個已設定的 runner 規模集各有一個 
 - `HandleJobStarted` — 將 runner 標記為忙碌
 - `HandleJobCompleted` — 移除已完成工作的 runner
 
-<a id="upgrading-to-v010"></a>
+<a id="upgrade-requirements"></a>
 
-## 升級至 v0.10
+## 升級前準備
 
-v0.10 將 runner 自身的檔案位置改為平台的標準位置，但絕不搬移既有檔案。
+歷史更名相容期已結束。後續 release 僅產出 `runner-*` 壓縮檔，不再支援 `migrate` 指令、根指令 `runner --config` 直接啟動、`--backend`、自動搜尋 `runscaler` 設定目錄、舊服務名稱與 `RUNSCALER_TOKEN` 備援。啟動 manager 請使用 `runner run --config /absolute/path/config.toml`。
 
-| 既有配置 | 升級二進位檔之後 | 應採取的動作 |
-| --- | --- | --- |
-| Linux 系統服務 | 無法取得鎖，並印出修正指令 | 執行印出的指令；若二進位檔不屬於 root，會先將一份副本安裝至 `/usr/local/bin` |
-| Linux 使用者服務 | 可以執行；日誌位置變更；發出警告 | 執行印出的指令（`service install --force`，或針對更名前定義的 `runner migrate`） |
-| macOS LaunchAgent | 可以執行；日誌位置變更；發出警告 | 執行印出的指令（`service install --force`，或針對更名前定義的 `runner migrate`） |
-| macOS LaunchDaemon | 拒絕以 root 身分執行 | 依照下方步驟轉換 |
-| tmux／前景執行 | 日誌位置變更；提示舊檔案位置 | 無須處理；刪除舊的 `runner.log` 即可停止提示 |
+升級前請改用目前的設定名稱：
 
-<a id="macos-launchdaemon-to-launchagent"></a>
+| 已移除設定 | 目前設定 |
+| --- | --- |
+| `backend` | `provider` |
+| `docker.shared-volume-ttl` | `docker.shared-volume-max-age` |
+| `tart.cache-space-budget` | `tart.cache-budget` |
+| `RUNSCALER_TOKEN` 備援 | `RUNNER_TOKEN` |
 
-### 將 macOS LaunchDaemon 轉換為 LaunchAgent
+已移除的 TOML 設定鍵會明確報錯，不會自動翻譯或忽略。仍使用更名過渡期格式的安裝，須先手動準備目前的 binary、config 與服務定義，再升級至此版本。既有資料與舊備份檔案保持原樣。已使用目前 `runner` 格式的 Linux root 系統服務仍受支援，更新與 `--force` 都保留原身分。
 
-1. 記錄舊定義：`sudo cat /Library/LaunchDaemons/io.github.ysya.runner.plist`（或 `com.runscaler.agent.plist`），並記下 `ProgramArguments` 中的二進位檔與設定檔路徑。
-2. 移除服務：`sudo runner service uninstall --user=false`（也會移除舊版 plist）。
-3. 將設定檔交給你的使用者帳號：`mkdir -p ~/.config/runner && chmod 700 ~/.config/runner`，接著執行 `sudo install -o "$USER" -m 0600 <old config> ~/.config/runner/config.toml`
-4. root 使用的 Tart 映像檔位於 `/var/root/.tart`；請以你的使用者身分重新拉取（若 `[tart] home` 指向 root 的目錄，也請一併更新）。
-5. 將二進位檔保留在你的使用者能執行的位置（`~/.local/bin`，或使用 `sudo runner update` 更新的 `/usr/local/bin`）。
-6. 從本機 GUI 工作階段，以你的使用者身分安裝：`runner service install --config-path ~/.config/runner/config.toml`
-7. 啟用自動登入，讓 agent 在重新開機後啟動。
-
-<a id="upgrading-from-runscaler"></a>
-
-## 從 runscaler 升級
-
-`runscaler` 二進位檔現在更名為 `runner`（啟動操作是子命令：`runner run`）。安裝新的二進位檔後，請執行：
-
-    sudo runner migrate --user=false --dry-run # inspect system-level changes
-    sudo runner migrate --user=false           # perform system-level migration
-    runner migrate --user --dry-run        # inspect user-level changes
-    runner migrate --user                  # no sudo; uses ~/.config/runner
-
-在 macOS 上，`runner migrate` 與所有 `runner service` 指令預設使用使用者範圍（不加 sudo）。在 macOS 上，`runner migrate` 會拒絕系統範圍，也拒絕以 root 身分執行；請使用 `--user` 遷移。服務使用 `~/Library/LaunchAgents`，並在登入時啟動，無法在登入前啟動。若要管理既有的系統服務，請明確使用 `--user=false`。Linux 維持系統層級的預設值。使用者遷移不會停止或解除安裝系統層級的服務。
-
-`migrate` 會在變更設定前建立權限為 `0600` 的備份。備份檔名包含 runner 版本、UTC 時間戳記、設定檔 SHA-256 前綴，以及原始路徑指紋；相鄰的 JSON 資訊清單會記錄來源資訊與還原指令，而不會將設定值或權杖複製到資訊清單中。系統備份位於 `/var/lib/runner/backups`；`--user` 備份位於 `$XDG_STATE_HOME/runner/backups`（`~/.local/state/runner/backups`）。
-
-遷移後的副本會保留註解、順序、空白與設定值，同時將已棄用的設定鍵改為標準名稱（`backend` → `provider`、`docker.shared-volume-ttl` → `docker.shared-volume-max-age`，以及 `tart.cache-space-budget` → `tart.cache-budget`）。寫入之前會先離線驗證。服務切換時會停止但保留 `runscaler`，啟動並驗證 `runner`，之後才移除舊服務。若啟動失敗，會還原設定並重新啟動舊版服務。重新執行遷移時，會重複使用內容相同、以內容定址的備份。
-
-使用者遷移會讀取 `~/.config/runscaler/config.toml`，並寫入 `~/.config/runner/config.toml`。它會盡可能從已知的舊版服務探索自訂設定檔路徑；否則請使用 `runner migrate --user --config /path/to/config.toml` 明確指定。明確指定的來源檔案絕不會被移除。如果不存在使用者設定檔，而 `/etc/runscaler/config.toml` 或 `/etc/runner/config.toml` 可讀取，便可複製這些檔案；使用者遷移絕不會移除這些系統來源檔案。使用 `--backup-dir` 可覆寫備份位置。
-
-在 Linux 與 macOS 上，若 `XDG_CONFIG_HOME` 是非空的絕對路徑，就會取代使用者設定的 `~/.config`；`XDG_STATE_HOME` 則會取代使用者日誌（Linux）與備份的 `~/.local/state`。相對路徑值會被忽略。安裝使用者服務時，會將這些變數記錄於服務定義中，讓服務與 CLI 使用一致的設定。載入設定時，會依序搜尋目前目錄、使用者 runner 目錄、`/etc/runner`、使用者 runscaler 目錄，最後是 `/etc/runscaler`。明確指定的 `--config` 優先。除非提供 `--output`，否則 `init` 會寫入目前使用者的標準設定路徑；若目前目錄中的 `config.toml` 會優先被找到，則會發出警告。安裝使用者服務時，若有該本機檔案就會選用它，否則使用使用者 runner 設定檔，並在服務定義中儲存絕對路徑。安裝服務時，`--config-path` 優先於 `--config`。
-
-舊版 Docker 磁碟區預設會刻意保持原樣。只有在檢查過遷移結果後，才使用 `runner migrate --cleanup` 移除它（或在首次遷移時加上 `--cleanup`）。除此之外，遷移具有冪等性。
-
-過渡期間，舊二進位檔的 `runscaler update` 仍可取得這個版本（會發布相容資產）；舊版 `/etc/runscaler/config.toml` 仍會被讀取（附帶警告），舊的 `runscaler --config` 服務呼叫方式也仍可啟動（附帶警告），因此在遷移前不會造成中斷。
-
-手動替代方式：停止舊服務、備份並搬移設定檔、執行 `runner validate --config <path>`、安裝新服務並驗證，之後才解除安裝舊服務。
+獨立執行時，設定搜尋順序為目前目錄、目前使用者的 runner 設定目錄、`/etc/runner`；明確指定 `--config` 時使用該路徑。絕對路徑的 `XDG_CONFIG_HOME` 與 `XDG_STATE_HOME` 可自訂 user 設定／state 位置，相對值會被忽略。user 服務安裝會記錄這些變數與設定檔的絕對路徑，管理指令則使用已安裝服務的設定。`init` 預設使用目前身分的標準設定路徑；服務安裝時 `--config-path` 優先於 `--config`。
 
 <a id="license"></a>
 

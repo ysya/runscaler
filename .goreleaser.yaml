@@ -5,34 +5,21 @@ builds:
   - id: runner
     main: ./cmd/runner
     binary: runner
-    # Build settings are shared with the compat build via this anchor so
-    # the two cannot drift apart.
-    <<: &common_build
-      # Keep release binaries independent of the C compiler's CPU baseline.
-      # GOAMD64=v1 does not constrain cgo, which can otherwise emit AVX.
-      env:
-        - CGO_ENABLED=0
-      ldflags:
-        - -s -w
-        - -X main.version={{.Version}}
-        - -X main.commit={{.ShortCommit}}
-        - -X main.date={{.Date}}
-      goos:
-        - linux
-        - darwin
-      goarch:
-        - amd64
-        - arm64
-
-  # Transitional compat build: identical program, but the binary is named
-  # `runscaler` and shipped as runscaler-* archives so an OLD `runscaler update`
-  # can still fetch and extract this release. Build settings are inherited from
-  # the anchor above (cannot drift). Remove once no production hosts run the old
-  # `runscaler` binary — target: after the next two release cycles.
-  - id: runscaler-compat
-    main: ./cmd/runner
-    binary: runscaler
-    <<: *common_build
+    # Keep release binaries independent of the C compiler's CPU baseline.
+    # GOAMD64=v1 does not constrain cgo, which can otherwise emit AVX.
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.ShortCommit}}
+      - -X main.date={{.Date}}
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
 
 archives:
   # runner-{os}-{arch}.tar.gz containing the `runner` binary — what the new
@@ -43,15 +30,6 @@ archives:
     formats:
       - tar.gz
     name_template: "runner-{{ .Os }}-{{ .Arch }}"
-
-  # runscaler-{os}-{arch}.tar.gz containing the `runscaler` binary — what the
-  # old self-update fetches during the transition.
-  - id: runscaler-compat
-    ids:
-      - runscaler-compat
-    formats:
-      - tar.gz
-    name_template: "runscaler-{{ .Os }}-{{ .Arch }}"
 
 checksum:
   name_template: "checksums.txt"

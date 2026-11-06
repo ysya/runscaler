@@ -57,12 +57,16 @@ type serviceManager interface {
 }
 
 type installOpts struct {
-	user       bool
-	configPath string
-	binaryPath string
-	noStart    bool
-	force      bool
-	provider   string
+	runtimeUser         string
+	runtimeGroup        string
+	supplementaryGroups []string
+	environmentFiles    []string
+	user                bool
+	configPath          string
+	binaryPath          string
+	noStart             bool
+	force               bool
+	provider            string
 	// nil means the config omitted drain-timeout and therefore inherits the
 	// compiled-in default; a non-nil zero explicitly disables draining.
 	drainTimeout *time.Duration
@@ -95,10 +99,11 @@ var serviceCmd = &cobra.Command{
 
 On Linux, this uses systemd. On macOS, this uses launchd.
 macOS defaults to user-level LaunchAgents (no root required).
-Linux defaults to system-level services. Use --user for user-level services
-or --user=false to explicitly manage a system-level service.`,
-	Example: `  sudo runner service install --user=false # Install as system service
-  runner service install --user             # Install as user service
+Linux defaults to a system installation with a dedicated non-root runtime.
+Use --scope user (or --user) for a user installation. Management commands
+automatically select a unique installed service; use --scope to disambiguate.`,
+	Example: `  sudo runner service install             # Linux: install a non-root system service
+  runner service install --scope user        # Install as user service
   runner service status                     # Show service status
   runner service logs -f                    # Follow service logs
   sudo runner service uninstall --user=false # Remove system service`,
@@ -164,6 +169,7 @@ func init() {
 	f.String("binary-path", "", "Path to runner binary (default: auto-detect)")
 	f.Bool("no-start", false, "Install and enable without starting")
 	f.Bool("force", false, "Regenerate an existing service definition after validating the new one")
+	f.String("environment-file", "", "Protected systemd environment file for service credential references")
 
 	// uninstall / start / stop / restart share --user
 	for _, c := range []*cobra.Command{serviceUninstallCmd, serviceStartCmd, serviceStopCmd, serviceRestartCmd} {
@@ -230,7 +236,7 @@ func readServiceConfig(configPath string, required bool) (serviceConfigFacts, er
 
 // buildInstallOpts gathers everything a service definition depends on from
 // one read of the config. A missing config is only a warning for a fresh
-// install; --force and migration require one.
+// install; --force requires one.
 func buildInstallOpts(user bool, configPath, binaryPath string, requireConfig bool, getenv func(string) string) (installOpts, []string, error) {
 	facts, err := readServiceConfig(configPath, requireConfig)
 	if err != nil {
@@ -258,14 +264,23 @@ func buildInstallOpts(user bool, configPath, binaryPath string, requireConfig bo
 }
 
 func runServiceInstall(cmd *cobra.Command, _ []string) error {
-	user, _ := cmd.Flags().GetBool("user")
+	user, target, err := serviceCommandInstallation(cmd, true)
+	if err != nil {
+		return err
+	}
 	noStart, _ := cmd.Flags().GetBool("no-start")
 	force, _ := cmd.Flags().GetBool("force")
+	if target != nil && !force {
+		return errors.New("service already installed; use --force to regenerate its definition")
+	}
 
 	if err := refuseDarwinRoot(runtime.GOOS, os.Geteuid(), "install the runner service", pathExists); err != nil {
 		return err
 	}
-	if err := checkPrivileges(user); err != nil {
+	if user && os.Geteuid() == 0 {
+		return errors.New("refusing to install a root user's service; run as the actual user without sudo, or select --scope system on Linux")
+	}
+	if err := checkCommandPrivileges(cmd, user); err != nil {
 		return err
 	}
 	mgr, err := newServiceManager()
@@ -276,11 +291,23 @@ func runServiceInstall(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+	if target != nil && !cmd.Flags().Changed("binary-path") {
+		binaryPath = target.BinaryPath
+	}
 	configPath, err := resolveConfigPath(cmd)
 	if err != nil {
 		return err
 	}
-	opts, warnings, err := buildInstallOpts(user, configPath, binaryPath, force, os.Getenv)
+	if target != nil {
+		if cmd.Flags().Changed("config-path") || cmd.Flags().Changed("config") {
+			if !sameFilePath(configPath, target.ConfigPath) {
+				return errors.New("explicit config conflicts with the installed service; use its installed config path")
+			}
+		} else {
+			configPath = target.ConfigPath
+		}
+	}
+	opts, warnings, err := buildInstallOpts(user, configPath, binaryPath, force || (!user && runtime.GOOS == "linux" && target == nil), os.Getenv)
 	if err != nil {
 		return err
 	}
@@ -289,6 +316,40 @@ func runServiceInstall(cmd *cobra.Command, _ []string) error {
 	}
 	opts.noStart = noStart
 	opts.force = force
+	if runtime.GOOS == "linux" && !user {
+		if target == nil {
+			opts.runtimeUser = serviceAccountName
+			opts.runtimeGroup = serviceAccountName
+		} else {
+			applyInstalledIdentity(&opts, target)
+			if target.RuntimeUser == "root" || target.RuntimeUser == "0" {
+				fmt.Fprintln(cmd.ErrOrStderr(), "Existing system service retains its root runtime.")
+			}
+		}
+	}
+	if target != nil && user {
+		opts.xdgConfigHome = target.Environment["XDG_CONFIG_HOME"]
+		opts.xdgStateHome = target.Environment["XDG_STATE_HOME"]
+	}
+	if envFile, _ := cmd.Flags().GetString("environment-file"); envFile != "" {
+		if user || runtime.GOOS != "linux" {
+			return errors.New("--environment-file is supported only for Linux system services")
+		}
+		path, err := filepath.Abs(envFile)
+		if err != nil {
+			return err
+		}
+		opts.environmentFiles = []string{path}
+	}
+	if target != nil && !user && !cmd.Flags().Changed("environment-file") {
+		for key := range target.Environment {
+			switch key {
+			case "HOME", "RUNNER_SERVICE_SCOPE", "RUNNER_SERVICE_VERSION", "RUNNER_SERVICE_STOP_TIMEOUT", "XDG_CONFIG_HOME", "XDG_STATE_HOME":
+			default:
+				return errors.New("existing unit has custom inline environment; move it to a protected --environment-file before regeneration")
+			}
+		}
+	}
 	if err := installService(mgr, opts, validateServiceBinaryFor); err != nil {
 		var ub *untrustedBinaryError
 		if errors.As(err, &ub) {
@@ -336,8 +397,26 @@ func installService(mgr serviceManager, opts installOpts, validateBinary func(us
 		return err
 	}
 	opts.binaryPath = binaryPath
+	if !opts.user {
+		for _, path := range opts.environmentFiles {
+			if err := validateServiceFile(path); err != nil {
+				return err
+			}
+			if err := checkRootOnlyChain(path, lstatFile); err != nil {
+				return fmt.Errorf("system environment file must be root-protected: %w", err)
+			}
+		}
+	}
 	if _, err := renderServiceDefinition(opts); err != nil {
 		return err
+	}
+	if opts.runtimeUser != "" {
+		if err := prepareSystemInstallation(&opts); err != nil {
+			return err
+		}
+		if _, err := renderServiceDefinition(opts); err != nil {
+			return err
+		}
 	}
 	return mgr.install(opts)
 }
@@ -350,7 +429,7 @@ type untrustedBinaryError struct {
 }
 
 func (e *untrustedBinaryError) Error() string {
-	return "a service that runs as root must run a binary only root can modify: " + e.Err.Error()
+	return "a system service must run a binary only root can modify: " + e.Err.Error()
 }
 func (e *untrustedBinaryError) Unwrap() error { return e.Err }
 
@@ -397,43 +476,29 @@ func validateServiceBinaryFor(user bool, path string) (string, error) {
 }
 
 func runServiceUninstall(cmd *cobra.Command, _ []string) error {
-	user, _ := cmd.Flags().GetBool("user")
-	if err := checkPrivileges(user); err != nil {
+	user, _, err := serviceCommandInstallation(cmd, false)
+	if err != nil {
+		return err
+	}
+	if err := checkCommandPrivileges(cmd, user); err != nil {
 		return err
 	}
 	mgr, err := newServiceManager()
 	if err != nil {
 		return err
 	}
-	removedLegacy, err := uninstallServices(user, mgr.uninstall, legacyServiceInstalled, removeLegacyServiceFile)
-	if removedLegacy {
-		fmt.Printf("  ✓ Legacy runscaler service removed\n")
-	}
-	return err
-}
-
-// uninstallServices removes runner's service and any pre-rename definition at
-// the same level; finding only the legacy one is not an error.
-func uninstallServices(user bool, uninstallCurrent func(bool) error, legacyInstalled func(bool) bool, removeLegacy func(bool) error) (removedLegacy bool, err error) {
-	currentErr := uninstallCurrent(user)
-	if legacyInstalled(user) {
-		if err := removeLegacy(user); err != nil {
-			return false, errors.Join(currentErr, fmt.Errorf("remove legacy service: %w", err))
-		}
-		removedLegacy = true
-	}
-	if removedLegacy && errors.Is(currentErr, errServiceNotInstalled) {
-		return true, nil
-	}
-	return removedLegacy, currentErr
+	return mgr.uninstall(user)
 }
 
 func runServiceStart(cmd *cobra.Command, _ []string) error {
-	user, _ := cmd.Flags().GetBool("user")
+	user, _, err := serviceCommandInstallation(cmd, false)
+	if err != nil {
+		return err
+	}
 	if err := refuseDarwinRoot(runtime.GOOS, os.Geteuid(), "start the runner service", pathExists); err != nil {
 		return err
 	}
-	if err := checkPrivileges(user); err != nil {
+	if err := checkCommandPrivileges(cmd, user); err != nil {
 		return err
 	}
 	mgr, err := newServiceManager()
@@ -444,8 +509,11 @@ func runServiceStart(cmd *cobra.Command, _ []string) error {
 }
 
 func runServiceStop(cmd *cobra.Command, _ []string) error {
-	user, _ := cmd.Flags().GetBool("user")
-	if err := checkPrivileges(user); err != nil {
+	user, _, err := serviceCommandInstallation(cmd, false)
+	if err != nil {
+		return err
+	}
+	if err := checkCommandPrivileges(cmd, user); err != nil {
 		return err
 	}
 	mgr, err := newServiceManager()
@@ -456,11 +524,14 @@ func runServiceStop(cmd *cobra.Command, _ []string) error {
 }
 
 func runServiceRestart(cmd *cobra.Command, _ []string) error {
-	user, _ := cmd.Flags().GetBool("user")
+	user, _, err := serviceCommandInstallation(cmd, false)
+	if err != nil {
+		return err
+	}
 	if err := refuseDarwinRoot(runtime.GOOS, os.Geteuid(), "restart the runner service", pathExists); err != nil {
 		return err
 	}
-	if err := checkPrivileges(user); err != nil {
+	if err := checkCommandPrivileges(cmd, user); err != nil {
 		return err
 	}
 	mgr, err := newServiceManager()
@@ -471,7 +542,10 @@ func runServiceRestart(cmd *cobra.Command, _ []string) error {
 }
 
 func runServiceStatus(cmd *cobra.Command, _ []string) error {
-	user, _ := cmd.Flags().GetBool("user")
+	user, _, err := serviceCommandInstallation(cmd, false)
+	if err != nil {
+		return err
+	}
 	if err := statusPrivilegeError(runtime.GOOS, user, os.Geteuid()); err != nil {
 		return err
 	}
@@ -482,7 +556,7 @@ func runServiceStatus(cmd *cobra.Command, _ []string) error {
 	return mgr.status(user)
 }
 
-// statusPrivilegeError explains that launchctl's legacy list only shows
+// statusPrivilegeError explains that launchctl list only shows
 // system services to root.
 func statusPrivilegeError(goos string, user bool, euid int) error {
 	if goos == "darwin" && !user && euid != 0 {
@@ -497,14 +571,14 @@ func launchdServiceLogFile(user bool, exists func(string) bool) (path, note stri
 	if current := launchdStderrPath(user); exists(current) {
 		return current, ""
 	}
-	if legacy := launchdLegacyLogPath(user); exists(legacy) {
-		return legacy, fmt.Sprintf("  ⚠ Showing %s from a service generated by an older runner; regenerate it with 'runner service install --force' to log to %s", legacy, launchdStderrPath(user))
-	}
 	return "", ""
 }
 
 func runServiceLogs(cmd *cobra.Command, _ []string) error {
-	user, _ := cmd.Flags().GetBool("user")
+	user, _, err := serviceCommandInstallation(cmd, false)
+	if err != nil {
+		return err
+	}
 	follow, _ := cmd.Flags().GetBool("follow")
 	lines, _ := cmd.Flags().GetInt("lines")
 	mgr, err := newServiceManager()
@@ -529,6 +603,14 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+{{- if .RuntimeUser}}
+User={{.RuntimeUser}}
+Group={{.RuntimeGroup}}
+WorkingDirectory=/var/lib/runner
+{{- if .SupplementaryGroups}}
+SupplementaryGroups={{.SupplementaryGroups}}
+{{- end}}
+{{- end}}
 ExecStart={{.ExecStart}}
 Restart=on-failure
 RestartSec=10s
@@ -537,10 +619,15 @@ TimeoutStopSec={{.StopTimeoutSeconds}}
 {{- range .Environment}}
 Environment={{.}}
 {{- end}}
+{{- range .EnvironmentFiles}}
+EnvironmentFile={{.}}
+{{- end}}
 {{- if not .User}}
 NoNewPrivileges=true
 ProtectSystem=strict
+{{- if not .RuntimeUser}}
 LogsDirectory={{.LogsDirectory}}
+{{- end}}
 ReadWritePaths={{.ReadWritePaths}}
 {{- end}}
 
@@ -549,14 +636,18 @@ WantedBy={{- if .User}}default.target{{- else}}multi-user.target{{- end}}
 `))
 
 type systemdData struct {
-	Description        string
-	ExecStart          string
-	AfterDocker        bool
-	User               bool
-	LogsDirectory      string
-	ReadWritePaths     string
-	StopTimeoutSeconds int
-	Environment        []string
+	RuntimeUser         string
+	RuntimeGroup        string
+	SupplementaryGroups string
+	EnvironmentFiles    []string
+	Description         string
+	ExecStart           string
+	AfterDocker         bool
+	User                bool
+	LogsDirectory       string
+	ReadWritePaths      string
+	StopTimeoutSeconds  int
+	Environment         []string
 }
 
 type systemdManager struct{}
@@ -564,6 +655,16 @@ type systemdManager struct{}
 // renderSystemdUnit renders the complete unit used by install. Keeping
 // rendering separate from filesystem writes makes the sandbox directly testable.
 func renderSystemdUnit(opts installOpts) (string, error) {
+	if opts.runtimeUser != "" {
+		if opts.user || !validServicePrincipal(opts.runtimeUser) || !validServicePrincipal(opts.runtimeGroup) || opts.runtimeUser == "root" || opts.runtimeUser == "0" || opts.runtimeGroup == "root" || opts.runtimeGroup == "0" {
+			return "", errors.New("invalid non-root system service identity")
+		}
+		for _, group := range opts.supplementaryGroups {
+			if !validServicePrincipal(group) || group == "root" || group == "0" {
+				return "", errors.New("invalid service supplementary group")
+			}
+		}
+	}
 	binary, err := systemdExecutable(opts.binaryPath)
 	if err != nil {
 		return "", fmt.Errorf("binary path: %w", err)
@@ -574,17 +675,33 @@ func renderSystemdUnit(opts installOpts) (string, error) {
 	}
 	logsDir, _ := systemdLogsDirectory(opts.logFile)
 	data := systemdData{
-		Description:   serviceDescription,
-		ExecStart:     binary + " run --config " + configPath,
-		AfterDocker:   opts.provider == "docker",
-		User:          opts.user,
-		LogsDirectory: logsDir,
+		RuntimeUser:         opts.runtimeUser,
+		RuntimeGroup:        opts.runtimeGroup,
+		SupplementaryGroups: strings.Join(opts.supplementaryGroups, " "),
+		Description:         serviceDescription,
+		ExecStart:           binary + " run --config " + configPath,
+		AfterDocker:         opts.provider == "docker",
+		User:                opts.user,
+		LogsDirectory:       logsDir,
 		// ProtectSystem=strict leaves /tmp read-only, where runner run creates
 		// its machine-wide lock. PrivateTmp would not help: a private /tmp
 		// hides the lock from runners started outside the service. Unix
 		// sockets such as Docker's stay connectable on read-only paths.
 		ReadWritePaths:     filepath.Dir(runnerlock.DefaultPath),
 		StopTimeoutSeconds: int(serviceStopTimeout(opts.drainTimeout).Seconds()),
+	}
+	if opts.runtimeUser != "" {
+		data.ReadWritePaths += " /var/lib/runner " + filepath.Join(layout.SystemLogRoot, logsDir)
+	}
+	for _, path := range opts.environmentFiles {
+		if !filepath.IsAbs(path) {
+			return "", errors.New("service environment file must be absolute")
+		}
+		quoted, err := systemdValue(path)
+		if err != nil {
+			return "", err
+		}
+		data.EnvironmentFiles = append(data.EnvironmentFiles, quoted)
 	}
 	for _, v := range serviceEnvironment(opts) {
 		assignment, err := systemdValue(v.Key + "=" + v.Value)
@@ -609,6 +726,14 @@ func serviceEnvironment(opts installOpts) []envVar {
 	env := []envVar{
 		{Key: serviceVersionEnv, Value: strconv.Itoa(currentServiceVersion)},
 		{Key: serviceStopTimeoutEnv, Value: strconv.Itoa(int(serviceStopTimeout(opts.drainTimeout).Seconds()))},
+	}
+	scope := "system"
+	if opts.user {
+		scope = "user"
+	}
+	env = append(env, envVar{Key: "RUNNER_SERVICE_SCOPE", Value: scope})
+	if opts.runtimeUser != "" {
+		env = append(env, envVar{Key: "HOME", Value: "/var/lib/runner"})
 	}
 	if opts.user {
 		if filepath.IsAbs(opts.xdgConfigHome) {
@@ -879,16 +1004,6 @@ func launchdStderrPath(user bool) string {
 	return "/var/log/runner/stderr.log"
 }
 
-// launchdLegacyLogPath is the combined stdout and stderr file of plists
-// generated before stdout was discarded.
-func launchdLegacyLogPath(user bool) string {
-	if user {
-		home, _ := os.UserHomeDir()
-		return filepath.Join(home, "Library", "Logs", "runner.log")
-	}
-	return "/var/log/runner.log"
-}
-
 func (m *launchdManager) plistPath(user bool) string {
 	if user {
 		home, _ := os.UserHomeDir()
@@ -1002,6 +1117,9 @@ func (m *launchdManager) logs(user bool, follow bool, lines int) error {
 
 func checkPrivileges(user bool) error {
 	if user {
+		if os.Geteuid() == 0 {
+			return errors.New("user service operations must run as the actual user without sudo")
+		}
 		return nil
 	}
 	if os.Geteuid() != 0 {
@@ -1010,6 +1128,27 @@ func checkPrivileges(user bool) error {
 			"  Or use --user:  runner service install --user")
 	}
 	return nil
+}
+
+func checkCommandPrivileges(cmd *cobra.Command, user bool) error {
+	err := checkPrivileges(user)
+	if err == nil || user {
+		return err
+	}
+	binary, exeErr := os.Executable()
+	if exeErr != nil {
+		return err
+	}
+	if target := targetInContext(cmd); target != nil && target.BinaryPath != "" {
+		binary = target.BinaryPath
+	}
+	parts := []string{"sudo", shellQuotePath(binary), "service", cmd.Name(), "--scope", "system"}
+	for _, name := range []string{"config", "config-path", "binary-path", "environment-file", "force", "no-start"} {
+		if f := cmd.Flags().Lookup(name); f != nil && f.Changed {
+			parts = append(parts, "--"+name+"="+shellQuotePath(f.Value.String()))
+		}
+	}
+	return fmt.Errorf("system service management requires root; run:\n\n  %s", strings.Join(parts, " "))
 }
 
 // resolveBinaryPath returns the real file the service will execute; the
@@ -1099,38 +1238,4 @@ func runCmdPassthrough(name string, args ...string) error {
 		return fmt.Errorf("%s %s failed: %w", name, strings.Join(args, " "), err)
 	}
 	return nil
-}
-
-// serviceFilePresent reports whether a service file for the CURRENT OS exists
-// at the given level — a systemd unit on Linux, a launchd plist on macOS.
-// Checking only the current platform avoids false positives from stale files
-// left by a different OS.
-func serviceFilePresent(user bool, systemdUnit, launchdPlist string) bool {
-	var p string
-	switch runtime.GOOS {
-	case "linux":
-		if user {
-			home, _ := os.UserHomeDir()
-			p = filepath.Join(home, ".config", "systemd", "user", systemdUnit)
-		} else {
-			p = filepath.Join(systemdSystemDir, systemdUnit)
-		}
-	case "darwin":
-		if user {
-			home, _ := os.UserHomeDir()
-			p = filepath.Join(home, "Library", "LaunchAgents", launchdPlist)
-		} else {
-			p = filepath.Join(launchdSystemDir, launchdPlist)
-		}
-	default:
-		return false
-	}
-	_, err := os.Stat(p)
-	return err == nil
-}
-
-// newServiceInstalled reports whether the new runner service is installed at
-// the given level (current OS only).
-func newServiceInstalled(user bool) bool {
-	return serviceFilePresent(user, systemdUnitFile, launchdPlistFile)
 }

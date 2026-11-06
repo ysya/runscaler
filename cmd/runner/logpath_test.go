@@ -26,6 +26,20 @@ func TestLogWriterKeepsDisabledFileLoggingNil(t *testing.T) {
 	config.NewLoggerWithWriter("info", "text", w, logWriter(disabled)).Info("still logs")
 }
 
+func TestNonRootSystemLogDecisionKeepsGrantedSystemDirectory(t *testing.T) {
+	id := layout.Identity{GOOS: "linux", Home: "/var/lib/runner", ServiceScope: "system"}
+	outside := "/home/admin/not-granted/runner.log"
+	got := resolveLogFile(config.Config{LogFile: &outside}, id)
+	if got.Path != "/var/log/runner/runner.log" || got.Warning == "" {
+		t.Fatalf("system log decision = %+v", got)
+	}
+	custom := "/var/log/ci/runner.log"
+	got = resolveLogFile(config.Config{LogFile: &custom}, id)
+	if got.Path != custom || got.Fallback != "/var/log/runner/runner.log" {
+		t.Fatalf("custom system log = %+v", got)
+	}
+}
+
 func TestResolveLogFile(t *testing.T) {
 	str := func(s string) *string { return &s }
 	user := layout.Identity{GOOS: "linux", Home: "/home/ada"}
@@ -90,36 +104,6 @@ func TestOpenRunLogFallsBackOnce(t *testing.T) {
 	w, path, warnings = openRunLog(layout.Identity{}, logFileDecision{Path: "/nowhere/runner.log", Enabled: true})
 	if w != nil || path != "" || len(tried) != 1 || len(warnings) != 1 {
 		t.Fatalf("without fallback: w=%v path=%q tried=%v warnings=%q", w, path, tried, warnings)
-	}
-}
-
-func TestOldDefaultLogFile(t *testing.T) {
-	dir := t.TempDir()
-	usedConfig := filepath.Join(dir, "config.toml")
-	old := filepath.Join(dir, "runner.log")
-	current := filepath.Join(t.TempDir(), "runner.log")
-	explicit := old
-
-	if got := oldDefaultLogFile(config.Config{}, usedConfig, current); got != "" {
-		t.Fatalf("missing old log reported as %q", got)
-	}
-	if err := os.WriteFile(old, []byte("x"), 0o640); err != nil {
-		t.Fatal(err)
-	}
-	if got := oldDefaultLogFile(config.Config{}, usedConfig, current); got != old {
-		t.Fatalf("oldDefaultLogFile() = %q, want %q", got, old)
-	}
-	if got := oldDefaultLogFile(config.Config{}, usedConfig, old); got != "" {
-		t.Fatalf("current log reported as old: %q", got)
-	}
-	if got := oldDefaultLogFile(config.Config{LogFile: &explicit}, usedConfig, current); got != "" {
-		t.Fatalf("explicit log-file reported as old default: %q", got)
-	}
-	if got := oldDefaultLogFile(config.Config{}, "", current); got != "" {
-		t.Fatalf("flags-only run reported an old log: %q", got)
-	}
-	if got := oldDefaultLogFile(config.Config{}, usedConfig, ""); got != "" {
-		t.Fatalf("run without a log file reported an old log: %q", got)
 	}
 }
 

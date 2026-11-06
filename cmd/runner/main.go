@@ -55,7 +55,7 @@ func init() {
 
 	flags := runCommand.Flags()
 
-	// Per-scaleset (also used as legacy single mode)
+	// Per-scaleset (also used by flat single mode)
 	flags.String("url", "", "Registration URL (e.g. https://github.com/org)")
 	flags.String("name", "", "Name of the scale set (also used as runs-on label)")
 	flags.String("token", "", "Personal access token")
@@ -66,8 +66,6 @@ func init() {
 	flags.String("runner-group", config.DefaultRunnerGroup, "Runner group name")
 	flags.String("runner-image", config.DefaultRunnerImage, "Docker image for runners")
 	flags.String("provider", config.DefaultProvider, "Instance provider (docker or tart)")
-	flags.String("backend", "", "Deprecated alias for --provider")
-	_ = flags.MarkDeprecated("backend", "use --provider instead")
 
 	// Docker provider
 	flags.String("docker-socket", config.DefaultDockerSocket, "Path to Docker socket")
@@ -137,7 +135,7 @@ func main() {
 }
 
 // startManager loads config, sets up signal handling, and runs the runner manager.
-// Shared by `runner run` and the root drop-in compat path. var (not func) so
+// Used by `runner run`. var (not func) so
 // tests can stub it.
 var startManager = func(cmd *cobra.Command) error {
 	// Runtime failures are not usage errors; the full flag list buried the
@@ -248,14 +246,6 @@ or a single scale set via 'runner run' CLI flags.`,
   # Using CLI flags
   runner run --url https://github.com/org --name my-runners --token ghp_xxx`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		// Drop-in compat: an old `runscaler --config X` invocation (e.g. a
-		// pre-rename systemd unit after self-update) reaches the root with
-		// --config set and no subcommand. Warn and start anyway so the
-		// service keeps working; bare `runner` still just prints help.
-		if cmd.PersistentFlags().Changed("config") {
-			warnLegacy("starting via `runner --config` is deprecated — use `runner run` (or `runner migrate` to update your service)")
-			return startManager(cmd)
-		}
 		return cmd.Help()
 	},
 }
@@ -278,7 +268,7 @@ func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) e
 		return fmt.Errorf("invalid global configuration: %w", err)
 	}
 	id := layout.CurrentIdentity()
-	logFile, logPath, logWarnings := openRunLog(id, resolveLogFile(cfg, id))
+	logFile, _, logWarnings := openRunLog(id, resolveLogFile(cfg, id))
 	for _, w := range logWarnings {
 		fmt.Fprintln(os.Stderr, "Warning: "+w)
 	}
@@ -287,10 +277,6 @@ func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) e
 	}
 	console := logConsole(stdoutIsDevNull(), logFile != nil)
 	logger := config.NewLoggerWithWriter(cfg.LogLevel, cfg.LogFormat, console, logWriter(logFile))
-	if old := oldDefaultLogFile(cfg, viper.ConfigFileUsed(), logPath); old != "" {
-		logger.Info("Log file location changed; the old file is left in place",
-			slog.String("path", logPath), slog.String("old", old))
-	}
 
 	// Non-fatal config diagnostics (unknown keys, mixed single/multi mode).
 	// Warn only — a self-updated deployment with an older config must keep

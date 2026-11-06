@@ -152,21 +152,6 @@ type DockerConfig struct {
 	// and listed by `runner cache`, and startup warns about the missing
 	// setting.
 	SharedVolumeMaxAge time.Duration `mapstructure:"shared-volume-max-age"`
-	// SharedVolumeTTL is this field's pre-2026-08-14 name.
-	//
-	// Deprecated: superseded by SharedVolumeMaxAge; config loading never
-	// populates this field. Load's applyAliases step (load.go) always moves
-	// a configured shared-volume-ttl value onto shared-volume-max-age and
-	// deletes the old key from the settings map before any decode runs, so
-	// a live mapstructure tag here would never fire in the working case —
-	// and if applyAliases ever regressed, a live tag would silently swallow
-	// a legacy config's value into this field (which nothing reads) instead
-	// of surfacing the regression as the loud "unknown config key" warning
-	// it should. mapstructure:"-" makes that the only possible outcome.
-	// Kept only so Go code that still constructs
-	// DockerConfig{SharedVolumeTTL: …} directly (not through config
-	// loading) keeps compiling; read SharedVolumeMaxAge instead.
-	SharedVolumeTTL time.Duration `mapstructure:"-"`
 	// SharedVolumeCleanupInterval is how often the cleanup sweep runs while
 	// runner is up. Ignored when SharedVolumeMaxAge is 0. Defaults to
 	// DefaultSharedVolumeCleanupInterval when unset.
@@ -415,14 +400,6 @@ type TartConfig struct {
 	// sweep — least-recently-used entries are removed until the total fits.
 	// 0 (default) means no size cap (age-based cleanup still runs).
 	CacheBudgetGB int `mapstructure:"cache-budget"`
-	// CacheSpaceBudgetGB is this field's pre-2026-08-14 name.
-	//
-	// Deprecated: superseded by CacheBudgetGB, for the same reason and in
-	// the same way DockerConfig.SharedVolumeTTL is deprecated in favor of
-	// SharedVolumeMaxAge — see that field's doc comment. mapstructure:"-"
-	// because Load's applyAliases step (load.go) always moves a configured
-	// cache-space-budget value onto CacheBudgetGB before decoding.
-	CacheSpaceBudgetGB int `mapstructure:"-"`
 	// CacheCleanupInterval is how often the prune sweep runs while runner
 	// is up. Ignored when cache cleanup is disabled. Defaults to
 	// DefaultTartCacheCleanupInterval when unset.
@@ -526,7 +503,6 @@ func (ss *ScaleSetConfig) IsTartCacheCleanupEnabled() bool {
 // Supports two patterns:
 //   - token = "env:VARIABLE_NAME" — reads from the named env var
 //   - Empty token with RUNNER_TOKEN env var set — uses that as fallback
-//     (the legacy RUNSCALER_TOKEN is still honored during the transition)
 func (ss *ScaleSetConfig) resolveEnvToken() {
 	if ss.GitHubApp != nil {
 		return // App selection must not acquire an ambient personal token.
@@ -539,10 +515,7 @@ func (ss *ScaleSetConfig) resolveEnvToken() {
 	if ss.Token == "" {
 		if v := os.Getenv("RUNNER_TOKEN"); v != "" {
 			ss.Token = v
-		} else if v := os.Getenv("RUNSCALER_TOKEN"); v != "" {
-			// Deprecated: kept so existing deployments keep working during the
-			// runscaler→runner transition. Remove in a future release.
-			ss.Token = v
+
 		}
 	}
 }

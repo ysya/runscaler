@@ -1,5 +1,8 @@
 # Runner Migrate & Upgrade-Compat Implementation Plan
 
+> Historical record: rename migration and compatibility requirements in this document were superseded by [legacy retirement](../plans/2026-11-07-retire-legacy-compatibility.md). Do not execute the retired migration/compatibility steps. Current runner root/user installation behavior remains supported.
+
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Let existing `runscaler` deployments upgrade to `runner` without breaking — via config-path fallback, a drop-in compat for legacy start invocations, and an opt-in `runner migrate` command that converts config/volume/service to the new format.

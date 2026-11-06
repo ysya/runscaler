@@ -10,10 +10,9 @@ import (
 // darwinSystemPlists are LaunchDaemon definitions older releases installed.
 var darwinSystemPlists = []string{
 	launchdSystemDir + "/" + launchdPlistFile,
-	launchdSystemDir + "/" + legacyLaunchdPlist,
 }
 
-// refuseDarwinRoot stops root from running, installing or migrating runner on
+// refuseDarwinRoot stops root from running or installing runner on
 // macOS: Tart keeps images in the invoking user's ~/.tart and Docker Desktop
 // runs per user, so a root instance sees neither.
 func refuseDarwinRoot(goos string, euid int, action string, exists func(string) bool) error {

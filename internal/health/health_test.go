@@ -10,12 +10,21 @@ import (
 	"github.com/ysya/runscaler/internal/metrics"
 )
 
-// stubScaler implements RunnerCounter for testing.
-type stubScaler struct {
+// stubController implements InstanceCounter for testing.
+type stubController struct {
 	idle, busy int
 }
 
-func (s *stubScaler) RunnerCounts() (int, int) { return s.idle, s.busy }
+func (s *stubController) InstanceCounts() (int, int) { return s.idle, s.busy }
+
+type stubLifecycleController struct {
+	provisioning, idle, busy, removing int
+}
+
+func (s *stubLifecycleController) InstanceCounts() (int, int) { return s.idle, s.busy }
+func (s *stubLifecycleController) InstanceLifecycleCounts() (int, int, int, int) {
+	return s.provisioning, s.idle, s.busy, s.removing
+}
 
 // stubMetrics implements MetricsProvider for testing.
 type stubMetrics struct {
@@ -54,9 +63,9 @@ func TestHealthzEmpty(t *testing.T) {
 	}
 }
 
-func TestHealthzWithScaler(t *testing.T) {
+func TestHealthzWithController(t *testing.T) {
 	h := newTestServer()
-	h.RegisterScaler("test-set", &stubScaler{idle: 2, busy: 3})
+	h.RegisterController("test-set", &stubController{idle: 2, busy: 3})
 
 	req := httptest.NewRequest("GET", "/healthz", nil)
 	w := httptest.NewRecorder()
@@ -78,9 +87,44 @@ func TestHealthzWithScaler(t *testing.T) {
 	}
 }
 
+func TestHealthzWithLifecycleController(t *testing.T) {
+	h := newTestServer()
+	h.RegisterController("test-set", &stubLifecycleController{provisioning: 1, idle: 2, busy: 3, removing: 4})
+
+	req := httptest.NewRequest("GET", "/healthz", nil)
+	w := httptest.NewRecorder()
+	h.handleHealthz(w, req)
+
+	var resp HealthResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	ss := resp.ScaleSets[0]
+	if ss.Provisioning != 1 || ss.Idle != 2 || ss.Busy != 3 || ss.Removing != 4 {
+		t.Fatalf("lifecycle = %d/%d/%d/%d, want 1/2/3/4", ss.Provisioning, ss.Idle, ss.Busy, ss.Removing)
+	}
+}
+
+func TestHealthzWithCapacity(t *testing.T) {
+	h := newTestServer()
+	h.SetCapacityProvider(func() CapacityStatus { return CapacityStatus{Limit: 10, InUse: 4} })
+
+	req := httptest.NewRequest("GET", "/healthz", nil)
+	w := httptest.NewRecorder()
+	h.handleHealthz(w, req)
+
+	var resp HealthResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Capacity == nil || resp.Capacity.Limit != 10 || resp.Capacity.InUse != 4 {
+		t.Fatalf("capacity = %+v, want limit 10 in_use 4", resp.Capacity)
+	}
+}
+
 func TestHealthzWithMetrics(t *testing.T) {
 	h := newTestServer()
-	h.RegisterScaler("test-set", &stubScaler{idle: 1, busy: 0})
+	h.RegisterController("test-set", &stubController{idle: 1, busy: 0})
 	h.RegisterMetrics("test-set", &stubMetrics{snap: metrics.Snapshot{
 		JobsStarted:    10,
 		JobsCompleted:  8,
@@ -107,7 +151,7 @@ func TestHealthzWithMetrics(t *testing.T) {
 	}
 }
 
-func TestReadyzNoScalers(t *testing.T) {
+func TestReadyzNoControllers(t *testing.T) {
 	h := newTestServer()
 
 	req := httptest.NewRequest("GET", "/readyz", nil)
@@ -127,9 +171,10 @@ func TestReadyzNoScalers(t *testing.T) {
 	}
 }
 
-func TestReadyzWithScaler(t *testing.T) {
+func TestReadyzWithController(t *testing.T) {
 	h := newTestServer()
-	h.RegisterScaler("test-set", &stubScaler{idle: 1, busy: 0})
+	h.RegisterController("test-set", &stubController{idle: 1, busy: 0})
+	h.MarkConnected("test-set")
 
 	req := httptest.NewRequest("GET", "/readyz", nil)
 	w := httptest.NewRecorder()
@@ -148,11 +193,64 @@ func TestReadyzWithScaler(t *testing.T) {
 	}
 }
 
-func TestUnregisterScaler(t *testing.T) {
+func TestReadyzDisconnectedController(t *testing.T) {
 	h := newTestServer()
-	h.RegisterScaler("test-set", &stubScaler{idle: 1, busy: 0})
+	h.RegisterController("test-set", &stubController{})
+	h.MarkDisconnected("test-set", "connection lost")
+
+	req := httptest.NewRequest("GET", "/readyz", nil)
+	w := httptest.NewRecorder()
+	h.handleReadyz(w, req)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusServiceUnavailable)
+	}
+}
+
+func TestHealthzDiskOmittedWithoutProvider(t *testing.T) {
+	h := newTestServer()
+
+	req := httptest.NewRequest("GET", "/healthz", nil)
+	w := httptest.NewRecorder()
+	h.handleHealthz(w, req)
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if _, ok := raw["disk"]; ok {
+		t.Error(`"disk" key must be omitted from the JSON response when no provider is registered`)
+	}
+}
+
+func TestHealthzDiskFromProvider(t *testing.T) {
+	h := newTestServer()
+	h.SetDiskProvider(func() []DiskStatus {
+		return []DiskStatus{{Filesystem: "/", FreePercent: 38, FreeBytes: 100, TotalBytes: 200}}
+	})
+
+	req := httptest.NewRequest("GET", "/healthz", nil)
+	w := httptest.NewRecorder()
+	h.handleHealthz(w, req)
+
+	var resp HealthResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(resp.Disk) != 1 {
+		t.Fatalf("disk length = %d, want 1", len(resp.Disk))
+	}
+	got := resp.Disk[0]
+	want := DiskStatus{Filesystem: "/", FreePercent: 38, FreeBytes: 100, TotalBytes: 200}
+	if got != want {
+		t.Errorf("disk[0] = %+v, want %+v", got, want)
+	}
+}
+
+func TestUnregisterController(t *testing.T) {
+	h := newTestServer()
+	h.RegisterController("test-set", &stubController{idle: 1, busy: 0})
 	h.RegisterMetrics("test-set", &stubMetrics{})
-	h.UnregisterScaler("test-set")
+	h.UnregisterController("test-set")
 
 	// After unregister, readyz should return 503
 	req := httptest.NewRequest("GET", "/readyz", nil)

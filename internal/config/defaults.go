@@ -6,7 +6,7 @@ import "time"
 // All flag definitions, config templates, and fallback logic
 // should reference these constants instead of hardcoding values.
 const (
-	DefaultBackend       = "docker"
+	DefaultProvider      = "docker"
 	DefaultMaxRunners    = 10
 	DefaultRunnerImage   = "ghcr.io/actions/actions-runner:latest"
 	DefaultRunnerGroup   = "default"
@@ -16,14 +16,21 @@ const (
 	DefaultLogLevel      = "info"
 	DefaultLogFormat     = "text"
 	DefaultHealthPort    = 8080
+	DefaultHealthAddress = "127.0.0.1"
 	DefaultSystemName    = "dockerscaleset"
+
+	// DefaultDrainTimeout covers the longest jobs currently run on these
+	// hosts while matching GitLab Runner's documented two-hour graceful-stop
+	// budget. Service-manager stop timeouts add a separate one-minute margin.
+	DefaultDrainTimeout = 2 * time.Hour
 
 	// DefaultSharedVolumeName is the named Docker volume backing the
 	// shared-volume mount when docker.shared-volume-name is unset.
 	DefaultSharedVolumeName = "runner-shared"
 
 	// DefaultSharedVolumeCleanupInterval is the period between shared-volume
-	// TTL sweeps when SharedVolumeTTL > 0 and no explicit interval is set.
+	// cleanup sweeps when SharedVolumeMaxAge > 0 and no explicit interval is
+	// set.
 	DefaultSharedVolumeCleanupInterval = 6 * time.Hour
 
 	// DefaultTartCacheCleanup enables Tart OCI/IPSW cache cleanup by default.
@@ -44,18 +51,21 @@ const (
 	// when cache cleanup is enabled and no explicit interval is set.
 	DefaultTartCacheCleanupInterval = 24 * time.Hour
 
-	// DefaultBuildxCleanup enables orphaned buildx builder cleanup by default.
-	// It acts as a safety net: `docker buildx create` builders (e.g. from
-	// docker/setup-buildx-action) leak on persistent hosts sharing one daemon,
-	// each keeping a multi-GB state volume, and most users never notice.
-	DefaultBuildxCleanup = true
+	// DefaultDisableUpdate keeps GitHub from updating the runner binary inside
+	// the container or VM. True matches the image-based model: the runner is
+	// refreshed by rebuilding the image, and ephemeral runners avoid
+	// downloading an update on every job. Allowing updates cannot save an
+	// image whose runner version GitHub has retired (see DisableUpdate).
+	DefaultDisableUpdate = true
 
-	// DefaultDockerPrune enables the periodic Docker runtime prune by default.
-	// It acts as a safety net: with DooD, jobs create images, containers, and
-	// build cache directly on the shared host daemon, and an exit-time prune
-	// alone never reclaims disk while the process runs — long-lived hosts have
-	// filled up repeatedly. Assumes the daemon is dedicated to runners.
-	DefaultDockerPrune = true
+	// DefaultBuildxCleanup is disabled because buildx builders are daemon-global
+	// and may belong to workloads outside runner. Dedicated daemons can opt in.
+	DefaultBuildxCleanup = false
+
+	// DefaultDockerPrune is disabled because pruning acts on the entire daemon,
+	// including objects not created by runner. Operators with a dedicated
+	// runner daemon can opt in explicitly.
+	DefaultDockerPrune = false
 
 	// DefaultDockerPruneInterval is the period between Docker runtime prune
 	// sweeps when the prune is enabled and no explicit interval is set.
@@ -78,4 +88,25 @@ const (
 
 	// DefaultBuildxCleanupInterval is the period between buildx cleanup sweeps.
 	DefaultBuildxCleanupInterval = 6 * time.Hour
+
+	// DefaultDiskGuard enables the disk guard by default. Safe to leave on
+	// because it only ever acts under real disk pressure (a filesystem below
+	// min-free) — it is not a routine sweeper running on a timer regardless
+	// of need. It deliberately does NOT respect a store's own Enabled()
+	// (revised 2026-08-14: see docs/superpowers/specs/
+	// 2026-08-13-cache-architecture-design.md, "各 store 的啟用開關只約束例行清理" —
+	// prune/buildx-cleanup default off and max-tier defaults to 3, so a
+	// guard that honored Enabled() would ship unable to reclaim anything). A
+	// host whose disk runner does not own opts out with `[disk] guard =
+	// false`, not by disabling individual stores.
+	DefaultDiskGuard = true
+	// DefaultDiskMinFree is the free-space level that triggers reclamation.
+	DefaultDiskMinFree = "10%"
+	// DefaultDiskTargetFree is the level reclamation aims to restore.
+	DefaultDiskTargetFree = "20%"
+	// DefaultDiskGuardInterval is the period between guard sweeps.
+	DefaultDiskGuardInterval = time.Hour
+	// DefaultDiskMaxTier stops short of wiping cache volumes — that makes
+	// the next build cold, so it requires an explicit opt-in.
+	DefaultDiskMaxTier = 3
 )

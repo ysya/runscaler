@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -11,6 +13,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/ysya/runscaler/internal/config"
+	"github.com/ysya/runscaler/internal/layout"
 )
 
 var initCmd = &cobra.Command{
@@ -30,15 +33,30 @@ func init() {
 	flags.String("url", "", "Registration URL (e.g. https://github.com/org)")
 	flags.String("name", "", "Scale set name")
 	flags.String("token", "", "Personal access token")
+	registerGitHubAppFlags(flags)
 	flags.Int("max-runners", config.DefaultMaxRunners, "Maximum concurrent runners")
-	flags.String("backend", "", "Runner backend (docker or tart)")
+	flags.String("provider", "", "Instance provider (docker or tart)")
+	flags.String("backend", "", "Deprecated alias for --provider")
+	_ = flags.MarkDeprecated("backend", "use --provider instead")
+	flags.String("runner-image", "", "Runner container or Tart VM image")
 	flags.Bool("dind", config.DefaultDinD, "Enable Docker-in-Docker")
 	flags.String("shared-volume", "", "Shared volume path (e.g. /shared)")
-	flags.String("output", "config.toml", "Output file path")
+	flags.String("output", "", "Output file path (default: /etc/runner/config.toml as root, $XDG_CONFIG_HOME/runner/config.toml otherwise)")
 }
 
 func runInit(cmd *cobra.Command, args []string) error {
+	if err := refuseDarwinRoot(runtime.GOOS, os.Geteuid(), "write the runner config", pathExists); err != nil {
+		return err
+	}
 	output, _ := cmd.Flags().GetString("output")
+	id := layout.CurrentIdentity()
+	if output == "" {
+		lay, err := layout.For(id)
+		if err != nil {
+			return fmt.Errorf("resolve default config path: %w", err)
+		}
+		output = lay.ConfigFile
+	}
 
 	// Check if file exists
 	if _, err := os.Stat(output); err == nil {
@@ -55,8 +73,11 @@ func runInit(cmd *cobra.Command, args []string) error {
 	url, _ := cmd.Flags().GetString("url")
 	name, _ := cmd.Flags().GetString("name")
 	token, _ := cmd.Flags().GetString("token")
+	app := githubAppFromFlags(cmd.Flags())
 	maxRunners, _ := cmd.Flags().GetInt("max-runners")
-	backend, _ := cmd.Flags().GetString("backend")
+	providerName, _ := cmd.Flags().GetString("provider")
+	legacyBackend, _ := cmd.Flags().GetString("backend")
+	runnerImage, _ := cmd.Flags().GetString("runner-image")
 	dind, _ := cmd.Flags().GetBool("dind")
 	// Interactive mode: prompt for missing values
 	var err error
@@ -72,7 +93,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 			return err
 		}
 	}
-	if token == "" {
+	if token == "" && app == nil {
 		token, err = promptSecret("GitHub Personal Access Token")
 		if err != nil {
 			return err
@@ -85,23 +106,37 @@ func runInit(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Backend selection
-	if !cmd.Flags().Changed("backend") {
-		useTart, err := promptYN("Use Tart VM backend for macOS runners?", false)
+	providerChanged := cmd.Flags().Lookup("provider") != nil && cmd.Flags().Changed("provider")
+	backendChanged := cmd.Flags().Lookup("backend") != nil && cmd.Flags().Changed("backend")
+	if providerChanged && backendChanged {
+		return fmt.Errorf("--provider and deprecated --backend cannot be used together")
+	}
+	if backendChanged {
+		providerName = legacyBackend
+	}
+
+	// Provider selection
+	if !providerChanged && !backendChanged {
+		useTart, err := promptYN("Use Tart VM provider for macOS runners?", false)
 		if err != nil {
 			return err
 		}
 		if useTart {
-			backend = "tart"
+			providerName = "tart"
 		} else {
-			backend = config.DefaultBackend
+			providerName = config.DefaultProvider
 		}
+	}
+	if providerName != "docker" && providerName != "tart" {
+		return fmt.Errorf("provider must be \"docker\" or \"tart\", got %q", providerName)
+	}
+	if maxRunners < 1 {
+		return fmt.Errorf("max-runners must be at least 1")
 	}
 
 	var configContent string
-	if backend == "tart" {
-		// Tart backend config
-		runnerImage, _ := cmd.Flags().GetString("runner-image")
+	if providerName == "tart" {
+		// Tart provider config
 		if runnerImage == "" || runnerImage == config.DefaultRunnerImage {
 			runnerImage, err = promptString("Tart base VM image (e.g. ghcr.io/cirruslabs/macos-sequoia-xcode:latest)")
 			if err != nil {
@@ -109,7 +144,20 @@ func runInit(cmd *cobra.Command, args []string) error {
 			}
 		}
 		if maxRunners > 2 {
-			fmt.Println("  ⚠ Note: macOS VMs are limited to 2 concurrent per Apple Silicon host")
+			return fmt.Errorf("max-runners must be <= 2 for the Tart provider")
+		}
+		candidate := config.ScaleSetConfig{
+			RegistrationURL: url,
+			ScaleSetName:    name,
+			Token:           token,
+			GitHubApp:       app,
+			MaxRunners:      maxRunners,
+			Provider:        "tart",
+			RunnerImage:     runnerImage,
+			Tart:            config.TartConfig{RunnerDir: config.DefaultTartRunnerDir},
+		}
+		if err := candidate.Validate(); err != nil {
+			return fmt.Errorf("invalid configuration: %w", err)
 		}
 		configContent = fmt.Sprintf(`# runner configuration
 # See: https://github.com/ysya/runscaler
@@ -120,16 +168,24 @@ url = %q
 # Scale set name — used as the runs-on label in workflows
 name = %q
 
-# Personal access token (consider using env:VARIABLE_NAME for security)
-# Example: token = "env:GITHUB_TOKEN"
-token = %q
+%s
 
 # Runner limits
 max-runners = %d
 min-runners = 0
 
-# Backend: "docker" (Linux containers) or "tart" (macOS VMs)
-backend = "tart"
+# --- Global ---
+concurrent = %d
+log-level = %q
+log-format = %q
+# log-file defaults to /var/log/runner/runner.log (root), ~/.local/state/runner/runner.log (Linux) or ~/Library/Logs/runner/runner.log (macOS); set log-file = "" to disable
+
+# Health check server (localhost-only by default; use 0.0.0.0 explicitly to expose)
+# health-address = %q
+# health-port = %d
+
+# Instance provider: "docker" (Linux containers) or "tart" (macOS VMs)
+provider = "tart"
 
 # Runner image (Tart VM image with GitHub Actions runner pre-installed)
 runner-image = %q
@@ -137,19 +193,16 @@ runner-image = %q
 [tart]
 # Path to the runner binary inside the VM
 runner-dir = %q
-
-# --- Global ---
-log-level = %q
-log-format = %q
-
-# Health check server port (0 to disable)
-# health-port = %d
-`, url, name, token, maxRunners,
-			runnerImage, config.DefaultTartRunnerDir,
+`, url, name, initAuthenticationConfig(token, app), maxRunners, maxRunners,
 			config.DefaultLogLevel, config.DefaultLogFormat,
-			config.DefaultHealthPort)
+			config.DefaultHealthAddress, config.DefaultHealthPort,
+			runnerImage, config.DefaultTartRunnerDir,
+		)
 	} else {
-		// Docker backend config
+		// Docker provider config
+		if runnerImage == "" {
+			runnerImage = config.DefaultRunnerImage
+		}
 		if !cmd.Flags().Changed("dind") {
 			dind, err = promptYN("Enable Docker-in-Docker?", config.DefaultDinD)
 			if err != nil {
@@ -166,6 +219,23 @@ log-format = %q
 				sharedVolume = "/shared"
 			}
 		}
+		candidate := config.ScaleSetConfig{
+			RegistrationURL: url,
+			ScaleSetName:    name,
+			Token:           token,
+			GitHubApp:       app,
+			MaxRunners:      maxRunners,
+			Provider:        config.DefaultProvider,
+			RunnerImage:     runnerImage,
+			Docker: config.DockerConfig{
+				Socket:       config.DefaultDockerSocket,
+				DinD:         &dind,
+				SharedVolume: sharedVolume,
+			},
+		}
+		if err := candidate.Validate(); err != nil {
+			return fmt.Errorf("invalid configuration: %w", err)
+		}
 
 		configContent = fmt.Sprintf(`# runner configuration
 # See: https://github.com/ysya/runscaler
@@ -176,19 +246,27 @@ url = %q
 # Scale set name — used as the runs-on label in workflows
 name = %q
 
-# Personal access token (consider using env:VARIABLE_NAME for security)
-# Example: token = "env:GITHUB_TOKEN"
-token = %q
+%s
 
 # Runner limits
 max-runners = %d
 min-runners = 0
 
+# --- Global ---
+concurrent = %d
+log-level = %q
+log-format = %q
+# log-file defaults to /var/log/runner/runner.log (root), ~/.local/state/runner/runner.log (Linux) or ~/Library/Logs/runner/runner.log (macOS); set log-file = "" to disable
+
+# Health check server (localhost-only by default; use 0.0.0.0 explicitly to expose)
+# health-address = %q
+# health-port = %d
+
 # Docker image for runners
 runner-image = %q
 
-# Backend: "docker" (Linux containers) or "tart" (macOS VMs)
-backend = %q
+# Instance provider: "docker" (Linux containers) or "tart" (macOS VMs)
+provider = %q
 
 [docker]
 # Docker-in-Docker: mount host Docker socket into runners
@@ -204,48 +282,51 @@ shared-volume = %q
 # memory = 8192   # MB (recommended: 6144+ for Android/Gradle builds)
 # cpu = 4         # cores
 
-# Orphaned buildx builder cleanup (on by default). docker buildx builders
-# leak state volumes on persistent hosts; runner removes ones older than
-# the TTL. Disable only if you run a persistent builder via keep-state.
+# Orphaned buildx builder cleanup (off by default because it is daemon-wide).
+# Enable only when the Docker daemon is dedicated to runners.
 # buildx-cleanup = false
 # buildx-cleanup-ttl = "24h"
+# prune = false
+# prune-ttl = "24h"
 
-# --- Global ---
-log-level = %q
-log-format = %q
-
-# Health check server port (0 to disable)
-# health-port = %d
-
-# --- Multi-org / mixed backend example ---
+# --- Multi-org / mixed provider example ---
 # Uncomment and duplicate [[scaleset]] blocks:
 #
 # [[scaleset]]
 # url = "https://github.com/org-a"
 # name = "linux-runners"
 # token = "env:TOKEN_ORG_A"
-# backend = "docker"
+# provider = "docker"
 # max-runners = 10
 #
 # [[scaleset]]
 # url = "https://github.com/org-a"
 # name = "macos-runners"
 # token = "env:TOKEN_ORG_A"
-# backend = "tart"
+# provider = "tart"
 # max-runners = 2
 # runner-image = "ghcr.io/cirruslabs/macos-sequoia-xcode:latest"
-`, url, name, token, maxRunners,
-			config.DefaultRunnerImage, config.DefaultBackend,
-			dind, config.DefaultDockerSocket, sharedVolume,
+`, url, name, initAuthenticationConfig(token, app), maxRunners, maxRunners,
 			config.DefaultLogLevel, config.DefaultLogFormat,
-			config.DefaultHealthPort)
+			config.DefaultHealthAddress, config.DefaultHealthPort,
+			runnerImage, config.DefaultProvider,
+			dind, config.DefaultDockerSocket, sharedVolume,
+		)
 	}
 
-	if err := os.WriteFile(output, []byte(configContent), 0600); err != nil {
+	if err := os.MkdirAll(filepath.Dir(output), id.DirPerm()); err != nil {
+		return fmt.Errorf("failed to create %s: %w", filepath.Dir(output), err)
+	}
+	// Atomic replace creates a new 0600 file: WriteFile would keep an existing
+	// file's looser mode and follow a symlink at the destination.
+	if err := writeFileAtomic(output, []byte(configContent), 0o600); err != nil {
 		return fmt.Errorf("failed to write %s: %w", output, err)
 	}
 
 	fmt.Printf("\nCreated %s\n", output)
+	if warning := initShadowWarning(output); warning != "" {
+		fmt.Fprintln(os.Stderr, warning)
+	}
 	fmt.Println("\nNext steps:")
 	fmt.Printf("  runner validate --config %s   # Verify configuration\n", output)
 	fmt.Printf("  runner run --config %s        # Start scaling\n", output)
@@ -321,4 +402,19 @@ func promptYN(label string, defaultVal bool) (bool, error) {
 	default:
 		return false, fmt.Errorf("invalid input: %s", input)
 	}
+}
+
+// initShadowWarning explains when ./config.toml would be read instead of the
+// file init just wrote, because config search checks the working directory
+// first.
+func initShadowWarning(output string) string {
+	local, err := filepath.Abs("config.toml")
+	if err != nil || sameFilePath(local, output) {
+		return ""
+	}
+	if _, err := os.Stat(local); err != nil {
+		return ""
+	}
+	written, _ := filepath.Abs(output)
+	return fmt.Sprintf("  ⚠ %s is found before %s when --config is omitted; pass --config %s or remove the local file", local, written, written)
 }

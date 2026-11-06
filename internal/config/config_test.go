@@ -294,6 +294,20 @@ func TestScaleSetConfigValidate_TartProvider(t *testing.T) {
 			wantErr: "unsupported provider",
 		},
 		{
+			name:   "tart net-bridged interface",
+			modify: func(c *ScaleSetConfig) { validTart(c); c.Tart.NetBridged = "en0" },
+		},
+		{
+			name:    "tart net-bridged flag-shaped",
+			modify:  func(c *ScaleSetConfig) { validTart(c); c.Tart.NetBridged = "--no-graphics" },
+			wantErr: "tart net-bridged",
+		},
+		{
+			name:    "tart net-bridged with whitespace",
+			modify:  func(c *ScaleSetConfig) { validTart(c); c.Tart.NetBridged = "en0 en1" },
+			wantErr: "tart net-bridged",
+		},
+		{
 			name:   "tart mtu off",
 			modify: func(c *ScaleSetConfig) { validTart(c); c.Tart.MTU = -1 },
 		},

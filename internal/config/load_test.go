@@ -1286,3 +1286,31 @@ dns = []
 		t.Errorf("overridden DNS = %q, want empty", got)
 	}
 }
+
+// [tart] net-bridged reaches every scale set and can be turned back to NAT
+// per scale set with an empty value.
+func TestLoad_TartNetBridgedInheritanceAndOverride(t *testing.T) {
+	cfg := loadTOML(t, `
+[tart]
+net-bridged = "en0"
+
+[[scaleset]]
+url = "https://github.com/org-a"
+name = "inherits"
+token = "token-a"
+
+[[scaleset]]
+url = "https://github.com/org-b"
+name = "overrides"
+token = "token-b"
+[scaleset.tart]
+net-bridged = ""
+`)
+	sets := cfg.ResolveScaleSets()
+	if got := sets[0].Tart.NetBridged; got != "en0" {
+		t.Errorf("inherited net-bridged = %q, want en0", got)
+	}
+	if got := sets[1].Tart.NetBridged; got != "" {
+		t.Errorf("overridden net-bridged = %q, want empty", got)
+	}
+}

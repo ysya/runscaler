@@ -63,6 +63,11 @@ func (p *TartProvider) guestMTU(ctx context.Context) (int, string) {
 		return 0, ""
 	case p.mtu > 0:
 		return p.mtu, "configured"
+	case p.netBridged != "":
+		// A bridged guest leaves through the host's network directly, not
+		// through the host's routing table, so the host's route says nothing
+		// about the guest's path.
+		return 0, ""
 	}
 
 	host := p.githubHost

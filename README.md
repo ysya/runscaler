@@ -407,6 +407,7 @@ pool-size = 2            # pre-warm 2 VMs for instant job pickup (~2s vs ~30s co
 # cache-cleanup-interval = "24h"       # how often the prune sweep runs
 # mtu = 0                              # guest MTU: 0 = match a VPN tunnel (default), -1 = off, 1280–1500 = fixed
 # dns = ["1.1.1.1", "8.8.8.8"]         # guest resolvers ([] = keep the one Tart's NAT hands out)
+# net-bridged = "en0"                  # bridge VMs to this host interface instead of Tart's NAT
 ```
 
 With `home` set, point your own tart commands at the same directory —
@@ -432,6 +433,23 @@ allow). Set a fixed `mtu` if the tunnel only carries some destinations, or
 `-1` to leave guests alone. Tart's NAT also proxies DNS through the host, and
 that proxy can stop answering after the host's VPN disconnects; set `dns` to
 give the guests resolvers of their own.
+
+**Hosts whose NAT does not serve guests.** Tart's shared NAT depends on the
+host's `bootpd` to hand each guest a lease. When it does not, the guest comes
+up on a link-local `169.254.x.x` address with no route out, the runner never
+reaches GitHub, and jobs stay queued. Set `net-bridged` to a host interface
+(`net-bridged = "en0"`, the BSD device name `ifconfig` shows for the active
+Ethernet or Wi-Fi) and every VM boots with `tart run --net-bridged=<interface>`, taking
+its address from the host's network instead. The image must leave the guest's
+network service on DHCP. Bridged guests do not leave through the host's
+routing table, so `mtu = 0` no longer matches a host tunnel for them; a fixed
+`mtu` and `dns` still apply. Bridged VM MAC addresses are derived from the host
+interface's hardware address and the shared host slot, avoiding the identical
+slot addresses used by separate hosts under NAT. The address stays stable for
+the same interface hardware address and slot, so DHCP leases can be reused;
+changing the host interface's hardware address changes the VM addresses.
+Startup fails and the clone is cleaned up if its bridged MAC cannot be read or
+written safely. Empty `net-bridged` keeps NAT and its existing slot addresses.
 
 **Runner start-up check.** A runner that dies or never reaches GitHub leaves
 its VM running, so runner hands a VM over only once the runner inside prints
@@ -649,6 +667,7 @@ pool-size = 2
 | `--tart-memory`     | `[tart] memory`      | `0` (image default)                     | Memory in MB per VM (Tart provider)                |
 | `--tart-runner-dir` | `[tart] runner-dir`  | `/Users/admin/actions-runner`           | Runner install directory inside Tart VM           |
 | `--tart-pool-size`  | `[tart] pool-size`   | `0`                                     | Number of pre-warmed VMs for instant job pickup   |
+| `--tart-net-bridged` | `[tart] net-bridged` | `""` (Tart's NAT)                      | Host interface to bridge each VM to               |
 | `--log-level`       | `log-level`          | `info`                                  | Log level (debug/info/warn/error)                 |
 | `--log-format`      | `log-format`         | `text`                                  | Log format (text/json)                            |
 | `--dry-run`         | `dry-run`            | `false`                                 | Validate everything without starting listeners    |

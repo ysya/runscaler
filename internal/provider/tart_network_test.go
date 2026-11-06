@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -412,5 +413,82 @@ func TestTartProvider_MTUInfoLoggedOnlyWhenItChanges(t *testing.T) {
 	}
 	if n := logs.count(slog.LevelInfo, "Set VM MTU"); n != 2 {
 		t.Errorf("Info \"Set VM MTU\" logged %d times after the MTU changed to 1280, want 2", n)
+	}
+}
+
+func TestTartProvider_RunUsesNATByDefault(t *testing.T) {
+	cmd := networkCmdRunner(routeGetHostNoVPN)
+	p := newTestTartProvider(cmd)
+
+	if _, err := p.StartInstance(context.Background(), "runner-abc", "jit"); err != nil {
+		t.Fatalf("StartInstance() error: %v", err)
+	}
+
+	calls := cmd.getCalls()
+	if callIndex(calls, "tart", "run", "runner-abc", "--no-graphics") < 0 {
+		t.Errorf("tart run was not called as [run runner-abc --no-graphics]; calls: %v", calls)
+	}
+	if n := countCallsContaining(calls, "--net-bridged"); n != 0 {
+		t.Errorf("--net-bridged passed %d times without net-bridged, want 0", n)
+	}
+}
+
+func TestTartProvider_NetBridgedBootsVMOnHostInterface(t *testing.T) {
+	cmd := networkCmdRunner(routeGetHostNoVPN)
+	p := newBridgedTestTartProvider(t, cmd)
+
+	if _, err := p.StartInstance(context.Background(), "runner-abc", "jit"); err != nil {
+		t.Fatalf("StartInstance() error: %v", err)
+	}
+
+	calls := cmd.getCalls()
+	if callIndex(calls, "tart", "run", "runner-abc", "--no-graphics", "--net-bridged=en0") < 0 {
+		t.Errorf("tart run was not bridged to en0; calls: %v", calls)
+	}
+}
+
+// A bridged guest does not leave through the host's routing table, so a
+// host route through a VPN tunnel must not lower the guest's MTU.
+func TestTartProvider_NetBridgedSkipsAutoMTU(t *testing.T) {
+	cmd := networkCmdRunner(routeGetHostWARP)
+	p := newBridgedTestTartProvider(t, cmd)
+
+	if _, err := p.StartInstance(context.Background(), "runner-abc", "jit"); err != nil {
+		t.Fatalf("StartInstance() error: %v", err)
+	}
+
+	calls := cmd.getCalls()
+	if n := countCallsContaining(calls, "/sbin/route -n get"); n != 0 {
+		t.Errorf("host route looked up %d times for a bridged guest, want 0", n)
+	}
+	if n := countCallsContaining(calls, "/usr/bin/sudo -n /sbin/ifconfig"); n != 0 {
+		t.Errorf("guest ifconfig called %d times for a bridged guest in auto mode, want 0", n)
+	}
+}
+
+func TestTartProvider_NetBridgedKeepsFixedMTU(t *testing.T) {
+	cmd := networkCmdRunner(routeGetHostNoVPN)
+	p := newBridgedTestTartProvider(t, cmd)
+	p.mtu = 1400
+
+	if _, err := p.StartInstance(context.Background(), "runner-abc", "jit"); err != nil {
+		t.Fatalf("StartInstance() error: %v", err)
+	}
+
+	calls := cmd.getCalls()
+	if callIndex(calls, "tart", "exec", "runner-abc", "/usr/bin/sudo", "-n", "/sbin/ifconfig", "en0", "mtu", "1400") < 0 {
+		t.Errorf("fixed MTU was not applied to a bridged guest; calls: %v", calls)
+	}
+}
+
+func TestNewTartProvider_NetBridgedFromScaleSetConfig(t *testing.T) {
+	ss := config.ScaleSetConfig{
+		RunnerImage: "macos-base:latest",
+		MaxRunners:  1,
+		Tart:        config.TartConfig{RunnerDir: "/Users/admin/actions-runner", NetBridged: "en0"},
+	}
+	p := NewTartProviderWithCoordinator(ss, slog.New(slog.DiscardHandler), NewTartHostCoordinator(2))
+	if got := p.runArgs("runner-abc"); !slices.Equal(got, []string{"run", "runner-abc", "--no-graphics", "--net-bridged=en0"}) {
+		t.Errorf("runArgs = %q, want [run runner-abc --no-graphics --net-bridged=en0]", got)
 	}
 }

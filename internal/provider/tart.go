@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -325,7 +327,14 @@ func (p *TartProvider) bootVM(ctx context.Context, name string) (*warmVM, error)
 
 	// 3. Set deterministic MAC address to prevent DHCP lease exhaustion.
 	//    Each slot always gets the same MAC → same DHCP lease → no IP waste.
-	if err := p.setVMMAC(name, slotIdx); err != nil {
+	if err := p.setVMMAC(ctx, name, slotIdx); err != nil {
+		if p.netBridged != "" {
+			cleanCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+			_, _ = p.cmd.Run(cleanCtx, "tart", "delete", name)
+			cancel()
+			releaseSlot()
+			return nil, fmt.Errorf("failed to configure bridged VM MAC: %w", err)
+		}
 		p.logger.Warn("Failed to set fixed MAC (will use random)",
 			slog.String("name", name), slog.Any("error", err))
 	}
@@ -356,9 +365,9 @@ func (p *TartProvider) bootVM(ctx context.Context, name string) (*warmVM, error)
 }
 
 // setVMMAC writes a deterministic MAC address to the VM's config.json.
-// Uses locally administered unicast addresses (02:00:00:00:00:XX) so
-// the DHCP server always assigns the same IP to the same slot index.
-func (p *TartProvider) setVMMAC(name string, slotIdx int) error {
+// NAT keeps its original slot addresses. Bridged addresses incorporate the
+// host interface's hardware address so separate hosts do not share that pool.
+func (p *TartProvider) setVMMAC(ctx context.Context, name string, slotIdx int) error {
 	tartHome := p.home
 	if tartHome == "" {
 		tartHome = os.Getenv("TART_HOME")
@@ -383,6 +392,30 @@ func (p *TartProvider) setVMMAC(name string, slotIdx int) error {
 	}
 
 	mac := fmt.Sprintf("02:00:00:00:00:%02x", slotIdx+1)
+	if p.netBridged != "" {
+		out, err := p.cmd.Run(ctx, "/sbin/ifconfig", p.netBridged)
+		if err != nil {
+			return fmt.Errorf("read bridged host interface %q: %w", p.netBridged, err)
+		}
+		var hostMAC net.HardwareAddr
+		for _, line := range strings.Split(string(out), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) >= 2 && fields[0] == "ether" {
+				hostMAC, err = net.ParseMAC(fields[1])
+				if err != nil {
+					return fmt.Errorf("parse bridged host interface MAC: %w", err)
+				}
+				break
+			}
+		}
+		if len(hostMAC) != 6 || hostMAC[0]&1 != 0 || bytes.Equal(hostMAC, []byte{0, 0, 0, 0, 0, 0}) {
+			return fmt.Errorf("bridged host interface %q has no valid unicast Ethernet address", p.netBridged)
+		}
+		digest := sha256.Sum256(fmt.Appendf(nil, "runscaler-tart/%s/%d", hostMAC, slotIdx))
+		address := net.HardwareAddr(digest[:6])
+		address[0] = address[0]&0xfe | 0x02 // locally administered, unicast
+		mac = address.String()
+	}
 	cfg["macAddress"] = mac
 
 	out, err := json.MarshalIndent(cfg, "", "    ")

@@ -110,14 +110,16 @@ func (r *instanceState) markReady(name, instanceID string, runnerID int) (remove
 	return instance.phase == instanceRemoving, true
 }
 
-// count returns target-bearing instances. Removing instances are excluded so
-// desired capacity can be replaced as soon as their global lease is released.
+// count returns instances that may still serve work. Idle removals retain
+// local capacity because GitHub can restore them to busy; replacing them early
+// could exceed max-runners. Completed removals cannot be restored and are
+// excluded so their capacity can be replaced when the global lease is released.
 func (r *instanceState) count() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	count := 0
 	for _, instance := range r.instances {
-		if instance.phase != instanceRemoving {
+		if instance.phase != instanceRemoving || isUnassignedRemoval(instance) {
 			count++
 		}
 	}
@@ -203,22 +205,6 @@ func isUnassignedRemoval(instance *managedInstance) bool {
 		(instance.removeReason == reasonScaledDown || instance.removeReason == reasonDrain)
 }
 
-// completeUnassignedRemoval records a job completion for a runner that is
-// being removed as idle. GitHub assigned it a job before JobStarted arrived and
-// the job has already finished, so the removal proceeds as a completion and
-// no longer needs deregistration.
-func (r *instanceState) completeUnassignedRemoval(name, result string) bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	instance, ok := r.instances[name]
-	if !ok || !isUnassignedRemoval(instance) {
-		return false
-	}
-	instance.removeReason = reasonJobCompleted
-	instance.job.result = result
-	return true
-}
-
 // deregistration returns the GitHub runner ID to deregister before the
 // instance is destroyed. Only runners removed as idle need it: a runner whose
 // job completed is already gone from GitHub, being ephemeral.
@@ -253,12 +239,13 @@ func (r *instanceState) restoreBusy(name, instanceID string) bool {
 // markDone transitions a runner to removing and records why, plus the job's
 // result when one finished, for the "Runner removed" line. ready is false only
 // for the narrow race where GitHub reports completion before StartInstance
-// returns.
+// returns. A completion can also take over an idle removal; doing both under
+// this lock prevents restoreBusy from racing between two completion checks.
 func (r *instanceState) markDone(name, reason, result string) (instanceID string, ready, ok bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	instance, ok := r.instances[name]
-	if !ok || instance.phase == instanceRemoving {
+	if !ok || (instance.phase == instanceRemoving && (reason != reasonJobCompleted || !isUnassignedRemoval(instance))) {
 		return "", false, false
 	}
 	instance.phase = instanceRemoving
@@ -280,7 +267,9 @@ func (r *instanceState) markDead(name, instanceID string) (removedInstance, bool
 
 // markIdleAboveTarget transitions one surplus idle instance to removing. Busy
 // runners are never preempted, and the count/transition share the same lock as
-// markBusy so job assignment wins or loses the boundary atomically.
+// markBusy so job assignment wins or loses the boundary atomically. Unlike
+// count, this planned count excludes every removal to retain the desired idle
+// runners while earlier removals are still in flight.
 func (r *instanceState) markIdleAboveTarget(target int) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()

@@ -49,7 +49,8 @@ type Config struct {
 	// Disk configures the periodic disk-pressure guard (see DiskConfig).
 	// Global like the fields above: one guard watches every scale set's
 	// stores host-wide, grouped by filesystem rather than by scale set.
-	Disk DiskConfig `mapstructure:"disk"`
+	Disk        DiskConfig        `mapstructure:"disk"`
+	Diagnostics DiagnosticsConfig `mapstructure:"diagnostics"`
 
 	// Multi-scaleset mode: entries as produced by Load, with map-level
 	// inheritance from the top-level defaults already applied.
@@ -76,6 +77,7 @@ type ScaleSetConfig struct {
 	RunnerImage     string           `mapstructure:"runner-image"`
 	Provider        string           `mapstructure:"provider"`
 	GitHubApp       *GitHubAppConfig `mapstructure:"github-app"`
+	Retry           *RetryConfig     `mapstructure:"retry"`
 
 	// DisableUpdate stops GitHub from updating the runner binary inside the
 	// container or VM. Pointer: nil = inherit default (true), matching the
@@ -99,13 +101,15 @@ type ScaleSetConfig struct {
 
 // DockerConfig holds Docker-specific provider settings.
 type DockerConfig struct {
-	Socket       string `mapstructure:"socket"`
-	DinD         *bool  `mapstructure:"dind"` // pointer: nil = inherit default (true)
-	SharedVolume string `mapstructure:"shared-volume"`
-	Memory       int    `mapstructure:"memory"`     // Memory limit in MB (0 = unlimited)
-	CPU          int    `mapstructure:"cpu"`        // CPU cores (0 = unlimited)
-	PidsLimit    int64  `mapstructure:"pids-limit"` // Max pids (processes + threads) per container (0 = unlimited)
-	Platform     string `mapstructure:"platform"`   // e.g. "linux/amd64" to force architecture
+	Readiness    *bool          `mapstructure:"readiness"`
+	ReadyTimeout *time.Duration `mapstructure:"ready-timeout"`
+	Socket       string         `mapstructure:"socket"`
+	DinD         *bool          `mapstructure:"dind"` // pointer: nil = inherit default (true)
+	SharedVolume string         `mapstructure:"shared-volume"`
+	Memory       int            `mapstructure:"memory"`     // Memory limit in MB (0 = unlimited)
+	CPU          int            `mapstructure:"cpu"`        // CPU cores (0 = unlimited)
+	PidsLimit    int64          `mapstructure:"pids-limit"` // Max pids (processes + threads) per container (0 = unlimited)
+	Platform     string         `mapstructure:"platform"`   // e.g. "linux/amd64" to force architecture
 
 	// Network is the name of a pre-existing Docker network to attach runner
 	// containers to ("" = the daemon's default bridge). Lets operators isolate
@@ -522,6 +526,12 @@ func (ss *ScaleSetConfig) resolveEnvToken() {
 
 // Validate checks required fields and logical constraints for a scale set.
 func (ss *ScaleSetConfig) Validate() error {
+	if ss.DockerReadyTimeout() <= 0 {
+		return fmt.Errorf("docker.ready-timeout must be greater than zero")
+	}
+	if err := ss.EffectiveRetry().Validate(); err != nil {
+		return err
+	}
 	if ss.RegistrationURL == "" {
 		return fmt.Errorf("registration URL (url) is required")
 	}

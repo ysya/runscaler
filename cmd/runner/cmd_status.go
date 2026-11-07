@@ -271,6 +271,22 @@ func formatStatus(h health.HealthResponse, endpoint string, now time.Time, color
 				if runtime.FailureReason != "" {
 					fmt.Fprintf(&b, "    %s%s\n", styles.field("Failure"), runtime.FailureReason)
 				}
+				if runtime.Readiness != "" {
+					fmt.Fprintf(&b, "    %s%s\n", styles.field("Readiness"), runtime.Readiness)
+				}
+				if !runtime.NextRetryAt.IsZero() {
+					fmt.Fprintf(&b, "    %s%s until %s\n", styles.field("Retry"), runtime.RetryState, runtime.NextRetryAt.Format(time.RFC3339))
+				}
+				if failure := runtime.LastFailure; failure != nil {
+					fmt.Fprintf(&b, "    %s%s", styles.field("Last exit"), failure.Reason)
+					if failure.ExitCode != nil {
+						fmt.Fprintf(&b, " · exit %d", *failure.ExitCode)
+					}
+					if failure.OOMKilled != nil {
+						fmt.Fprintf(&b, " · OOM %t", *failure.OOMKilled)
+					}
+					fmt.Fprintln(&b)
+				}
 			}
 
 			if ss.Metrics == nil {

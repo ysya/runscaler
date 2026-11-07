@@ -8,8 +8,39 @@ import (
 	"testing"
 
 	"github.com/ysya/runscaler/internal/config"
+	"github.com/ysya/runscaler/internal/diagnostics"
 	"github.com/ysya/runscaler/internal/layout"
 )
+
+func TestDiagnosticsDirectoryFollowsEffectiveLogAndDisabledDefaults(t *testing.T) {
+	parent, _ := filepath.EvalSymlinks(t.TempDir())
+	for _, tc := range []struct {
+		name         string
+		id           layout.Identity
+		opened, want string
+	}{
+		{"custom", layout.Identity{ServiceScope: "system", GOOS: "linux"}, filepath.Join(parent, "granted", "runner.log"), filepath.Join(parent, "granted", "diagnostics")},
+		{"fallback", layout.Identity{ServiceScope: "system", GOOS: "linux"}, filepath.Join(parent, "fallback", "runner.log"), filepath.Join(parent, "fallback", "diagnostics")},
+		{"linux-disabled", layout.Identity{GOOS: "linux", Home: parent}, "", filepath.Join(parent, ".local/state/runner/diagnostics")},
+		{"mac-disabled", layout.Identity{GOOS: "darwin", Home: parent}, "", filepath.Join(parent, "Library/Logs/runner/diagnostics")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := diagnosticDirectory(tc.id, tc.opened)
+			if err != nil || got != tc.want {
+				t.Fatalf("directory=%s err=%v", got, err)
+			}
+			if _, err := diagnostics.NewStore(got, false).Save(t.Context(), diagnostics.Record{}); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	for _, id := range []layout.Identity{{Root: true, GOOS: "linux"}, {ServiceScope: "system", GOOS: "linux"}} {
+		got, err := diagnosticDirectory(id, "")
+		if err != nil || got != filepath.Join(func() string { p, _ := filepath.EvalSymlinks("/var/log"); return p }(), "runner/diagnostics") {
+			t.Fatalf("system default=%s err=%v", got, err)
+		}
+	}
+}
 
 func TestLogWriterKeepsDisabledFileLoggingNil(t *testing.T) {
 	var disabled *config.LogFileWriter

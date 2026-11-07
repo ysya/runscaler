@@ -13,7 +13,7 @@ import (
 
 // globalOnlyKeys are top-level keys that configure the process rather than a
 // scale set; they are never inherited by [[scaleset]] entries.
-var globalOnlyKeys = []string{"log-level", "log-format", "log-file", "health-port", "health-address", "dry-run", "drain-timeout", "concurrent"}
+var globalOnlyKeys = []string{"log-level", "log-format", "log-file", "health-port", "health-address", "dry-run", "drain-timeout", "concurrent", "diagnostics"}
 
 // identityKeys identify a single scale set (or only make sense per scale
 // set, like min-runners where 0 is a valid explicit value); they are never
@@ -71,6 +71,7 @@ func Load(v *viper.Viper) (Config, error) {
 	if err := rejectRetiredKeys(settings); err != nil {
 		return Config{}, err
 	}
+	settings = deepMerge(map[string]any{"retry": defaultRetrySettings()}, settings)
 	var warnings []string
 
 	var cfg Config
@@ -170,6 +171,7 @@ func builtinDefaults() map[string]any {
 		"runner-group": DefaultRunnerGroup,
 		"max-runners":  DefaultMaxRunners,
 		"provider":     DefaultProvider,
+		"retry":        defaultRetrySettings(),
 		"docker": map[string]any{
 			"socket": DefaultDockerSocket,
 			"dind":   DefaultDinD,

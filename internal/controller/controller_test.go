@@ -13,6 +13,7 @@ import (
 	"github.com/actions/scaleset"
 
 	"github.com/ysya/runscaler/internal/capacity"
+	"github.com/ysya/runscaler/internal/config"
 )
 
 // --- Mocks ---
@@ -676,7 +677,7 @@ func TestJobCompletionWaitsForFreshDesiredBeforeReplacement(t *testing.T) {
 
 func TestExitedRunnerIsRemovedAndReplaced(t *testing.T) {
 	b := &watcherProvider{waits: make(map[string]chan struct{})}
-	s := NewScaleSetController(1, 0, 2, b, &mockScaleset{}, slog.New(slog.DiscardHandler))
+	s := NewScaleSetController(1, 0, 2, b, &mockScaleset{}, slog.New(slog.DiscardHandler), testFastRetry())
 	defer s.Shutdown(context.Background())
 	ctx := context.Background()
 
@@ -706,7 +707,7 @@ func TestCrashMarksDemandStaleBeforeCapacityWaiterWakes(t *testing.T) {
 	b := capacity.NewBroker(1)
 	a := b.Register("test", 0)
 	p := &watcherProvider{waits: make(map[string]chan struct{})}
-	s := NewScaleSetController(1, 0, 2, p, &mockScaleset{}, slog.New(slog.DiscardHandler), WithCapacityAllocator(a))
+	s := NewScaleSetController(1, 0, 2, p, &mockScaleset{}, slog.New(slog.DiscardHandler), WithCapacityAllocator(a), testFastRetry())
 	defer s.Shutdown(context.Background())
 
 	// The second desired runner blocks in Allocator.Acquire while the first
@@ -732,7 +733,7 @@ func TestExitedRunnerReplacementConvergesAfterDelayedCompletion(t *testing.T) {
 	b := capacity.NewBroker(2)
 	a := b.Register("test", 0)
 	p := &watcherProvider{waits: make(map[string]chan struct{})}
-	s := NewScaleSetController(1, 0, 2, p, &mockScaleset{}, slog.New(slog.DiscardHandler), WithCapacityAllocator(a))
+	s := NewScaleSetController(1, 0, 2, p, &mockScaleset{}, slog.New(slog.DiscardHandler), WithCapacityAllocator(a), testFastRetry())
 	defer s.Shutdown(context.Background())
 
 	if _, err := s.HandleDesiredRunnerCount(context.Background(), 1); err != nil {
@@ -1353,4 +1354,8 @@ func TestFinishedRunnerIsCleanedUpWhileWaitingForCapacity(t *testing.T) {
 	}
 	waitFor(t, func() bool { return p.removedCount() == 1 },
 		"finished runner was not cleaned up while the scale set waited for capacity")
+}
+
+func testFastRetry() Option {
+	return WithRetry(config.RetryConfig{Initial: time.Millisecond, Max: time.Millisecond, CooldownAfter: 5, Cooldown: time.Millisecond})
 }

@@ -313,7 +313,7 @@ Doctor 會使用各個已設定 runner 規模集的 App 或 PAT 憑證探測 Git
 
 | 執行身分 | 日誌檔 |
 | --- | --- |
-| root（系統服務或 `sudo runner run`） | `/var/log/runner/runner.log` |
+| Linux 系統服務（專用帳號或 root），或 `sudo runner run` | `/var/log/runner/runner.log` |
 | Linux 使用者 | `$XDG_STATE_HOME/runner/runner.log`（`~/.local/state/runner/runner.log`） |
 | macOS 使用者 | `~/Library/Logs/runner/runner.log` |
 
@@ -333,6 +333,33 @@ runner logs -n 500 -f
 
 每台主機只能有一個 `runner run` 程序在執行。請在該程序中使用多個 `[[scaleset]]`
 項目，納入所有組織或儲存庫。
+### Runner 啟動與失敗復原
+
+Docker runner 會保持 provisioning，直到日誌出現 `Listening for Jobs`，且容器再存活五秒。
+GitHub 的工作指派或完成事件也能證明啟動成功。預設等待五分鐘；可用
+`docker.ready-timeout` 調整。自訂 entrypoint 無法輸出該訊息時，可明確設定
+`docker.readiness = false`；狀態會顯示 `unverified` 並記錄警告。
+Docker 用戶端以非 root 執行，不代表 Docker daemon 本身是 rootless。
+
+啟動失敗後，第一次等待 2.5–5 秒，之後加倍並限制於 `retry.max`（預設一分鐘）；
+連續失敗五次後，進入五分鐘冷卻。可在全域預設或個別規模集的 `[retry]` 設定
+`initial`、`max`、`cooldown-after`、`cooldown`。新的需求回呼無法繞過期限，
+佇列為空時仍會補足最低 runner 數。確認復原只會重設對應的失敗 generation。
+Tart 暖池各 slot 分別記錄重試；工作執行期間退出與清理重試不會累加啟動失敗。
+`runner status` 與健康 JSON 會顯示就緒狀態、重試期限及安全的失敗資訊。
+
+失敗診斷預設啟用，放在實際開啟的日誌檔旁的 `diagnostics/`，包含 fallback 路徑。
+停用檔案日誌時使用該安裝範圍的預設日誌目錄。目錄與檔案權限分別為 0700、0600，
+最多保留 20 份、2 MiB、七天，記錄已知的退出碼、OOM 與結束時間；未知值保持未知。
+清理失敗時保留容量，直到成功移除。無法確認 GitHub 身分的 runner，會保留到工作事件
+允許清理或明確強制關機。
+
+原始日誌預設不收集。設定 `diagnostics.capture-logs = true` 才會收集節錄
+（最多 100 行、64 KiB），並遮罩已知 PAT／JIT、Authorization 標頭與 PEM 區塊。
+這無法辨識所有工作流程機密；工作可能輸出敏感資料時請維持關閉。
+`diagnostics.enabled = false` 可停用診斷報告。健康 JSON 不會包含原始日誌，
+診斷收集或寫入失敗也不會阻止清理。
+
 <a id="configuration"></a>
 
 ## 設定

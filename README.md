@@ -298,7 +298,7 @@ file's default location depends on who runs it:
 
 | Runs as | Log file |
 | --- | --- |
-| root (system service or `sudo runner run`) | `/var/log/runner/runner.log` |
+| Linux system service (dedicated account or root), or `sudo runner run` | `/var/log/runner/runner.log` |
 | a user on Linux | `$XDG_STATE_HOME/runner/runner.log` (`~/.local/state/runner/runner.log`) |
 | a user on macOS | `~/Library/Logs/runner/runner.log` |
 
@@ -320,6 +320,41 @@ runner logs -n 500 -f
 
 Only one `runner run` process may be active on a host. Put every organization
 or repository in that process using multiple `[[scaleset]]` entries.
+
+### Runner startup and failure recovery
+
+Docker runners remain provisioning until their logs report `Listening for Jobs`
+and the container stays alive for five more seconds. GitHub work assignment or
+completion also proves startup. The default deadline is five minutes. Images
+with a custom entrypoint that cannot emit this marker can set
+`docker.readiness = false`; status then reports `unverified` and a warning is
+logged. `docker.ready-timeout` changes the deadline. A non-root Docker client
+does not imply that its Docker daemon is rootless.
+
+Failed starts retry with jitter: 2.5–5 seconds initially, doubling up to
+`retry.max` (default one minute). After five consecutive failures, retries enter
+a five-minute cooldown. Configure `[retry]` with `initial`, `max`,
+`cooldown-after`, and `cooldown`, globally or per scale set. Fresh demand cannot
+bypass the deadline, and minimum runners still apply with an empty queue.
+Verified recovery resets the relevant failure generation. Tart warm-pool slots
+use independent retry histories; job execution exits and cleanup retries do not
+increase startup failures. `runner status` and health JSON expose readiness,
+retry state/deadline, and safe failure metadata.
+
+Failure diagnostics are enabled by default under `diagnostics/` beside the log
+file actually opened, including its fallback. With file logging disabled, the
+scope's default log directory is used. Reports use a private directory (0700)
+and files (0600), retain at most 20 files / 2 MiB / seven days, and include known
+exit code, OOM and finish time without inventing unknown values. Failed cleanup
+retains capacity until removal succeeds. Unknown GitHub identity is preserved
+until work evidence permits cleanup or explicit force shutdown.
+
+Raw logs are off by default. `diagnostics.capture-logs = true` opts into bounded
+excerpts (100 lines / 64 KiB), with configured PAT/JIT values, Authorization
+headers and PEM blocks redacted. This cannot identify every workflow secret;
+keep capture off when jobs may print sensitive data. Set
+`diagnostics.enabled = false` to disable reports. Diagnostics never include raw
+logs in health JSON and a collection/write failure does not prevent cleanup.
 
 ## Configuration
 

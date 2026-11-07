@@ -1,7 +1,6 @@
 package controller
 
 import (
-	"context"
 	"time"
 
 	"github.com/ysya/runscaler/internal/metrics"
@@ -21,30 +20,13 @@ func (s *ScaleSetController) RuntimeStatus() metrics.RuntimeStatus {
 	return status
 }
 
-func (s *ScaleSetController) recordStartAttempt(started time.Time) {
+func (s *ScaleSetController) recordStartAttempt(started time.Time) startAttempt {
 	s.runtimeMu.Lock()
 	s.runtime.StartAttempts++
 	s.runtime.LastStartAttempt = started
+	attempt := startAttempt{id: uint64(s.runtime.StartAttempts), generation: s.failureGeneration}
 	s.runtimeMu.Unlock()
-}
-
-func (s *ScaleSetController) recordStartFailure(ctx context.Context, reason string) {
-	if ctx.Err() != nil || s.draining.Load() {
-		return
-	}
-	s.runtimeMu.Lock()
-	s.runtime.StartFailures++
-	s.runtime.ConsecutiveStartFailures++
-	s.runtime.FailureReason = reason
-	s.runtimeMu.Unlock()
-}
-
-func (s *ScaleSetController) recordStartSuccess() {
-	s.runtimeMu.Lock()
-	s.runtime.LastSuccessfulStart = time.Now()
-	s.runtime.ConsecutiveStartFailures = 0
-	s.runtime.FailureReason = ""
-	s.runtimeMu.Unlock()
+	return attempt
 }
 
 func (s *ScaleSetController) setCapacityWaiting(waiting bool) {

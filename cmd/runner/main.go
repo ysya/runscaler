@@ -34,6 +34,7 @@ import (
 	"github.com/ysya/runscaler/internal/capacity"
 	"github.com/ysya/runscaler/internal/config"
 	"github.com/ysya/runscaler/internal/controller"
+	"github.com/ysya/runscaler/internal/diagnostics"
 	"github.com/ysya/runscaler/internal/diskguard"
 	"github.com/ysya/runscaler/internal/health"
 	"github.com/ysya/runscaler/internal/layout"
@@ -268,7 +269,7 @@ func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) e
 		return fmt.Errorf("invalid global configuration: %w", err)
 	}
 	id := layout.CurrentIdentity()
-	logFile, _, logWarnings := openRunLog(id, resolveLogFile(cfg, id))
+	logFile, openedLog, logWarnings := openRunLog(id, resolveLogFile(cfg, id))
 	for _, w := range logWarnings {
 		fmt.Fprintln(os.Stderr, "Warning: "+w)
 	}
@@ -277,6 +278,14 @@ func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) e
 	}
 	console := logConsole(stdoutIsDevNull(), logFile != nil)
 	logger := config.NewLoggerWithWriter(cfg.LogLevel, cfg.LogFormat, console, logWriter(logFile))
+	var diagnosticStore *diagnostics.Store
+	if cfg.Diagnostics.IsEnabled() {
+		if dir, err := diagnosticDirectory(id, openedLog); err == nil {
+			diagnosticStore = diagnostics.NewStore(dir, cfg.Diagnostics.CaptureLogs)
+		} else {
+			logger.Warn("Failure diagnostics unavailable: cannot resolve log directory")
+		}
+	}
 
 	// Non-fatal config diagnostics (unknown keys, mixed single/multi mode).
 	// Warn only — a self-updated deployment with an older config must keep
@@ -547,7 +556,7 @@ func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) e
 		go func() {
 			defer wg.Done()
 			ssLogger := config.NewScaleSetLoggerWithWriter(cfg.LogLevel, cfg.LogFormat, ss.ScaleSetName, i, console, logWriter(logFile))
-			if err := runScaleSetController(runCtx, drain, cfg.EffectiveDrainTimeout(), ss, dockerClients[ss.Docker.Socket], ssLogger, healthServer, tartCoordinator, guard, capacityAllocators[i]); err != nil {
+			if err := runScaleSetController(runCtx, drain, cfg.EffectiveDrainTimeout(), ss, dockerClients[ss.Docker.Socket], ssLogger, healthServer, tartCoordinator, guard, capacityAllocators[i], diagnosticStore, cfg.Diagnostics.CaptureLogs); err != nil {
 				errs <- fmt.Errorf("scaleset %q: %w", ss.ScaleSetName, err)
 				cancelRun()
 			}
@@ -580,7 +589,7 @@ func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) e
 // shared disk-pressure guard built once in runManager() (nil when the disk guard
 // is disabled); it is wired into this ScaleSetController as its
 // pre-job-start check, see controller.WithDiskChecker below.
-func runScaleSetController(ctx context.Context, drain <-chan struct{}, drainTimeout time.Duration, ss config.ScaleSetConfig, dockerClient *dockerclient.Client, logger *slog.Logger, h *health.HealthServer, tartCoordinator *provider.TartHostCoordinator, guard *diskguard.Guard, capacityAllocator *capacity.Allocator) error {
+func runScaleSetController(ctx context.Context, drain <-chan struct{}, drainTimeout time.Duration, ss config.ScaleSetConfig, dockerClient *dockerclient.Client, logger *slog.Logger, h *health.HealthServer, tartCoordinator *provider.TartHostCoordinator, guard *diskguard.Guard, capacityAllocator *capacity.Allocator, diagnosticStore *diagnostics.Store, captureLogs bool) error {
 	// Create scaleset client
 	scalesetClient, err := ss.NewScalesetClient(logger)
 	if err != nil {
@@ -604,7 +613,9 @@ func runScaleSetController(ctx context.Context, drain <-chan struct{}, drainTime
 		tb.StartPool(ctx) // starts warm pool if tart-pool-size > 0
 		instanceProvider = tb
 	} else {
-		instanceProvider = provider.NewDockerProvider(ss, dockerClient, logger)
+		dp := provider.NewDockerProvider(ss, dockerClient, logger)
+		dp.EnableDiagnosticLogs(captureLogs && diagnosticStore != nil)
+		instanceProvider = dp
 	}
 
 	// guard is a *diskguard.Guard; only wrap it into the controller.DiskChecker
@@ -616,6 +627,7 @@ func runScaleSetController(ctx context.Context, drain <-chan struct{}, drainTime
 		controllerOpts = append(controllerOpts, controller.WithDiskChecker(guard))
 	}
 	controllerOpts = append(controllerOpts, controller.WithCapacityAllocator(capacityAllocator))
+	controllerOpts = append(controllerOpts, controller.WithDiagnostics(diagnosticStore, ss.ScaleSetName, ss.Provider, ss.Token), controller.WithRetry(ss.EffectiveRetry()))
 	s := controller.NewScaleSetController(scaleSet.ID, ss.MinRunners, ss.MaxRunners, instanceProvider, scalesetClient, logger, controllerOpts...)
 	defer s.Shutdown(context.WithoutCancel(ctx))
 

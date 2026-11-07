@@ -101,7 +101,7 @@ func TestRuntimeDistinguishesProviderFailureFromShutdownCancellation(t *testing.
 
 func TestRuntimeCapacityWaitIsVisibleAndHealthy(t *testing.T) {
 	b := capacity.NewBroker(1)
-	s := NewScaleSetController(1, 0, 1, &mockProvider{}, &errorScaleset{err: errors.New("jit unavailable")}, slog.New(slog.DiscardHandler), WithCapacityAllocator(b.Register("waiting", 0)))
+	s := NewScaleSetController(1, 0, 1, &mockProvider{}, &errorScaleset{err: errors.New("jit unavailable")}, slog.New(slog.DiscardHandler), WithCapacityAllocator(b.Register("waiting", 0)), testFastRetry())
 	defer s.Shutdown(context.Background())
 	if _, err := s.startInstance(context.Background()); err == nil {
 		t.Fatal("expected initial JIT failure")
@@ -130,7 +130,7 @@ func TestRuntimeCapacityWaitIsVisibleAndHealthy(t *testing.T) {
 
 func TestRuntimeFailedSupplyStaysDegradedUntilRetryIsReady(t *testing.T) {
 	p := &blockingProvider{started: make(chan string, 1), release: make(chan struct{})}
-	s := NewScaleSetController(1, 0, 1, p, &errorScaleset{err: errors.New("jit unavailable")}, slog.New(slog.DiscardHandler))
+	s := NewScaleSetController(1, 0, 1, p, &errorScaleset{err: errors.New("jit unavailable")}, slog.New(slog.DiscardHandler), testFastRetry())
 	defer s.Shutdown(context.Background())
 	s.desiredMu.Lock()
 	s.desiredRunners = 1

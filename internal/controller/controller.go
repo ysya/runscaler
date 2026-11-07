@@ -14,6 +14,8 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ysya/runscaler/internal/capacity"
+	"github.com/ysya/runscaler/internal/config"
+	"github.com/ysya/runscaler/internal/diagnostics"
 	"github.com/ysya/runscaler/internal/metrics"
 	"github.com/ysya/runscaler/internal/provider"
 )
@@ -61,16 +63,25 @@ type ScaleSetController struct {
 	reconcile   chan struct{}
 	// cancelAcquire abandons the reconciler's capacity wait when new work is
 	// signalled (see acquireCapacity). Guarded by acquireMu.
-	acquireMu     sync.Mutex
-	cancelAcquire context.CancelFunc
-	workCtx       context.Context
-	cancelWork    context.CancelFunc
-	workerWG      sync.WaitGroup
-	cleanupWG     sync.WaitGroup
-	stopOnce      sync.Once
-	draining      atomic.Bool
-	runtimeMu     sync.Mutex
-	runtime       metrics.RuntimeStatus
+	acquireMu          sync.Mutex
+	cancelAcquire      context.CancelFunc
+	workCtx            context.Context
+	cancelWork         context.CancelFunc
+	workerWG           sync.WaitGroup
+	cleanupWG          sync.WaitGroup
+	observerWG         sync.WaitGroup
+	stopOnce           sync.Once
+	draining           atomic.Bool
+	runtimeMu          sync.Mutex
+	runtime            metrics.RuntimeStatus
+	diagnostics        *diagnostics.Store
+	diagnosticScaleSet string
+	diagnosticProvider string
+	diagnosticSecrets  []string
+	retryConfig        config.RetryConfig
+	retryTimer         *time.Timer
+	lastFailureAttempt uint64
+	failureGeneration  uint64
 }
 
 // Compile-time check that ScaleSetController implements listener.Scaler.
@@ -114,6 +125,7 @@ func NewScaleSetController(scaleSetID, minRunners, maxRunners int, p provider.In
 		instances:      newInstanceState(),
 		capacity:       privateBroker.Register("standalone", minRunners),
 		reconcile:      make(chan struct{}, 1),
+		retryConfig:    config.DefaultRetry(),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -158,6 +170,8 @@ func (s *ScaleSetController) HandleJobStarted(ctx context.Context, jobInfo *scal
 	)
 	if !s.instances.markBusy(jobInfo.RunnerName, jobRefFrom(&jobInfo.JobMessageBase)) {
 		s.logger.Warn("Job started for unknown runner (already removed?)", slog.String("runnerName", jobInfo.RunnerName))
+	} else {
+		s.recordWorkSuccessFor(s.instances.attempt(jobInfo.RunnerName))
 	}
 	return nil
 }
@@ -176,6 +190,7 @@ func (s *ScaleSetController) HandleJobCompleted(ctx context.Context, jobInfo *sc
 		s.logger.Warn("Job completed for unknown runner (already removed?)", slog.String("runnerName", jobInfo.RunnerName))
 		return nil
 	}
+	s.recordWorkSuccessFor(s.instances.attempt(jobInfo.RunnerName))
 	s.desiredMu.Lock()
 	s.pendingCompletions++
 	s.desiredMu.Unlock()
@@ -230,6 +245,10 @@ func (s *ScaleSetController) reconcileOne() bool {
 		return true
 	}
 	if current >= target {
+		s.clearSatisfiedRetry(target)
+		return false
+	}
+	if !s.retryAllowed() {
 		return false
 	}
 
@@ -245,7 +264,7 @@ func (s *ScaleSetController) reconcileOne() bool {
 	}
 	// Demand may have changed while this scale set waited for host capacity.
 	target, canScale = s.scaleTarget()
-	if s.draining.Load() || !canScale || s.instances.count() >= target {
+	if s.draining.Load() || !canScale || s.instances.count() >= target || !s.retryAllowed() {
 		lease.Release()
 		return false
 	}
@@ -254,7 +273,6 @@ func (s *ScaleSetController) reconcileOne() bool {
 			s.logger.Error("Failed to start runner, will retry",
 				slog.Any("error", err),
 			)
-			time.AfterFunc(5*time.Second, s.signalReconcile)
 		}
 		return false
 	}
@@ -278,6 +296,7 @@ func (s *ScaleSetController) scaleTarget() (target int, canScale bool) {
 
 func (s *ScaleSetController) removeClaimedInstance(ctx context.Context, name, instanceID string) {
 	removeCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	s.collectFailure(removeCtx, name, instanceID)
 	keep, err := s.deregister(removeCtx, name, instanceID)
 	if keep {
 		cancel()
@@ -318,6 +337,11 @@ func (s *ScaleSetController) deregister(ctx context.Context, name, instanceID st
 	if !needed {
 		return false, nil
 	}
+	if runnerID == 0 {
+		// Current readiness failures can still hold jobs, even without the JIT
+		// runner ID. Preserve them until work evidence or explicit shutdown.
+		return false, errors.New("cannot safely deregister runner with unknown ID")
+	}
 	err = s.scalesetClient.RemoveRunner(ctx, int64(runnerID))
 	switch {
 	case err == nil, errors.Is(err, scaleset.RunnerNotFoundError):
@@ -326,6 +350,7 @@ func (s *ScaleSetController) deregister(ctx context.Context, name, instanceID st
 		if !s.instances.restoreBusy(name, instanceID) {
 			return false, nil // the job completed meanwhile
 		}
+		s.recordWorkSuccessFor(s.instances.attempt(name))
 		s.logger.Info("Runner holds a job GitHub assigned before JobStarted arrived; keeping it",
 			slog.String("name", name))
 		return true, nil
@@ -393,9 +418,10 @@ func (s *ScaleSetController) startInstanceWithLease(ctx context.Context, lease *
 		lease.Release()
 		return "", fmt.Errorf("runner name collision: %s", name)
 	}
-	s.recordStartAttempt(started)
+	attempt := s.recordStartAttempt(started)
+	s.instances.setAttempt(name, attempt)
 	fail := func(reason string, err error) (string, error) {
-		s.recordStartFailure(ctx, reason)
+		s.recordStartFailureFor(ctx, reason, attempt)
 		s.instances.failProvision(name)
 		lease.Release()
 		return "", err
@@ -424,6 +450,7 @@ func (s *ScaleSetController) startInstanceWithLease(ctx context.Context, lease *
 		return fail("jit_config_failed", fmt.Errorf("failed to generate JIT config: %w", err))
 	}
 
+	s.instances.setJIT(name, jit.EncodedJITConfig)
 	instanceID, err := s.provider.StartInstance(ctx, name, jit.EncodedJITConfig)
 	if err != nil {
 		return fail("provider_start_failed", err)
@@ -433,7 +460,15 @@ func (s *ScaleSetController) startInstanceWithLease(ctx context.Context, lease *
 	if jit.Runner != nil {
 		runnerID = jit.Runner.ID
 	}
-	removeNow, tracked := s.instances.markReady(name, instanceID, runnerID)
+	ready, needsReadiness := s.provider.(provider.InstanceReadiness)
+	readyCtx, cancelReady := context.WithCancel(s.workCtx)
+	var removeNow, tracked bool
+	if needsReadiness {
+		removeNow, tracked = s.instances.markProvisioned(name, instanceID, runnerID, cancelReady)
+	} else {
+		cancelReady()
+		removeNow, tracked = s.instances.markReady(name, instanceID, runnerID)
+	}
 	if !tracked {
 		cleanCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 		_ = s.provider.RemoveInstance(cleanCtx, instanceID)
@@ -441,19 +476,23 @@ func (s *ScaleSetController) startInstanceWithLease(ctx context.Context, lease *
 		lease.Release()
 		return "", fmt.Errorf("runner %s was no longer tracked after provider start", name)
 	}
-	s.recordStartSuccess()
+	if !needsReadiness {
+		s.recordStartSuccessFor(attempt)
+	}
 	s.logger.Info("Runner started",
 		slog.String("name", name),
 		slog.String("instanceID", instanceID),
 		slog.Duration("startupTime", time.Since(started)),
 	)
 	if removeNow && !s.draining.Load() {
+		cancelReady()
 		// The background worker will observe the removing phase on its next
 		// reconcile pass and perform provider cleanup.
 		s.signalReconcile()
 		return name, nil
 	}
 	if s.draining.Load() {
+		cancelReady()
 		if !removeNow {
 			_, _, _ = s.instances.markDone(name, reasonDrain, "")
 		}
@@ -474,7 +513,12 @@ func (s *ScaleSetController) startInstanceWithLease(ctx context.Context, lease *
 		return name, nil
 	}
 	if watcher, ok := s.provider.(provider.InstanceWatcher); ok {
-		go s.watchInstance(s.workCtx, watcher, name, instanceID)
+		s.observerWG.Add(1)
+		go func() { defer s.observerWG.Done(); s.watchInstance(s.workCtx, watcher, name, instanceID) }()
+	}
+	if needsReadiness {
+		s.observerWG.Add(1)
+		go func() { defer cancelReady(); s.waitReady(readyCtx, ready, name, instanceID, attempt) }()
 	}
 	return name, nil
 }
@@ -541,10 +585,14 @@ func (s *ScaleSetController) watchInstance(ctx context.Context, watcher provider
 		case <-time.After(5 * time.Second):
 		}
 	}
+	s.handleExit(ctx, name, instanceID)
+}
+
+func (s *ScaleSetController) handleExit(ctx context.Context, name, instanceID string) {
 	s.desiredMu.Lock()
 	crashRevision := s.desiredRevision
 	s.desiredMu.Unlock()
-	dead, removed := s.instances.markDead(name, instanceID)
+	attempt, unassigned, worked, removed := s.instances.markExited(name, instanceID)
 	if !removed {
 		return // normal JobCompleted path already removed it from state
 	}
@@ -556,15 +604,14 @@ func (s *ScaleSetController) watchInstance(ctx context.Context, watcher provider
 		s.demandStale = true
 	}
 	s.desiredMu.Unlock()
-	dead.lease.Release()
-	s.logger.Warn("Runner exited before job completion; removing stale capacity", slog.String("name", name))
-	cleanCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-	if err := s.provider.RemoveInstance(cleanCtx, instanceID); err != nil {
-		s.logger.Warn("Failed to clean up exited runner", slog.String("name", name), slog.Any("error", err))
-	} else {
-		s.logRemoved(name, instanceID, dead.reason, dead.job)
+	if unassigned {
+		s.recordStartFailureFor(s.workCtx, "runner_exited_before_ready", attempt)
+	} else if worked {
+		s.runtimeMu.Lock()
+		s.runtime.UnexpectedExits++
+		s.runtimeMu.Unlock()
 	}
-	cancel()
+	s.logger.Warn("Runner exited before job completion; scheduling cleanup", slog.String("name", name))
 
 	// Wake cleanup/accounting, but wait for a fresh desired-count callback
 	// before replacing the runner. The previous desired value may still include
@@ -682,7 +729,7 @@ func (s *ScaleSetController) Shutdown(ctx context.Context) {
 }
 
 func (s *ScaleSetController) stopWork() {
-	s.stopOnce.Do(s.cancelWork)
+	s.stopOnce.Do(func() { s.cancelWork(); s.runtimeMu.Lock(); s.clearRetryLocked(); s.runtimeMu.Unlock() })
 }
 
 func (s *ScaleSetController) waitWorker(ctx context.Context) error {
@@ -691,6 +738,7 @@ func (s *ScaleSetController) waitWorker(ctx context.Context) error {
 		s.workerWG.Wait()
 		// Once the worker has stopped, no new cleanup goroutines can be added.
 		s.cleanupWG.Wait()
+		s.observerWG.Wait()
 		close(done)
 	}()
 	select {

@@ -31,8 +31,8 @@ func init() {
 }
 
 func runLogs(cmd *cobra.Command, _ []string) error {
-	id := layout.CurrentIdentity()
 	cfg, err := loadConfig(cmd)
+	id := commandIdentity(cmd)
 	if err != nil {
 		// A root-owned 0600 config, such as /etc/runner/config.toml found
 		// during config search, is readable only with sudo.

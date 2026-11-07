@@ -31,3 +31,15 @@ func TestStatusExplainsRuntimeSupplyState(t *testing.T) {
 		})
 	}
 }
+
+func TestStatusExplainsReadinessRetryAndExit(t *testing.T) {
+	when := time.Date(2026, 11, 7, 0, 0, 0, 0, time.UTC)
+	exit, oom := 137, true
+	runtime := metrics.RuntimeStatus{Readiness: "unverified", RetryState: "cooldown", NextRetryAt: when, LastFailure: &metrics.FailureSummary{Reason: "readiness_timeout", ExitCode: &exit, OOMKilled: &oom}}
+	got := formatStatus(health.HealthResponse{ScaleSets: []health.ScaleSetStatus{{Name: "builders", Runtime: &runtime}}}, "endpoint", when, false)
+	for _, want := range []string{"unverified", "cooldown until 2026-11-07T00:00:00Z", "exit 137", "OOM true"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q in %s", want, got)
+		}
+	}
+}

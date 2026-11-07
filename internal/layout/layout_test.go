@@ -15,27 +15,27 @@ func TestFor(t *testing.T) {
 		{
 			name: "linux root needs no home",
 			id:   Identity{GOOS: "linux", Root: true, XDGStateHome: "/xdg/state"},
-			want: Layout{ConfigFile: "/etc/runner/config.toml", LogFile: "/var/log/runner/runner.log", BackupDir: "/var/lib/runner/backups"},
+			want: Layout{ConfigFile: "/etc/runner/config.toml", LogFile: "/var/log/runner/runner.log"},
 		},
 		{
 			name: "linux user defaults",
 			id:   Identity{GOOS: "linux", Home: "/home/ada"},
-			want: Layout{ConfigFile: "/home/ada/.config/runner/config.toml", LogFile: "/home/ada/.local/state/runner/runner.log", BackupDir: "/home/ada/.local/state/runner/backups"},
+			want: Layout{ConfigFile: "/home/ada/.config/runner/config.toml", LogFile: "/home/ada/.local/state/runner/runner.log"},
 		},
 		{
 			name: "linux user absolute XDG",
 			id:   Identity{GOOS: "linux", Home: "/home/ada", XDGConfigHome: "/xdg/config", XDGStateHome: "/xdg/state"},
-			want: Layout{ConfigFile: "/xdg/config/runner/config.toml", LogFile: "/xdg/state/runner/runner.log", BackupDir: "/xdg/state/runner/backups"},
+			want: Layout{ConfigFile: "/xdg/config/runner/config.toml", LogFile: "/xdg/state/runner/runner.log"},
 		},
 		{
 			name: "linux user relative XDG is ignored",
 			id:   Identity{GOOS: "linux", Home: "/home/ada", XDGConfigHome: "rel/config", XDGStateHome: "rel/state"},
-			want: Layout{ConfigFile: "/home/ada/.config/runner/config.toml", LogFile: "/home/ada/.local/state/runner/runner.log", BackupDir: "/home/ada/.local/state/runner/backups"},
+			want: Layout{ConfigFile: "/home/ada/.config/runner/config.toml", LogFile: "/home/ada/.local/state/runner/runner.log"},
 		},
 		{
 			name: "linux user without home but with absolute XDG",
 			id:   Identity{GOOS: "linux", XDGConfigHome: "/xdg/config", XDGStateHome: "/xdg/state"},
-			want: Layout{ConfigFile: "/xdg/config/runner/config.toml", LogFile: "/xdg/state/runner/runner.log", BackupDir: "/xdg/state/runner/backups"},
+			want: Layout{ConfigFile: "/xdg/config/runner/config.toml", LogFile: "/xdg/state/runner/runner.log"},
 		},
 		{
 			name:    "linux user without home or XDG",
@@ -45,7 +45,7 @@ func TestFor(t *testing.T) {
 		{
 			name: "darwin user logs under Library",
 			id:   Identity{GOOS: "darwin", Home: "/Users/ada", XDGStateHome: "/xdg/state"},
-			want: Layout{ConfigFile: "/Users/ada/.config/runner/config.toml", LogFile: "/Users/ada/Library/Logs/runner/runner.log", BackupDir: "/xdg/state/runner/backups"},
+			want: Layout{ConfigFile: "/Users/ada/.config/runner/config.toml", LogFile: "/Users/ada/Library/Logs/runner/runner.log"},
 		},
 		{
 			name:    "darwin user without home cannot place logs",
@@ -72,6 +72,30 @@ func TestConfigHomeNeedsNoHomeWithAbsoluteXDG(t *testing.T) {
 	}
 	if _, err := (Identity{XDGConfigHome: "relative"}).ConfigHome(); err == nil {
 		t.Error("ConfigHome() without home or absolute XDG succeeded")
+	}
+}
+
+func TestNonRootSystemServiceUsesSystemPaths(t *testing.T) {
+	id := Identity{GOOS: "linux", ServiceScope: "system", Home: "/var/lib/runner", XDGConfigHome: "/unexpected/config", XDGStateHome: "/unexpected/state"}
+	got, err := For(id)
+	if err != nil || got.ConfigFile != "/etc/runner/config.toml" || got.LogFile != "/var/log/runner/runner.log" {
+		t.Fatalf("non-root system layout = %+v, %v", got, err)
+	}
+	if id.DirPerm() != 0o750 {
+		t.Fatalf("system directory permissions = %o", id.DirPerm())
+	}
+}
+
+func TestCurrentIdentityRetainsExplicitServiceScope(t *testing.T) {
+	t.Setenv("RUNNER_SERVICE_SCOPE", "system")
+	if got := CurrentIdentity(); got.ServiceScope != "system" {
+		t.Fatalf("scope = %q", got.ServiceScope)
+	}
+}
+
+func TestLayoutRejectsInvalidServiceScope(t *testing.T) {
+	if _, err := For(Identity{GOOS: "linux", ServiceScope: "other", Home: "/home/ci"}); err == nil {
+		t.Fatal("unknown service scope accepted")
 	}
 }
 

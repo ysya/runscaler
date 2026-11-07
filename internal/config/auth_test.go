@@ -64,7 +64,7 @@ func TestGitHubAppAuthValidation(t *testing.T) {
 
 func TestGitHubAppIgnoresAmbientPATButRejectsExplicitPAT(t *testing.T) {
 	t.Setenv("RUNNER_TOKEN", "synthetic-ambient-pat")
-	t.Setenv("RUNSCALER_TOKEN", "synthetic-legacy-pat")
+
 	ss := appScaleSet()
 	ss.resolveEnvToken()
 	if ss.Token != "" {

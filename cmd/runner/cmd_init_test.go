@@ -18,19 +18,6 @@ func TestInitGeneratedDockerConfigPassesStrictLoad(t *testing.T) {
 	assertGeneratedConfigValid(t, output)
 }
 
-func TestInitLegacyBackendFlagGeneratesCanonicalProviderKey(t *testing.T) {
-	output := runInitTestConfig(t, "backend")
-	b, err := os.ReadFile(output)
-	if err != nil {
-		t.Fatal(err)
-	}
-	text := string(b)
-	if !strings.Contains(text, `provider = "docker"`) || strings.Contains(text, `backend = "docker"`) {
-		t.Fatalf("generated config did not canonicalize backend to provider:\n%s", text)
-	}
-	assertGeneratedConfigValid(t, output)
-}
-
 func runInitTestConfig(t *testing.T, providerFlag string) string {
 	t.Helper()
 	output := filepath.Join(t.TempDir(), "config.toml")
@@ -69,7 +56,6 @@ func newInitTestCommand() *cobra.Command {
 	f.String("token", "", "")
 	f.Int("max-runners", 1, "")
 	f.String("provider", "", "")
-	f.String("backend", "", "")
 	f.String("runner-image", "", "")
 	f.Bool("dind", false, "")
 	f.String("shared-volume", "", "")

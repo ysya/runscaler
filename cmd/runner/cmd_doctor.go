@@ -57,12 +57,20 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	healthPort, _ := cmd.Flags().GetInt("health-port")
 	healthAddress, _ := cmd.Flags().GetString("health-address")
 
-	// Include both legacy/default and configured provider locations.
+	// Include the default and configured provider locations.
 	dockerSockets := map[string]bool{config.DefaultDockerSocket: true}
 	tartHomes := map[string]bool{"": true}
+	if os.Getenv("RUNNER_MAINTENANCE_CONTEXT") == "1" {
+		dockerSockets = map[string]bool{}
+		tartHomes = map[string]bool{}
+	}
 	cfg, cfgErr := loadConfig(cmd)
 	if cfgErr != nil {
 		return fmt.Errorf("cannot load config for safe diagnosis: %w", cfgErr)
+	}
+	if targetInContext(cmd) != nil {
+		dockerSockets = map[string]bool{}
+		tartHomes = map[string]bool{}
 	}
 	if !cmd.Flags().Changed("health-port") {
 		healthPort = cfg.HealthPort
@@ -353,9 +361,8 @@ type volumeAPI interface {
 	VolumeInspect(ctx context.Context, id string, options dockerclient.VolumeInspectOptions) (dockerclient.VolumeInspectResult, error)
 }
 
-// sharedVolumeNames lists the shared volume names doctor looks for: the
-// current name plus legacy names from before the runscaler→runner rename.
-var sharedVolumeNames = []string{"runner-shared", "runscaler-shared"}
+// sharedVolumeNames lists the default shared handoff volume doctor inspects.
+var sharedVolumeNames = []string{"runner-shared"}
 
 // checkDockerVolume reports whether runner's shared handoff volume(s)
 // exist and, for each one found, prints its name and size. It never

@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"sync"
 	"time"
 
@@ -24,6 +25,7 @@ const (
 	reasonDrain        = "drain"
 	reasonExited       = "exited"
 	reasonShutdown     = "shutdown"
+	reasonReadiness    = "readiness-failed"
 )
 
 // jobRef identifies the job a runner picked up, for the removal log line.
@@ -36,18 +38,24 @@ type jobRef struct {
 }
 
 type managedInstance struct {
-	id              string
-	runnerID        int // GitHub runner ID from the JIT config; 0 when unknown
-	phase           instancePhase
-	lease           *capacity.Lease
-	removeReason    string
-	job             jobRef
-	cleanupInFlight bool
-	cleanupAttempts int
-	cleanupRetryAt  time.Time
+	id                   string
+	runnerID             int // GitHub runner ID from the JIT config; 0 when unknown
+	phase                instancePhase
+	lease                *capacity.Lease
+	removeReason         string
+	job                  jobRef
+	cleanupInFlight      bool
+	cleanupAttempts      int
+	cleanupRetryAt       time.Time
+	attempt              startAttempt
+	worked               bool
+	readinessCancel      context.CancelFunc
+	jit                  string
+	diagnosticsCollected bool
+	diagnosticReason     string
 }
 
-// removedInstance is what markDead and finishRemoval hand back: the lease to
+// removedInstance is what finishRemoval hands back: the lease to
 // release and the context the removal log line reports.
 type removedInstance struct {
 	lease  *capacity.Lease
@@ -77,14 +85,6 @@ func (r *instanceState) reserve(name string, lease *capacity.Lease) bool {
 	return true
 }
 
-// addIdle exists for state restoration and focused tests. Runtime scale-up
-// uses reserve followed by markReady so provisioning is never invisible.
-func (r *instanceState) addIdle(name, instanceID string) {
-	r.mu.Lock()
-	r.instances[name] = &managedInstance{id: instanceID, phase: instanceIdle, lease: &capacity.Lease{}}
-	r.mu.Unlock()
-}
-
 func (r *instanceState) failProvision(name string) {
 	r.mu.Lock()
 	if instance, ok := r.instances[name]; ok && instance.id == "" {
@@ -108,6 +108,105 @@ func (r *instanceState) markReady(name, instanceID string, runnerID int) (remove
 		instance.phase = instanceIdle
 	}
 	return instance.phase == instanceRemoving, true
+}
+
+func (r *instanceState) markProvisioned(name, id string, runnerID int, cancel context.CancelFunc) (removing, tracked bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	i, ok := r.instances[name]
+	if !ok {
+		return false, false
+	}
+	i.id, i.runnerID = id, runnerID
+	if i.phase == instanceProvisioning {
+		i.readinessCancel = cancel
+	} else {
+		cancel()
+	}
+	return i.phase == instanceRemoving, true
+}
+
+func (r *instanceState) readinessResult(name, id string, failureReason string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	i, ok := r.instances[name]
+	if !ok || i.id != id || i.phase != instanceProvisioning {
+		return false
+	}
+	if failureReason != "" {
+		i.phase = instanceRemoving
+		i.removeReason = reasonReadiness
+		i.diagnosticReason = failureReason
+	} else {
+		i.phase = instanceIdle
+	}
+	return true
+}
+
+func (r *instanceState) attempt(name string) startAttempt {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if i := r.instances[name]; i != nil {
+		return i.attempt
+	}
+	return startAttempt{}
+}
+
+func (r *instanceState) setAttempt(name string, attempt startAttempt) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if i := r.instances[name]; i != nil {
+		i.attempt = attempt
+	}
+}
+
+func (r *instanceState) setJIT(name, jit string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if i := r.instances[name]; i != nil {
+		i.jit = jit
+	}
+}
+func (r *instanceState) claimDiagnostics(name, id string) (string, string, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	i := r.instances[name]
+	if i == nil || i.id != id || i.diagnosticsCollected || (i.removeReason != reasonReadiness && i.removeReason != reasonExited) {
+		return "", "", false
+	}
+	i.diagnosticsCollected = true
+	return i.diagnosticReason, i.jit, true
+}
+
+func (r *instanceState) markExited(name, id string) (startAttempt, bool, bool, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	i, ok := r.instances[name]
+	if !ok || i.id != id || (i.phase == instanceRemoving && i.removeReason != reasonReadiness) {
+		return startAttempt{}, false, false, false
+	}
+	unassigned := !i.worked && i.removeReason != reasonReadiness
+	i.phase = instanceRemoving
+	i.removeReason = reasonExited
+	i.diagnosticReason = "runner_exited_unexpectedly"
+	if !i.worked {
+		i.diagnosticReason = "runner_exited_before_ready"
+	}
+	if i.readinessCancel != nil {
+		i.readinessCancel()
+	}
+	return i.attempt, unassigned, i.worked, true
+}
+
+func (r *instanceState) hasWork(attempt startAttempt) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, i := range r.instances {
+		if i.attempt == attempt && i.worked && i.removeReason != reasonExited {
+			return true
+		}
+	}
+	return false
 }
 
 // count returns instances that may still serve work. Idle removals retain
@@ -172,7 +271,7 @@ func (r *instanceState) contains(name, instanceID string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	instance, ok := r.instances[name]
-	return ok && instance.id == instanceID && instance.phase != instanceRemoving
+	return ok && instance.id == instanceID && (instance.phase != instanceRemoving || instance.removeReason == reasonReadiness)
 }
 
 func (r *instanceState) markBusy(name string, job jobRef) bool {
@@ -195,6 +294,10 @@ func (r *instanceState) markBusy(name string, job jobRef) bool {
 		return false
 	}
 	instance.job = job
+	instance.worked = true
+	if instance.readinessCancel != nil {
+		instance.readinessCancel()
+	}
 	return true
 }
 
@@ -202,7 +305,7 @@ func (r *instanceState) markBusy(name string, job jobRef) bool {
 // (scale-down or drain), as opposed to one whose job finished.
 func isUnassignedRemoval(instance *managedInstance) bool {
 	return instance.phase == instanceRemoving &&
-		(instance.removeReason == reasonScaledDown || instance.removeReason == reasonDrain)
+		(instance.removeReason == reasonScaledDown || instance.removeReason == reasonDrain || instance.removeReason == reasonReadiness)
 }
 
 // deregistration returns the GitHub runner ID to deregister before the
@@ -212,7 +315,7 @@ func (r *instanceState) deregistration(name, instanceID string) (runnerID int, n
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	instance, ok := r.instances[name]
-	if !ok || instance.id != instanceID || instance.runnerID == 0 || !isUnassignedRemoval(instance) {
+	if !ok || instance.id != instanceID || !isUnassignedRemoval(instance) {
 		return 0, false
 	}
 	return instance.runnerID, true
@@ -229,6 +332,7 @@ func (r *instanceState) restoreBusy(name, instanceID string) bool {
 		return false
 	}
 	instance.phase = instanceBusy
+	instance.worked = true
 	instance.removeReason = ""
 	instance.cleanupInFlight = false
 	instance.cleanupAttempts = 0
@@ -251,18 +355,13 @@ func (r *instanceState) markDone(name, reason, result string) (instanceID string
 	instance.phase = instanceRemoving
 	instance.removeReason = reason
 	instance.job.result = result
-	return instance.id, instance.id != "", true
-}
-
-func (r *instanceState) markDead(name, instanceID string) (removedInstance, bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	instance, ok := r.instances[name]
-	if !ok || instance.id != instanceID || instance.phase == instanceRemoving {
-		return removedInstance{}, false
+	if reason == reasonJobCompleted {
+		instance.worked = true
 	}
-	delete(r.instances, name)
-	return removedInstance{lease: instance.lease, reason: reasonExited, job: instance.job}, true
+	if instance.readinessCancel != nil {
+		instance.readinessCancel()
+	}
+	return instance.id, instance.id != "", true
 }
 
 // markIdleAboveTarget transitions one surplus idle instance to removing. Busy
@@ -299,7 +398,7 @@ func (r *instanceState) idleForRemoval() map[string]string {
 	defer r.mu.Unlock()
 	result := make(map[string]string)
 	for name, instance := range r.instances {
-		if instance.phase == instanceIdle {
+		if instance.phase == instanceIdle || instance.phase == instanceProvisioning {
 			instance.phase = instanceRemoving
 			instance.removeReason = reasonDrain
 			result[name] = instance.id

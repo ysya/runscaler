@@ -20,10 +20,10 @@ func TestRefuseDarwinRoot(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "LaunchAgent") || strings.Contains(err.Error(), "Found system service") {
 		t.Errorf("macOS root without daemons = %v", err)
 	}
-	legacy := "/Library/LaunchDaemons/com.runscaler.agent.plist"
-	err = refuseDarwinRoot("darwin", 0, "run runner", func(p string) bool { return p == legacy })
-	if err == nil || !strings.Contains(err.Error(), legacy) {
-		t.Errorf("macOS root with a legacy daemon = %v, want it named", err)
+	current := "/Library/LaunchDaemons/io.github.ysya.runner.plist"
+	err = refuseDarwinRoot("darwin", 0, "run runner", func(p string) bool { return p == current })
+	if err == nil || !strings.Contains(err.Error(), current) {
+		t.Errorf("macOS root with a system daemon = %v, want it named", err)
 	}
 }
 

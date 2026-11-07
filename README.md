@@ -233,25 +233,48 @@ GitHub requests. The dashboard explains these states as `ERROR`,
 
 ### Updating
 
-```bash
-# Update to the latest release (downloads, verifies checksum, replaces binary in-place)
-runner update
+Read the [upgrade requirements](#upgrade-requirements) and the target release's
+notes before replacing a working installation. Older commands, settings and
+credential environment variables may require manual preparation.
 
-# Check if a newer version is available without installing
+```bash
+# Check for a release and review its upgrade requirements without installing
 runner update --check
+
+# After preparing the installation, update its selected binary
+runner update
 ```
 
-`runner update` downloads the archive for your platform, verifies its SHA-256
-checksum against the release's `checksums.txt`, then atomically replaces the
-binary. If the local health endpoint shows that a service is still running the
-old version, the command names both versions and tells you to run:
+`runner update` displays the selected service scope, runtime user, binary and
+config, downloads the archive for your platform, verifies its SHA-256 checksum
+against `checksums.txt`, then atomically replaces the binary. It does not
+validate configuration/provider compatibility, rewrite service definitions or
+restart services. Existing system/user scope and runtime identity are retained;
+an existing root service is not converted to a non-root account.
+
+After installation, the command prints an explicit validation command for the
+selected config. Run it with the service's credentials, provider access and
+groups. The restart hint uses the selected binary and `--scope user|system`;
+system service management needs an administrative shell. A matching health
+version is not proof of configuration compatibility or readiness. If health is
+disabled or unavailable, the running version is reported as unverified rather
+than assumed stopped. With `--binary-path` or no installed service, no service
+is selected: restart processes using that binary manually after validation.
+
+SIGTERM normally begins a drain and waits for active jobs, bounded by
+`drain-timeout` and the service manager's stop timeout. Jobs may be terminated
+when drain is disabled or either deadline expires; check these settings before
+restarting.
+
+The messages above come from the updater already installed. An older updater
+cannot show newly added warnings during its first upgrade. For that transition,
+keep the previous binary and config backed up, download/extract the new binary
+to a separate path, and validate the existing config with that new binary in
+the intended runtime environment before replacing the service binary:
 
 ```bash
-runner service restart
+/path/to/new/runner validate --config /absolute/path/config.toml
 ```
-
-That restart is safe by default: SIGTERM starts a drain and waits for active
-jobs instead of killing them.
 
 The scale set itself stays registered across restarts, so a job queued while
 runner is stopped — for an upgrade, a reboot, or after a crash — is picked up

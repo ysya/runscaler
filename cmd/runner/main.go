@@ -538,10 +538,7 @@ func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) e
 			return
 		}
 		if versioncheck.IsNewer(version, release.TagName) {
-			logger.Warn("A newer version of runner is available — run 'runner update' to upgrade",
-				slog.String("current", version),
-				slog.String("latest", release.TagName),
-			)
+			logAvailableUpdate(logger, version, release.TagName)
 		}
 	}()
 

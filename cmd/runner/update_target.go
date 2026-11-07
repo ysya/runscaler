@@ -98,8 +98,9 @@ func checkUpdateAccess(path, updater string) error {
 }
 
 func updatePermissionHint(updater, target string, stat statFunc) string {
+	guidance := "\n  Review upgrade requirements first: " + upgradeRequirementsURL + "\n  --binary-path updates only the named binary; validate its configuration before manually restarting any process that uses it."
 	if err := checkRootOnlyChain(updater, stat); err != nil {
-		return fmt.Sprintf("Current updater: %s\n  Selected binary: %s\n  Install the current updater at a root-protected absolute path, then run that updater with sudo and --binary-path %s", updater, target, shellQuotePath(target))
+		return fmt.Sprintf("Current updater: %s\n  Selected binary: %s\n  Install the current updater at a root-protected absolute path, then run that updater with sudo and --binary-path %s", updater, target, shellQuotePath(target)) + guidance
 	}
-	return fmt.Sprintf("Run: sudo %s update --binary-path %s", shellQuotePath(updater), shellQuotePath(target))
+	return fmt.Sprintf("Run: sudo %s update --binary-path %s", shellQuotePath(updater), shellQuotePath(target)) + guidance
 }

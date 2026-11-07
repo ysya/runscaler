@@ -250,24 +250,38 @@ runner status --no-color
 
 ### 更新
 
-```bash
-# Update to the latest release (downloads, verifies checksum, replaces binary in-place)
-runner update
+替換現有安裝前，請先閱讀[升級前準備](#upgrade-requirements)與目標版本的發行說明。
+舊指令、設定名稱與憑證環境變數可能需要先手動調整。
 
-# Check if a newer version is available without installing
+```bash
+# Check for a release and review its upgrade requirements without installing
 runner update --check
+
+# After preparing the installation, update its selected binary
+runner update
 ```
 
-`runner update` 會下載適用於你所在平台的封存檔，將其 SHA-256 總和檢查碼
-與該發行版本的 `checksums.txt` 比對驗證，再以不可分割的操作取代執行檔。
-若本機健康檢查端點顯示服務仍在執行舊版本，指令會列出新舊兩個版本，並提示你執行：
+`runner update` 會顯示選定服務的安裝範圍、執行身分、binary 與設定檔，下載適合平台的
+封存檔、驗證 `checksums.txt` 中的 SHA-256，再以不可分割的操作替換 binary。
+這個流程不會驗證設定／provider 相容性、重寫服務定義或重啟服務；既有 system／user
+範圍與執行身分會保留，原本以 root 執行的服務不會被轉成非 root 帳號。
+
+安裝後會列出針對實際設定檔的驗證指令，請在服務使用的憑證、provider 存取權限與群組
+環境下執行。重啟提示會使用選定 binary 與明確的 `--scope user|system`；system 服務
+管理需使用管理員 shell。健康端點回報相同版本，不代表設定相容性或就緒狀態已驗證。
+健康端點停用或無法連線時，會明示執行版本未確認，不會假定服務已停止。
+使用 `--binary-path` 或沒有安裝服務時，不會選取服務；驗證後請手動重啟使用該 binary 的程序。
+
+SIGTERM 通常會開始排空並等待工作完成，但仍受 `drain-timeout` 與服務管理器停止期限限制。
+停用排空或任一期限到期時，工作可能被終止；重啟前請先確認這些設定。
+
+上述提示來自目前已安裝的更新器；舊更新器在第一次升級時無法顯示新加入的警告。
+首次跨越這次變更時，請先備份原 binary 與設定檔，將新版下載並解壓至另一個路徑，
+在預定執行環境中用新 binary 驗證現有設定，再替換服務使用的 binary：
 
 ```bash
-runner service restart
+/path/to/new/runner validate --config /absolute/path/config.toml
 ```
-
-這項重新啟動操作預設是安全的：SIGTERM 會開始排空並等待執行中的工作完成，
-不會強制終止工作。
 
 runner 規模集在重新啟動期間會維持註冊，因此當 runner 因升級、重新開機或當機而停止時，
 排入佇列的工作會在 runner 重新連線後立即被接手。

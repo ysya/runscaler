@@ -130,6 +130,6 @@ func warnOutdatedService(logger *slog.Logger, drainTimeout time.Duration) {
 	}
 	fix := currentServiceFixCommand()
 	for _, w := range warnings {
-		logger.Warn(w, slog.String("fix", fix))
+		logger.Warn(w, slog.String("fix", fix), slog.String("upgrade_requirements", upgradeRequirementsURL))
 	}
 }

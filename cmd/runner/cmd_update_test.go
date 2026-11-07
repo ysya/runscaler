@@ -13,11 +13,15 @@ import (
 )
 
 func TestUpdateRestartNotice_WarnsWhenRunningVersionDiffers(t *testing.T) {
-	notice := updateRestartNotice("0.5.0", "0.4.1")
-	for _, want := range []string{"0.4.1", "0.5.0", "runner service restart"} {
+	target := &installationTarget{Scope: scopeUser, BinaryPath: "/opt/runner tools/runner", ConfigPath: "/home/ci/config $literal.toml"}
+	notice := updateRestartNotice("0.5.0", "0.4.1", target)
+	for _, want := range []string{"0.4.1", "0.5.0", "'/opt/runner tools/runner' service restart --scope user"} {
 		if !strings.Contains(notice, want) {
 			t.Errorf("notice must name both versions and the command to apply the new one; missing %q in:\n%s", want, notice)
 		}
+	}
+	if strings.Contains(notice, "safely") || strings.Contains(notice, "sudo") {
+		t.Fatalf("restart overpromises or escalates user service: %s", notice)
 	}
 }
 
@@ -27,15 +31,37 @@ func TestUpdateRestartNotice_QuietWhenNoActionIsNeeded(t *testing.T) {
 		installed string
 		running   string
 	}{
-		{"nothing running", "0.5.0", ""},
 		{"same version", "0.5.0", "0.5.0"},
 		{"optional tag prefix", "v0.5.0", "0.5.0"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := updateRestartNotice(tt.installed, tt.running); got != "" {
+			if got := updateRestartNotice(tt.installed, tt.running, &installationTarget{Scope: scopeUser, BinaryPath: "/opt/runner"}); got != "" {
 				t.Errorf("updateRestartNotice() = %q, want empty", got)
 			}
 		})
+	}
+}
+
+func TestUpdateUnknownRunningVersionDoesNotImplyStoppedService(t *testing.T) {
+	target := &installationTarget{Scope: scopeSystem, BinaryPath: "/usr/local/bin/runner", ConfigPath: "/etc/runner/config.toml"}
+	got := updateRestartNotice("v2.0.0", "", target)
+	for _, want := range []string{"could not be verified", "If the selected service is running", "--scope system", "drain", "stop timeout"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q in %s", want, got)
+		}
+	}
+	if strings.Contains(got, "not running") {
+		t.Fatal("unavailable health was treated as proof the service stopped")
+	}
+}
+
+func TestUpdateBinaryOnlyNoticeDoesNotControlUnselectedService(t *testing.T) {
+	got := updateRestartNotice("v2.0.0", "v1.0.0", nil)
+	if !strings.Contains(got, "No service was selected") || !strings.Contains(got, "manually") {
+		t.Fatalf("binary-only guidance=%s", got)
+	}
+	if strings.Contains(got, "service restart") || strings.Contains(got, "--scope") {
+		t.Fatalf("unselected service command printed: %s", got)
 	}
 }
 

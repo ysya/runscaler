@@ -5,9 +5,14 @@ import (
 	"context"
 	"errors"
 	"io/fs"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -55,7 +60,13 @@ func TestUpdateUsesInstalledBinaryAndItsVersion(t *testing.T) {
 	latestUpdateRelease = func(context.Context) (*versioncheck.ReleaseInfo, error) {
 		return &versioncheck.ReleaseInfo{TagName: "v2.0.0"}, nil
 	}
+	var out bytes.Buffer
+	installedCalls := 0
 	installUpdateRelease = func(_ context.Context, tag, path string) error {
+		installedCalls++
+		if !strings.Contains(out.String(), "does not validate") || !strings.Contains(out.String(), "#upgrade-requirements") {
+			t.Fatal("compatibility notice was not printed before replacement")
+		}
 		if tag != "v2.0.0" || path != installed {
 			t.Fatalf("update target=%s %s", tag, path)
 		}
@@ -66,8 +77,17 @@ func TestUpdateUsesInstalledBinaryAndItsVersion(t *testing.T) {
 	c.Flags().String("binary-path", "", "")
 	c.Flags().String("config", "", "")
 	addInstallationFlags(c)
-	c.SetOut(&bytes.Buffer{})
+	c.SetOut(&out)
 	c.SetErr(&bytes.Buffer{})
+	_ = c.Flags().Set("check", "true")
+	if err := runUpdate(c, nil); err != nil {
+		t.Fatal(err)
+	}
+	if installedCalls != 0 || !strings.Contains(out.String(), "Check only") || !strings.Contains(out.String(), "releases/tag/v2.0.0") {
+		t.Fatalf("check-only notice/install count=%d: %s", installedCalls, out.String())
+	}
+	out.Reset()
+	_ = c.Flags().Set("check", "false")
 	if err := runUpdate(c, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -75,6 +95,11 @@ func TestUpdateUsesInstalledBinaryAndItsVersion(t *testing.T) {
 	b, _ := os.ReadFile(installed)
 	if string(a) != "old" || string(b) != "new" {
 		t.Fatalf("wrong binary updated: invoking=%s installed=%s", a, b)
+	}
+	for _, want := range []string{"Binary installed", "compatibility has not been validated", shellQuotePath(installed) + " validate --config " + shellQuotePath(configPath), "--scope user"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("missing target-aware guidance %q: %s", want, out.String())
+		}
 	}
 }
 
@@ -87,6 +112,71 @@ func TestUpdateBinaryOnlyModeRejectsScopeOverrideBeforeNetwork(t *testing.T) {
 	_ = c.Flags().Set("scope", "system")
 	if _, _, err := resolveUpdateDestination(c, "/other/runner"); err == nil {
 		t.Fatal("binary-only update accepted a conflicting scope override")
+	}
+}
+
+func TestUpdateBinaryOnlyDoesNotProbeAnotherManagersHealth(t *testing.T) {
+	savedDiscover, savedLatest, savedInstall, savedExecutable, savedCurrent := discoverInstallations, latestUpdateRelease, installUpdateRelease, updateExecutablePath, version
+	t.Cleanup(func() {
+		discoverInstallations = savedDiscover
+		latestUpdateRelease = savedLatest
+		installUpdateRelease = savedInstall
+		updateExecutablePath = savedExecutable
+		version = savedCurrent
+	})
+	var requests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		_, _ = w.Write([]byte(`{"version":"v1.0.0"}`))
+	}))
+	defer server.Close()
+	_, port, err := net.SplitHostPort(strings.TrimPrefix(server.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	number, err := strconv.Atoi(port)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	binary := filepath.Join(dir, "runner")
+	path := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(binary, []byte("old"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("health-address='127.0.0.1'\nhealth-port="+strconv.Itoa(number)+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	discoverInstallations = func(context.Context) []installationCandidate {
+		t.Fatal("explicit binary-only update discovered a service")
+		return nil
+	}
+	updateExecutablePath = func() (string, error) { return binary, nil }
+	version = "1.0.0"
+	latestUpdateRelease = func(context.Context) (*versioncheck.ReleaseInfo, error) {
+		return &versioncheck.ReleaseInfo{TagName: "v2.0.0"}, nil
+	}
+	installUpdateRelease = func(context.Context, string, string) error { return nil }
+	c := &cobra.Command{Use: "update"}
+	c.SetContext(t.Context())
+	c.Flags().Bool("check", false, "")
+	c.Flags().String("binary-path", binary, "")
+	c.Flags().String("config", path, "")
+	addInstallationFlags(c)
+	var out bytes.Buffer
+	c.SetOut(&out)
+	c.SetErr(&bytes.Buffer{})
+	if err := runUpdate(c, nil); err != nil {
+		t.Fatal(err)
+	}
+	if requests.Load() != 0 || strings.Contains(out.String(), "service restart") {
+		t.Fatalf("binary-only update observed/controlled another manager: requests=%d output=%s", requests.Load(), out.String())
+	}
+	if !strings.Contains(out.String(), "No service was selected") {
+		t.Fatalf("binary-only scope was not explained: %s", out.String())
 	}
 }
 

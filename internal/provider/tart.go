@@ -128,6 +128,7 @@ type TartProvider struct {
 	logger      *slog.Logger
 	cmd         CommandRunner
 	coordinator *TartHostCoordinator
+	retryConfig config.RetryConfig
 
 	// Guest network, applied before each runner starts (see TartConfig).
 	mtu        int      // 0 = auto, -1 = off, otherwise a fixed MTU
@@ -178,6 +179,7 @@ func NewTartProviderWithCoordinator(ss config.ScaleSetConfig, logger *slog.Logge
 		logger:      logger,
 		cmd:         execCommandRunner{extraEnv: extraEnv},
 		coordinator: coordinator,
+		retryConfig: ss.EffectiveRetry(),
 		mtu:         ss.Tart.MTU,
 		dns:         ss.Tart.DNS,
 		netBridged:  ss.Tart.NetBridged,
@@ -217,6 +219,7 @@ func (p *TartProvider) StartPool(ctx context.Context) {
 // fillPool creates one warm VM and puts it in the pool.
 // When a VM is consumed, the pool refill goroutine creates a replacement.
 func (p *TartProvider) fillPool(slot int) {
+	retry := poolRetry{settings: p.retryConfig}
 	for {
 		if p.poolCtx.Err() != nil {
 			return
@@ -227,17 +230,18 @@ func (p *TartProvider) fillPool(slot int) {
 			if p.poolCtx.Err() != nil {
 				return
 			}
-			p.logger.Warn("Failed to create warm VM, retrying in 5s",
+			delay := retry.failure()
+			p.logger.Warn("Failed to create warm VM; retrying",
 				slog.Int("slot", slot),
+				slog.Duration("retryIn", delay),
 				slog.Any("error", err),
 			)
-			select {
-			case <-p.poolCtx.Done():
+			if !waitPoolRetry(p.poolCtx, delay) {
 				return
-			case <-time.After(5 * time.Second):
 			}
 			continue
 		}
+		retry.reset()
 
 		p.logger.Debug("Warm VM ready",
 			slog.String("name", vm.name),

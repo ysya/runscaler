@@ -20,14 +20,13 @@ import (
 	"github.com/ysya/runscaler/internal/config"
 )
 
-func TestReadServiceConfigProviderSupportsCanonicalAndLegacyKeys(t *testing.T) {
+func TestReadServiceConfigUsesCanonicalProvider(t *testing.T) {
 	tests := []struct {
 		name string
 		body string
 		want string
 	}{
 		{name: "canonical tart", body: `provider = "tart"`, want: "tart"},
-		{name: "legacy tart", body: `backend = "tart"`, want: "tart"},
 		{name: "mixed providers need docker service", body: `
 [[scaleset]]
 provider = "tart"
@@ -123,7 +122,7 @@ func TestSystemdUnitSystemModeSandbox(t *testing.T) {
 	for _, want := range []string{
 		"ProtectSystem=strict",
 		"NoNewPrivileges=true",
-		`Environment="RUNNER_SERVICE_VERSION=2"`,
+		`Environment="RUNNER_SERVICE_VERSION=3"`,
 		`Environment="RUNNER_SERVICE_STOP_TIMEOUT=7260"`,
 		`ExecStart="/usr/local/bin/runner" run --config "/etc/runner/config.toml"`,
 	} {
@@ -214,42 +213,6 @@ func TestSystemdUnitRejectsControlCharacters(t *testing.T) {
 	}
 }
 
-func TestSystemdExecStartRoundTrip(t *testing.T) {
-	for _, tc := range []struct{ binary, config string }{
-		{"/usr/local/bin/runner", "/etc/runner/config.toml"},
-		{"/opt/my runner/100%/$HOME/runner", "/data/100%/$HOME/c\\fg \"x\".toml"},
-	} {
-		unit, err := renderSystemdUnit(installOpts{binaryPath: tc.binary, configPath: tc.config})
-		if err != nil {
-			t.Fatal(err)
-		}
-		invocation, err := parseSystemdServiceInvocation([]byte(unit))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if invocation.BinaryPath != tc.binary || invocation.ConfigPath != tc.config {
-			t.Errorf("round trip = %+v, want binary %q config %q", invocation, tc.binary, tc.config)
-		}
-	}
-}
-
-func TestSplitSystemdCommandRejectsUnterminatedQuote(t *testing.T) {
-	if _, err := splitSystemdCommand(`"/usr/local/bin/runner run`); err == nil {
-		t.Fatal("unterminated quote accepted")
-	}
-}
-
-func TestSplitSystemdCommandKeepsDollarsInExecutable(t *testing.T) {
-	got, err := splitSystemdCommand(`"/opt/a$$b/runner" run --config "/x/$$y"`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []string{"/opt/a$$b/runner", "run", "--config", "/x/$y"}
-	if !slices.Equal(got, want) {
-		t.Errorf("splitSystemdCommand() = %q, want %q", got, want)
-	}
-}
-
 func TestSystemdUserUnitRecordsAbsoluteXDG(t *testing.T) {
 	unit, err := renderSystemdUnit(installOpts{
 		user: true, binaryPath: "/home/ada/.local/bin/runner", configPath: "/home/ada/.config/runner/config.toml",
@@ -279,7 +242,7 @@ func TestLaunchdPlistDiscardsStdoutAndRecordsEnvironment(t *testing.T) {
 	for _, want := range []string{
 		"<key>StandardOutPath</key>\n    <string>/dev/null</string>",
 		"<key>StandardErrorPath</key>\n    <string>" + filepath.Join(home, "Library", "Logs", "runner", "stderr.log") + "</string>",
-		"<key>RUNNER_SERVICE_VERSION</key>\n        <string>2</string>",
+		"<key>RUNNER_SERVICE_VERSION</key>\n        <string>3</string>",
 		"<key>RUNNER_SERVICE_STOP_TIMEOUT</key>\n        <string>7260</string>",
 		"<key>XDG_STATE_HOME</key>\n        <string>/xdg/state</string>",
 	} {
@@ -295,7 +258,7 @@ func TestLaunchdPlistEscapesXML(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	invocation, err := parseLaunchdServiceInvocation([]byte(plist))
+	invocation, err := parseLaunchdTarget(scopeUser, []byte(plist))
 	if err != nil {
 		t.Fatalf("plist is not parseable: %v\n%s", err, plist)
 	}
@@ -555,28 +518,23 @@ func TestValidateServiceBinary(t *testing.T) {
 }
 
 func TestInstallServiceValidatesBeforeTouchingExistingDefinition(t *testing.T) {
-	var actions []string
-	installed, running := true, true
-	manager := &fakeMigrationServiceManager{actions: &actions, installed: &installed, running: &running}
+	manager := &identityInstallManager{}
 	opts := installOpts{binaryPath: "/home/ada/runner", configPath: "/etc/runner/config.toml", force: true}
-
 	err := installService(manager, opts, func(bool, string) (string, error) { return "", errors.New("unsafe binary") })
-	if err == nil || len(actions) != 0 {
-		t.Fatalf("failed validation: err=%v actions=%v, want no manager action", err, actions)
+	if err == nil || manager.installed != nil {
+		t.Fatalf("failed validation wrote a service: %v", err)
 	}
-
 	saved := renderServiceDefinition
 	t.Cleanup(func() { renderServiceDefinition = saved })
 	renderServiceDefinition = func(installOpts) (string, error) { return "", errors.New("render failed") }
 	err = installService(manager, opts, func(_ bool, p string) (string, error) { return p, nil })
-	if err == nil || len(actions) != 0 {
-		t.Fatalf("failed render: err=%v actions=%v, want no manager action", err, actions)
+	if err == nil || manager.installed != nil {
+		t.Fatalf("failed render wrote a service: %v", err)
 	}
-
 	renderServiceDefinition = saved
 	err = installService(manager, opts, func(bool, string) (string, error) { return "/usr/local/bin/runner", nil })
-	if err != nil || strings.Join(actions, ",") != "install-new" || manager.installOpts.binaryPath != "/usr/local/bin/runner" {
-		t.Fatalf("valid install: err=%v actions=%v opts=%+v", err, actions, manager.installOpts)
+	if err != nil || manager.installed == nil || manager.installed.binaryPath != "/usr/local/bin/runner" {
+		t.Fatalf("valid install: opts=%+v err=%v", manager.installed, err)
 	}
 }
 
@@ -640,46 +598,6 @@ func TestUntrustedBinaryHint(t *testing.T) {
 	}
 }
 
-func TestUninstallServicesRemovesLegacyDefinitions(t *testing.T) {
-	notInstalled := func(bool) error { return fmt.Errorf("%w (no unit file)", errServiceNotInstalled) }
-	removed := func(bool) error { return nil }
-	tests := []struct {
-		name        string
-		current     func(bool) error
-		legacy      bool
-		removeErr   error
-		wantLegacy  bool
-		wantErrIs   error
-		wantErrText string
-	}{
-		{name: "only legacy present", current: notInstalled, legacy: true, wantLegacy: true},
-		{name: "both present", current: removed, legacy: true, wantLegacy: true},
-		{name: "only current present", current: removed},
-		{name: "nothing installed", current: notInstalled, wantErrIs: errServiceNotInstalled},
-		{name: "legacy removal fails", current: removed, legacy: true, removeErr: errors.New("busy"), wantErrText: "busy"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			gotLegacy, err := uninstallServices(false, tt.current, func(bool) bool { return tt.legacy }, func(bool) error { return tt.removeErr })
-			if gotLegacy != tt.wantLegacy {
-				t.Errorf("removedLegacy = %v, want %v", gotLegacy, tt.wantLegacy)
-			}
-			switch {
-			case tt.wantErrIs != nil:
-				if !errors.Is(err, tt.wantErrIs) {
-					t.Errorf("err = %v, want %v", err, tt.wantErrIs)
-				}
-			case tt.wantErrText != "":
-				if err == nil || !strings.Contains(err.Error(), tt.wantErrText) {
-					t.Errorf("err = %v, want %q", err, tt.wantErrText)
-				}
-			case err != nil:
-				t.Errorf("err = %v, want nil", err)
-			}
-		})
-	}
-}
-
 func TestLaunchdServiceLogFile(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -691,8 +609,8 @@ func TestLaunchdServiceLogFile(t *testing.T) {
 	if path, note := launchdServiceLogFile(true, only(current, legacy)); path != current || note != "" {
 		t.Errorf("with the current log = %q, %q", path, note)
 	}
-	if path, note := launchdServiceLogFile(true, only(legacy)); path != legacy || !strings.Contains(note, "--force") {
-		t.Errorf("with only the legacy log = %q, %q", path, note)
+	if path, note := launchdServiceLogFile(true, only(legacy)); path != "" || note != "" {
+		t.Errorf("retired log fallback = %q, %q", path, note)
 	}
 	if path, _ := launchdServiceLogFile(true, only()); path != "" {
 		t.Errorf("with no log = %q, want empty", path)

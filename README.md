@@ -36,8 +36,7 @@ Runners are **ephemeral** — each container/VM handles exactly one job and is r
   - [Graceful Shutdown](#graceful-shutdown)
 - [Building](#building)
 - [Architecture](#architecture)
-- [Upgrading to v0.10](#upgrading-to-v010)
-- [Upgrading from runscaler](#upgrading-from-runscaler)
+- [Upgrade requirements](#upgrade-requirements)
 - [License](#license)
 
 ## How It Works
@@ -115,17 +114,21 @@ flowchart LR
 **Shell script (Linux/macOS):**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ysya/runscaler/main/install.sh | sh
+# Linux: root-owned system binary (the service runs as non-root)
+curl -fsSL https://raw.githubusercontent.com/ysya/runscaler/main/install.sh | sudo sh
+
+# macOS: user binary; Linux: opt into a user installation
+curl -fsSL https://raw.githubusercontent.com/ysya/runscaler/main/install.sh | sh -s -- --user
 ```
 
-Installs to `~/.local/bin` by default (no sudo required); run as root (for example `curl -fsSL https://raw.githubusercontent.com/ysya/runscaler/main/install.sh | sudo sh`) it installs to `/usr/local/bin`, where a system service's binary must live. Set `INSTALL_DIR` to customize, or `RUNNER_VERSION` to pin a version:
+Linux defaults to system installation at `/usr/local/bin` and requires root. macOS defaults to `~/.local/bin`; Linux `--user` uses the same user-owned location. The script downloads a binary only; it does not create an account or service. System binaries may use another absolute location if the file and every ancestor are protected from non-root writes. Set `INSTALL_DIR` to customize, or `RUNNER_VERSION` to pin a version:
 
 ```bash
 # Install to a custom location (e.g. system-wide)
-curl -fsSL https://raw.githubusercontent.com/ysya/runscaler/main/install.sh | INSTALL_DIR=/usr/local/bin sh
+curl -fsSL https://raw.githubusercontent.com/ysya/runscaler/main/install.sh | sudo env INSTALL_DIR=/usr/local/bin sh
 
 # Pin a specific version
-curl -fsSL https://raw.githubusercontent.com/ysya/runscaler/main/install.sh | RUNNER_VERSION=v1.2.3 sh
+curl -fsSL https://raw.githubusercontent.com/ysya/runscaler/main/install.sh | RUNNER_VERSION=v1.2.3 sh -s -- --user
 ```
 
 **Go install:**
@@ -230,25 +233,48 @@ GitHub requests. The dashboard explains these states as `ERROR`,
 
 ### Updating
 
-```bash
-# Update to the latest release (downloads, verifies checksum, replaces binary in-place)
-runner update
+Read the [upgrade requirements](#upgrade-requirements) and the target release's
+notes before replacing a working installation. Older commands, settings and
+credential environment variables may require manual preparation.
 
-# Check if a newer version is available without installing
+```bash
+# Check for a release and review its upgrade requirements without installing
 runner update --check
+
+# After preparing the installation, update its selected binary
+runner update
 ```
 
-`runner update` downloads the archive for your platform, verifies its SHA-256
-checksum against the release's `checksums.txt`, then atomically replaces the
-binary. If the local health endpoint shows that a service is still running the
-old version, the command names both versions and tells you to run:
+`runner update` displays the selected service scope, runtime user, binary and
+config, downloads the archive for your platform, verifies its SHA-256 checksum
+against `checksums.txt`, then atomically replaces the binary. It does not
+validate configuration/provider compatibility, rewrite service definitions or
+restart services. Existing system/user scope and runtime identity are retained;
+an existing root service is not converted to a non-root account.
+
+After installation, the command prints an explicit validation command for the
+selected config. Run it with the service's credentials, provider access and
+groups. The restart hint uses the selected binary and `--scope user|system`;
+system service management needs an administrative shell. A matching health
+version is not proof of configuration compatibility or readiness. If health is
+disabled or unavailable, the running version is reported as unverified rather
+than assumed stopped. With `--binary-path` or no installed service, no service
+is selected: restart processes using that binary manually after validation.
+
+SIGTERM normally begins a drain and waits for active jobs, bounded by
+`drain-timeout` and the service manager's stop timeout. Jobs may be terminated
+when drain is disabled or either deadline expires; check these settings before
+restarting.
+
+The messages above come from the updater already installed. An older updater
+cannot show newly added warnings during its first upgrade. For that transition,
+keep the previous binary and config backed up, download/extract the new binary
+to a separate path, and validate the existing config with that new binary in
+the intended runtime environment before replacing the service binary:
 
 ```bash
-runner service restart
+/path/to/new/runner validate --config /absolute/path/config.toml
 ```
-
-That restart is safe by default: SIGTERM starts a drain and waits for active
-jobs instead of killing them.
 
 The scale set itself stays registered across restarts, so a job queued while
 runner is stopped — for an upgrade, a reboot, or after a crash — is picked up
@@ -295,7 +321,7 @@ file's default location depends on who runs it:
 
 | Runs as | Log file |
 | --- | --- |
-| root (system service or `sudo runner run`) | `/var/log/runner/runner.log` |
+| Linux system service (dedicated account or root), or `sudo runner run` | `/var/log/runner/runner.log` |
 | a user on Linux | `$XDG_STATE_HOME/runner/runner.log` (`~/.local/state/runner/runner.log`) |
 | a user on macOS | `~/Library/Logs/runner/runner.log` |
 
@@ -317,6 +343,41 @@ runner logs -n 500 -f
 
 Only one `runner run` process may be active on a host. Put every organization
 or repository in that process using multiple `[[scaleset]]` entries.
+
+### Runner startup and failure recovery
+
+Docker runners remain provisioning until their logs report `Listening for Jobs`
+and the container stays alive for five more seconds. GitHub work assignment or
+completion also proves startup. The default deadline is five minutes. Images
+with a custom entrypoint that cannot emit this marker can set
+`docker.readiness = false`; status then reports `unverified` and a warning is
+logged. `docker.ready-timeout` changes the deadline. A non-root Docker client
+does not imply that its Docker daemon is rootless.
+
+Failed starts retry with jitter: 2.5–5 seconds initially, doubling up to
+`retry.max` (default one minute). After five consecutive failures, retries enter
+a five-minute cooldown. Configure `[retry]` with `initial`, `max`,
+`cooldown-after`, and `cooldown`, globally or per scale set. Fresh demand cannot
+bypass the deadline, and minimum runners still apply with an empty queue.
+Verified recovery resets the relevant failure generation. Tart warm-pool slots
+use independent retry histories; job execution exits and cleanup retries do not
+increase startup failures. `runner status` and health JSON expose readiness,
+retry state/deadline, and safe failure metadata.
+
+Failure diagnostics are enabled by default under `diagnostics/` beside the log
+file actually opened, including its fallback. With file logging disabled, the
+scope's default log directory is used. Reports use a private directory (0700)
+and files (0600), retain at most 20 files / 2 MiB / seven days, and include known
+exit code, OOM and finish time without inventing unknown values. Failed cleanup
+retains capacity until removal succeeds. Unknown GitHub identity is preserved
+until work evidence permits cleanup or explicit force shutdown.
+
+Raw logs are off by default. `diagnostics.capture-logs = true` opts into bounded
+excerpts (100 lines / 64 KiB), with configured PAT/JIT values, Authorization
+headers and PEM blocks redacted. This cannot identify every workflow secret;
+keep capture off when jobs may print sensitive data. Set
+`diagnostics.enabled = false` to disable reports. Diagnostics never include raw
+logs in health JSON and a collection/write failure does not prevent cleanup.
 
 ## Configuration
 
@@ -577,8 +638,8 @@ Generated service definitions do not copy App key environment variables from
 the installing shell. Use a key file for these services, or supply the variable
 through the service manager explicitly.
 
-When App configuration is present, `RUNNER_TOKEN` and the legacy
-`RUNSCALER_TOKEN` fallback are ignored. An explicit `token` or `--token` together
+When App configuration is present, the `RUNNER_TOKEN` fallback is ignored.
+An explicit `token` or `--token` together
 with App configuration is an error. Incomplete App settings also fail instead
 of silently selecting PAT authentication.
 
@@ -618,7 +679,7 @@ runner init --url https://github.com/your-org --name app-runners \
 
 Avoid passing tokens as CLI flags (visible in `ps` output). Two alternatives:
 
-**Option 1: `RUNNER_TOKEN` environment variable** — automatically used when no `--token` flag or config value is set (the old `RUNSCALER_TOKEN` name still works but is deprecated):
+**Option 1: `RUNNER_TOKEN` environment variable** — automatically used when no `--token` flag or config value is set:
 
 ```bash
 export RUNNER_TOKEN=ghp_xxx
@@ -711,8 +772,7 @@ every scale set's `min-runners` floor is reserved before FIFO surplus capacity
 is handed out. Leaving `concurrent` at `0` keeps backward-compatible behavior
 by using the sum of all configured `max-runners` values.
 
-The deprecated `backend` TOML key and `--backend` flag remain accepted for
-existing installations. New configuration and generated files use `provider`.
+Use the `provider` TOML key and `--provider` flag to select Docker or Tart.
 
 ## Caching
 
@@ -873,8 +933,7 @@ runner service install --user --force --config-path ~/.config/runner/config.toml
 `--force` validates the config and binary and renders the new definition before
 touching the installed one. When a definition is outdated, runner logs the
 command that fixes it, with the exact config and binary paths it is running
-with: this `--force` reinstall, `runner migrate` when a pre-rename `runscaler`
-definition started it, or for a root service whose binary is not root-owned, a
+with: this `--force` reinstall, or for a root service whose binary is not root-owned, a
 copy to `/usr/local/bin` followed by the reinstall.
 
 After that, the normal upgrade flow is:
@@ -886,23 +945,75 @@ runner service restart     # waits for active jobs automatically
 
 ### Service layout
 
-- **Linux system service** runs as root and must execute a binary only root can
-  modify, such as `/usr/local/bin/runner`; `runner service install` and
-  `runner migrate` refuse anything else for any service that runs as root
-  (`--user=false`, or `--user` run by root). The unit sets
-  `ProtectSystem=strict`: `/etc/runner` stays read-only, logs go to
-  `LogsDirectory=runner` (`/var/log/runner`), and only `/tmp` is writable, for
-  the run lock.
+- **New Linux system services** are installed by root and run as the dedicated
+  non-login `runscaler` account. The binary remains root-owned; config/App key
+  files are `root:runscaler` with mode `0640`, and `/etc/runner` is `0750`.
+  HOME and working directory are `/var/lib/runner`; state and logs are owned
+  by the service account with mode `0750`. `ProtectSystem=strict` keeps config
+  read-only; explicit writable paths cover `/tmp`, state and the configured
+  log directory below `/var/log`. Installation refuses conflicting accounts,
+  linked/shared credential files and populated directories owned by others.
+  Ancestor directories, including the log parent, must be root-owned without
+  group/other write permission. Administrators must prepare these host paths;
+  the installer does not change ancestor permissions.
+- **Linux user services** use `runner service install --scope user` (or
+  `--user`), XDG config/state paths and the invoking user's credentials and
+  Docker socket. No sudo is needed. Root user-services are rejected.
 - **macOS** supports only a LaunchAgent for the logged-in user. It starts at
   login, so enable automatic login on unattended hosts, and install it from a
   local GUI session rather than SSH. runner refuses to run, init, install or
-  migrate as root on macOS. launchd starts agents with a minimal `PATH`; runner
+  start as root on macOS. launchd starts agents with a minimal `PATH`; runner
   appends `/opt/homebrew/bin` and `/usr/local/bin` when present so a
   Homebrew-installed `tart` is found. The agent discards stdout (runner writes
   its own rotated log) and keeps stderr in `~/Library/Logs/runner/stderr.log`,
   which is not rotated.
 - The run lock at `/tmp/runner.lock` prevents accidentally starting a second
   runner; it is not a security boundary against local users.
+
+```bash
+# New Linux system installation: configure first, then prepare and start
+sudo /usr/local/bin/runner init --output /etc/runner/config.toml
+sudo /usr/local/bin/runner service install --config-path /etc/runner/config.toml
+
+# macOS, or Linux with a user-owned binary and provider
+runner init
+runner service install --scope user
+```
+
+System credentials must be explicit in config. For `token="env:NAME"` or an
+App `private-key-env`, pass a root-protected systemd environment file with
+`--environment-file /etc/runner/credentials.env`; the installing shell's
+credentials are never persisted. Installation probes GitHub/provider access
+using the service identity before writing its unit. `--no-start` skips that
+live probe for offline preparation. Rootful Docker socket access is granted
+only through unit supplementary groups and remains root-equivalent; it is
+distinct from a rootless daemon. Another user's rootless socket is refused.
+
+Management commands (`status`, `logs`, `doctor`, `service …`, `update`) use a
+unique installed target's binary/config. `--scope user|system` selects one
+explicitly; `--user` and `--user=false` remain aliases. Auto mode refuses two
+installations or unverifiable metadata. Installation refuses a second scope.
+Linux discovery requires systemd's `busctl` JSON support and the relevant
+service-manager bus. Explicit scopes never fall back to another installation.
+Without any installed service, normal standalone config discovery still works.
+
+`runner update` replaces the selected service's binary and never restarts it.
+A system update requires root and a root-protected current updater; a writable user binary does not. To update a
+specific binary, including a root-owned shared binary on macOS, use
+`sudo /absolute/path/current-runner update --binary-path /absolute/path/target-runner`.
+This binary-only operation does not select or operate a LaunchAgent.
+For system `doctor`/`doctor --fix`, follow the printed `sudo systemd-run …`
+command to reproduce the service UID, unit groups and credential sources;
+plain `sudo -u` may omit its Docker group. `--fix` still requires a stopped
+manager and the shared machine lock. Inline private environment is not copied
+into command arguments; move it into a protected EnvironmentFile first.
+
+Existing Linux root services remain a supported installation mode and retain
+their root runtime under `update` and `--force`. Upgrades do not require identity conversion; the non-root
+default applies to new system installations. No root-to-non-root conversion
+command is planned in this work. Uninstall/reinstall does not automatically
+take over existing root-owned data. Existing config and backup files are never
+moved or deleted by an upgrade.
 
 ### Systemd
 
@@ -920,17 +1031,22 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+User=runscaler
+Group=runscaler
+# SupplementaryGroups=<configured socket GID> is added when required.
+WorkingDirectory=/var/lib/runner
 ExecStart="/usr/local/bin/runner" run --config "/etc/runner/config.toml"
 Restart=on-failure
 RestartSec=10s
 # Must exceed runner's drain budget so systemd does not SIGKILL an in-flight job.
 TimeoutStopSec=7260
-Environment="RUNNER_SERVICE_VERSION=2"
+Environment="RUNNER_SERVICE_VERSION=3"
 Environment="RUNNER_SERVICE_STOP_TIMEOUT=7260"
+Environment="RUNNER_SERVICE_SCOPE=system"
+Environment="HOME=/var/lib/runner"
 NoNewPrivileges=true
 ProtectSystem=strict
-LogsDirectory=runner
-ReadWritePaths=/tmp
+ReadWritePaths=/tmp /var/lib/runner /var/log/runner
 
 [Install]
 WantedBy=multi-user.target
@@ -976,103 +1092,37 @@ an `InstanceProvider` lifecycle:
 - `HandleJobStarted` — Marks runners as busy
 - `HandleJobCompleted` — Removes finished runners
 
-## Upgrading to v0.10
+## Upgrade requirements
 
-v0.10 moves runner's own files to the platform's standard locations and never
-moves existing files.
+The historical rename transition is retired. Releases contain only `runner-*`
+archives. The `migrate` command, implicit root `runner --config` startup,
+`--backend`, automatic `runscaler` config-directory search, old service names
+and `RUNSCALER_TOKEN` fallback are no longer supported. Start the manager with
+`runner run --config /absolute/path/config.toml`.
 
-| Existing setup | After upgrading the binary | What to do |
-| --- | --- | --- |
-| Linux system service | Fails to take the lock and prints a fix | Run the printed command; when the binary is not root-owned, it first installs a copy to `/usr/local/bin` |
-| Linux user service | Runs; logs move; warns | Run the printed command (`service install --force`, or `runner migrate` for a pre-rename definition) |
-| macOS LaunchAgent | Runs; logs move; warns | Run the printed command (`service install --force`, or `runner migrate` for a pre-rename definition) |
-| macOS LaunchDaemon | Refuses to run as root | Convert it as below |
-| tmux / foreground | Logs move; notes the old file | Nothing; delete the old `runner.log` to silence the note |
+Use the current setting names before upgrading:
 
-### macOS LaunchDaemon to LaunchAgent
+| Removed setting | Current setting |
+| --- | --- |
+| `backend` | `provider` |
+| `docker.shared-volume-ttl` | `docker.shared-volume-max-age` |
+| `tart.cache-space-budget` | `tart.cache-budget` |
+| `RUNSCALER_TOKEN` fallback | `RUNNER_TOKEN` |
 
-1. Record the old definition: `sudo cat /Library/LaunchDaemons/io.github.ysya.runner.plist`
-   (or `com.runscaler.agent.plist`) and note the binary and config paths in
-   `ProgramArguments`.
-2. Remove it: `sudo runner service uninstall --user=false` (this also removes
-   the legacy plist).
-3. Hand the config to your user:
-   `mkdir -p ~/.config/runner && chmod 700 ~/.config/runner`, then
-   `sudo install -o "$USER" -m 0600 <old config> ~/.config/runner/config.toml`
-4. Tart images used by root live in `/var/root/.tart`; pull them again as your
-   user (and update `[tart] home` if it pointed at root's directory).
-5. Keep the binary where your user can run it (`~/.local/bin`, or
-   `/usr/local/bin` with `sudo runner update`).
-6. Install as your user from a local GUI session:
-   `runner service install --config-path ~/.config/runner/config.toml`
-7. Enable automatic login so the agent starts after a reboot.
+Removed TOML keys cause an explicit error; they are never silently translated
+or ignored. Rename-era installations need manual preparation of their binary,
+config and service definition before upgrading to this version. Existing data
+and old backup files are left untouched. Current `runner` system services that
+run as root remain supported and keep that identity through update/--force.
 
-## Upgrading from runscaler
-
-The `runscaler` binary is now `runner` (start is a subcommand: `runner run`).
-After installing the new binary, run:
-
-    sudo runner migrate --user=false --dry-run # inspect system-level changes
-    sudo runner migrate --user=false           # perform system-level migration
-    runner migrate --user --dry-run        # inspect user-level changes
-    runner migrate --user                  # no sudo; uses ~/.config/runner
-
-On macOS, `runner migrate` and all `runner service` commands default to user
-scope (no sudo). On macOS, `runner migrate` refuses system scope and refuses to
-run as root; migrate with `--user`. Services use `~/Library/LaunchAgents` and
-start at login; they do not provide pre-login startup. Use `--user=false`
-explicitly to manage an existing system service. Linux retains its system-level
-default. User migration does not stop or uninstall a system-level service.
-
-`migrate` creates a `0600` backup before changing config. Backup filenames
-include the runner version, a UTC timestamp, the config SHA-256 prefix, and an
-original-path fingerprint; an adjacent JSON manifest records provenance and a
-restore command without copying config values or tokens into the manifest.
-System backups live under `/var/lib/runner/backups`; `--user` backups live under
-`$XDG_STATE_HOME/runner/backups` (`~/.local/state/runner/backups`).
-
-The migrated copy preserves comments, ordering, whitespace, and values while
-canonicalizing deprecated keys (`backend` → `provider`,
-`docker.shared-volume-ttl` → `docker.shared-volume-max-age`, and
-`tart.cache-space-budget` → `tart.cache-budget`). It is validated offline
-before being written. The service cutover stops but retains `runscaler`, starts
-and verifies `runner`, and only then removes the old service. A failed start
-restores the config and restarts the legacy service. Re-running migration
-reuses an identical content-addressed backup.
-
-User migration reads `~/.config/runscaler/config.toml` and writes
-`~/.config/runner/config.toml`. It discovers a custom config path from a known
-legacy service when possible; otherwise pass it explicitly with
-`runner migrate --user --config /path/to/config.toml`. Explicit source files
-are never removed. If no user config exists, `/etc/runscaler/config.toml` or
-`/etc/runner/config.toml` can be copied when readable; user migration never
-removes these system sources. Use `--backup-dir` to override the backup location.
-
-On both Linux and macOS, an absolute, nonempty `XDG_CONFIG_HOME` replaces
-`~/.config` for user config, and `XDG_STATE_HOME` replaces `~/.local/state` for
-user logs (Linux) and backups. Relative values are ignored. Installing a user
-service records these variables in the service definition so the service and
-the CLI agree. Config loading searches the current directory, user runner
-directory, `/etc/runner`, user runscaler directory, then `/etc/runscaler`. An
-explicit `--config` takes precedence. `init` writes the standard config path
-for the current user unless `--output` is supplied, and warns when a
-`config.toml` in the current directory would be found first. User service
-installation selects that local file if present, otherwise the user runner
-config; it stores an absolute path in the service definition. `--config-path`
-overrides `--config` for service installation.
-
-The legacy Docker volume is intentionally left untouched by default. Remove it
-only after reviewing the migration with `runner migrate --cleanup` (or add
-`--cleanup` to the initial migration). Migration is otherwise idempotent.
-
-During the transition the old binary's `runscaler update` can still fetch this
-release (compat assets are published), a legacy `/etc/runscaler/config.toml` is
-still read (with a warning), and an old `runscaler --config` service invocation
-still starts (with a warning) — so nothing breaks before you migrate.
-
-Manual alternative: stop the old service, back up and move the config, run
-`runner validate --config <path>`, install the new service, verify it, and only
-then uninstall the old service.
+For standalone commands, config discovery checks the working directory, the
+current user's runner config directory, then `/etc/runner`. Explicit `--config`
+selects its exact path. Absolute `XDG_CONFIG_HOME` and `XDG_STATE_HOME` customize
+user config/state; relative values are ignored. User service installation
+records those values and its absolute config path, while management commands
+select the installed service's config. `init` defaults to the current identity's
+standard config path; `service install --config-path` takes precedence over
+`--config`.
 
 ## License
 

@@ -1,17 +1,29 @@
 #!/bin/sh
 set -eu
 
+fail() { echo "Error: $1" >&2; exit 1; }
+
 REPO="ysya/runscaler"
 BINARY="runner"
-if [ "$(id -u)" -eq 0 ]; then
-    # A binary run by a root service must be writable only by root.
-    DEFAULT_INSTALL_DIR="/usr/local/bin"
-else
-    DEFAULT_INSTALL_DIR="${HOME}/.local/bin"
-fi
-INSTALL_DIR="${INSTALL_DIR:-${DEFAULT_INSTALL_DIR}}"
-
-fail() { echo "Error: $1" >&2; exit 1; }
+SCOPE="auto"
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --user) SCOPE="user" ;;
+        --scope)
+            [ "$#" -ge 2 ] || fail "--scope requires auto, system, or user"
+            shift
+            SCOPE="$1"
+            ;;
+        --scope=*) SCOPE="${1#--scope=}" ;;
+        --help|-h)
+            echo "Usage: sh install.sh [--scope auto|system|user] [--user]"
+            echo "Downloads a binary only. Linux defaults to system; macOS defaults to user."
+            exit 0
+            ;;
+        *) fail "Unknown option: $1" ;;
+    esac
+    shift
+done
 
 # Detect OS
 case "$(uname -s)" in
@@ -19,6 +31,24 @@ case "$(uname -s)" in
     Darwin*) OS="darwin" ;;
     *)       fail "Unsupported OS: $(uname -s). Use 'go install github.com/${REPO}/cmd/runner@latest' instead." ;;
 esac
+
+if [ "$SCOPE" = "auto" ]; then
+    if [ "$OS" = "linux" ]; then SCOPE="system"; else SCOPE="user"; fi
+fi
+case "$SCOPE" in
+    system)
+        [ "$OS" = "linux" ] || fail "macOS supports user installation only"
+        [ "$(id -u)" -eq 0 ] || fail "Linux system installation requires root. Run this script with sudo, or pass --user for a rootless user installation."
+        DEFAULT_INSTALL_DIR="/usr/local/bin"
+        ;;
+    user)
+        [ "$(id -u)" -ne 0 ] || fail "Run a user installation as the actual user without sudo"
+        DEFAULT_INSTALL_DIR="${HOME}/.local/bin"
+        ;;
+    *) fail "Invalid scope: $SCOPE" ;;
+esac
+INSTALL_DIR="${INSTALL_DIR:-${DEFAULT_INSTALL_DIR}}"
+case "$INSTALL_DIR" in /*) ;; *) fail "INSTALL_DIR must be absolute" ;; esac
 
 # Detect architecture
 case "$(uname -m)" in
@@ -48,15 +78,15 @@ fi
 ARCHIVE="${BINARY}-${OS}-${ARCH}.tar.gz"
 BASE_URL="https://github.com/${REPO}/releases/download/${RUNNER_VERSION}"
 
-TMPDIR=$(mktemp -d)
-trap 'rm -rf "$TMPDIR"' EXIT
+RUNNER_INSTALL_TEMP=$(mktemp -d)
+trap 'rm -rf "$RUNNER_INSTALL_TEMP"' EXIT
 
 echo "Downloading ${BINARY} ${RUNNER_VERSION} (${OS}/${ARCH})..."
-download "${TMPDIR}/${ARCHIVE}" "${BASE_URL}/${ARCHIVE}"
-download "${TMPDIR}/checksums.txt" "${BASE_URL}/checksums.txt"
+download "${RUNNER_INSTALL_TEMP}/${ARCHIVE}" "${BASE_URL}/${ARCHIVE}"
+download "${RUNNER_INSTALL_TEMP}/checksums.txt" "${BASE_URL}/checksums.txt"
 
 # Verify checksum
-cd "$TMPDIR"
+cd "$RUNNER_INSTALL_TEMP"
 EXPECTED=$(grep "${ARCHIVE}" checksums.txt | awk '{print $1}')
 [ -n "$EXPECTED" ] || fail "Checksum not found for ${ARCHIVE}"
 
@@ -76,6 +106,14 @@ install -d "${INSTALL_DIR}"
 install "${BINARY}" "${INSTALL_DIR}/${BINARY}"
 
 echo "Installed ${BINARY} ${RUNNER_VERSION} to ${INSTALL_DIR}/${BINARY}"
+echo "Binary download complete. No account or service was created."
+if [ "$SCOPE" = "system" ]; then
+    echo "Next: sudo ${INSTALL_DIR}/${BINARY} init --output /etc/runner/config.toml"
+    echo "Then: sudo ${INSTALL_DIR}/${BINARY} service install --scope system --config-path /etc/runner/config.toml"
+else
+    echo "Next: ${INSTALL_DIR}/${BINARY} init"
+    echo "Then: ${INSTALL_DIR}/${BINARY} service install --scope user"
+fi
 
 # Warn if INSTALL_DIR is not in PATH
 case ":${PATH}:" in

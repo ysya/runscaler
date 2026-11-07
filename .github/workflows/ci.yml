@@ -39,6 +39,47 @@ jobs:
       - name: Check for reachable vulnerabilities
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
 
+  service-installation:
+    name: Systemd installation (${{ matrix.mode }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [system, root, user]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      # This job owns an ephemeral VM. Never point these opt-in tests at an
+      # existing runner host; the test refuses pre-existing runner paths.
+      - name: Build isolated service fixtures
+        run: |
+          CGO_ENABLED=0 go build -o "$RUNNER_TEMP/runner" ./cmd/runner
+          CGO_ENABLED=0 go test -c -tags=systemd_integration -o "$RUNNER_TEMP/service-tests" ./cmd/runner
+          sudo install -d -m 0755 /usr/local/libexec/runner-systemd-fixture
+          sudo install -m 0755 "$RUNNER_TEMP/runner" /usr/local/libexec/runner-systemd-fixture/runner
+          sudo install -m 0755 "$RUNNER_TEMP/service-tests" /usr/local/libexec/runner-systemd-fixture/service-tests
+
+      - name: Verify actual service identity and update selection
+        run: |
+          # The installer requires root-protected ancestors. Prepare this
+          # ephemeral host rather than relaxing checks for writable parents.
+          test ! -L /var/log
+          test "$(stat -c %u /var/log)" = 0
+          sudo chmod g-w /var/log
+          sudo systemctl start docker
+          sudo env \
+            GITHUB_ACTIONS=true \
+            RUNNER_SYSTEMD_FIXTURE=1 \
+            RUNNER_FIXTURE_MODE=${{ matrix.mode }} \
+            RUNNER_FIXTURE_OWNER="$(id -un)" \
+            RUNNER_FIXTURE_BINARY=/usr/local/libexec/runner-systemd-fixture/runner \
+            /usr/local/libexec/runner-systemd-fixture/service-tests \
+              -test.run='^TestSystemdInstallationFixture$' -test.v -test.timeout=5m
+
   lint:
     runs-on: ubuntu-latest
     steps:

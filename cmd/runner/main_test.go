@@ -168,7 +168,7 @@ func TestRootBareInvocationDoesNotStart(t *testing.T) {
 	}
 }
 
-func TestRootConfigInvocationStartsViaDropIn(t *testing.T) {
+func TestRootConfigInvocationDoesNotStart(t *testing.T) {
 	called := false
 	orig := startManager
 	startManager = func(c *cobra.Command) error { called = true; return nil }
@@ -188,8 +188,8 @@ func TestRootConfigInvocationStartsViaDropIn(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
-	if !called {
-		t.Error("`runner --config X` must start via drop-in compat")
+	if called {
+		t.Error("`runner --config X` must not start without the run subcommand")
 	}
 }
 
@@ -207,7 +207,7 @@ func TestRunSubcommandRegistered(t *testing.T) {
 }
 
 func TestRunOwnsStartFlags(t *testing.T) {
-	for _, name := range []string{"url", "name", "token", "max-runners", "concurrent", "provider", "backend", "health-port", "dry-run"} {
+	for _, name := range []string{"url", "name", "token", "max-runners", "concurrent", "provider", "health-port", "dry-run"} {
 		if runCommand.Flags().Lookup(name) == nil {
 			t.Errorf("`run` must own the --%s start flag", name)
 		}

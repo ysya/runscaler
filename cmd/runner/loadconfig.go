@@ -3,7 +3,6 @@ package main
 import (
 	"errors"
 	"fmt"
-	"path/filepath"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -16,10 +15,19 @@ import (
 // config.Load, which also collects non-fatal diagnostics into cfg.Warnings.
 // Both the root command and validate subcommand use this helper.
 func loadConfig(cmd *cobra.Command) (config.Config, error) {
+	explicit, _ := cmd.Flags().GetString("config")
+	configPath, err := managedConfigPath(cmd, explicit)
+	if err != nil {
+		return config.Config{}, err
+	}
+	return loadConfigAtPath(cmd, configPath)
+}
+
+func loadConfigAtPath(cmd *cobra.Command, configPath string) (config.Config, error) {
 	// Only explicitly passed App flags select App mode. Binding their zero
 	// defaults would manufacture an empty App config for existing PAT users.
 	bindGitHubAppFlags(viper.GetViper(), cmd.Flags())
-	if configFile, _ := cmd.Flags().GetString("config"); configFile != "" {
+	if configFile := configPath; configFile != "" {
 		viper.SetConfigFile(configFile)
 		if err := viper.ReadInConfig(); err != nil {
 			return config.Config{}, fmt.Errorf("failed to read config file: %w", err)
@@ -43,27 +51,10 @@ func loadConfig(cmd *cobra.Command) (config.Config, error) {
 			}
 		}
 
-		if used := viper.ConfigFileUsed(); used != "" && isLegacyConfigFile(used) {
-			warnLegacy("config loaded from legacy path %s — run 'runner migrate' to migrate it", used)
-		}
 	}
 
-	// Provider flags are copied only when explicitly set. Binding both the
-	// canonical and legacy names to Viper would make --provider's default
-	// "docker" look explicit and override an existing backend = "tart"
-	// config before the alias layer can preserve it.
-	providerFlag := cmd.Flags().Lookup("provider")
-	backendFlag := cmd.Flags().Lookup("backend")
-	providerChanged := providerFlag != nil && providerFlag.Changed
-	backendChanged := backendFlag != nil && backendFlag.Changed
-	if providerChanged && backendChanged {
-		return config.Config{}, fmt.Errorf("--provider and deprecated --backend cannot be used together")
-	}
-	if providerChanged {
+	if providerFlag := cmd.Flags().Lookup("provider"); providerFlag != nil && providerFlag.Changed {
 		viper.Set("provider", providerFlag.Value.String())
-	}
-	if backendChanged {
-		viper.Set("backend", backendFlag.Value.String())
 	}
 
 	cfg, err := config.Load(viper.GetViper())
@@ -71,12 +62,4 @@ func loadConfig(cmd *cobra.Command) (config.Config, error) {
 		return config.Config{}, fmt.Errorf("failed to parse configuration: %w", err)
 	}
 	return cfg, nil
-}
-
-func isLegacyConfigFile(path string) bool {
-	if filepath.Dir(path) == filepath.Clean(legacyConfigDir) {
-		return true
-	}
-	legacy, err := userConfigPath("runscaler")
-	return err == nil && sameFilePath(path, legacy)
 }

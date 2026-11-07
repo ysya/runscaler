@@ -58,6 +58,11 @@ type DockerProvider struct {
 	pidsLimit        int64                     // container pids limit (0 = unlimited)
 	platform         *ocispec.Platform         // nil = use host default
 	logger           *slog.Logger
+	readiness        bool
+	readyTimeout     time.Duration
+	readySettle      time.Duration
+	readyPoll        time.Duration
+	captureLogs      bool
 }
 
 // NewDockerProvider creates a DockerProvider from scale set config.
@@ -74,6 +79,10 @@ func NewDockerProvider(ss config.ScaleSetConfig, client DockerAPI, logger *slog.
 		nanoCPUs:         int64(ss.Docker.CPU) * 1_000_000_000,  // cores → nanoseconds
 		pidsLimit:        ss.Docker.PidsLimit,
 		logger:           logger,
+		readiness:        ss.IsDockerReadinessEnabled(),
+		readyTimeout:     ss.DockerReadyTimeout(),
+		readySettle:      5 * time.Second,
+		readyPoll:        500 * time.Millisecond,
 	}
 	// Validate() already surfaced parse errors before startup; on error no
 	// cache volumes are mounted rather than a partial set.

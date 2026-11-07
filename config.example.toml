@@ -11,6 +11,10 @@ health-port = 8080
 # drain-timeout = "2h"                    # SIGTERM/SIGQUIT wait for busy jobs; "0s" disables drain
 # log-file = "/var/log/runner/runner.log" # default: /var/log/runner/runner.log (root), ~/.local/state/runner/runner.log (Linux), ~/Library/Logs/runner/runner.log (macOS); "" disables
 
+# Failure reports are private; raw runner logs stay off unless explicitly enabled.
+# diagnostics.enabled = true
+# diagnostics.capture-logs = false
+
 # --- Defaults (inherited by all scale sets unless overridden) ---
 # A key set in a [[scaleset]] always wins, even with a zero/empty value:
 # e.g. `memory = 0` (unlimited) or `shared-volume = ""` override the default.
@@ -47,11 +51,18 @@ max-runners = 10
 # github-app.private-key-file = "/absolute/path/to/runner-app.pem"
 # Use exactly one key source; the environment variable contains the full RSA PEM:
 # github-app.private-key-env = "RUNNER_GITHUB_APP_KEY"
-# App configuration disables ambient RUNNER_TOKEN/RUNSCALER_TOKEN fallback.
+# App configuration disables ambient RUNNER_TOKEN fallback.
 # Explicit token + App configuration is rejected.
 # max-runners = 10
 # min-runners = 0
 # labels = ["self-hosted", "linux"]
+
+# Startup retries (also used independently by each Tart warm-pool slot).
+# [retry]
+# initial = "5s"
+# max = "1m"
+# cooldown-after = 5
+# cooldown = "5m"
 
 # --- Disk guard ---
 # Host-wide: watches every scale set's stores grouped by filesystem, not
@@ -68,6 +79,8 @@ max-runners = 10
 # max-tier = 3         # highest reclaim tier allowed (1-4); tier 4 wipes cache volumes, so it needs explicit opt-in
 
 [docker]
+# readiness = true                     # custom images without the runner marker may explicitly disable it
+# ready-timeout = "5m"                 # marker + 5s alive, or GitHub work evidence
 socket = "/var/run/docker.sock"
 dind = true
 # shared-volume = "/shared"

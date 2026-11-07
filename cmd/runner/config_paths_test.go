@@ -53,32 +53,8 @@ func TestUserConfigOperations(t *testing.T) {
 	}
 }
 
-func TestMigrationDiscoversXDGUserConfig(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "xdg"))
-	base := filepath.Join(home, "xdg")
-	source := filepath.Join(base, "runscaler", "config.toml")
-	if err := os.MkdirAll(filepath.Dir(source), 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(source, []byte("name = 'legacy'"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	c := &cobra.Command{}
-	c.Flags().String("config", "", "")
-	c.Flags().String("backup-dir", "", "")
-	paths, err := resolveConfigMigrationPaths(c, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if paths.Source != source || paths.Target != filepath.Join(base, "runner", "config.toml") || !paths.RemoveSource {
-		t.Fatalf("migration paths = %+v", paths)
-	}
-}
-
 func TestPlatformServiceScopeDefaults(t *testing.T) {
-	for _, c := range []*cobra.Command{migrateCmd, serviceInstallCmd, serviceUninstallCmd, serviceStartCmd, serviceStopCmd, serviceRestartCmd, serviceStatusCmd, serviceLogsCmd} {
+	for _, c := range []*cobra.Command{serviceInstallCmd, serviceUninstallCmd, serviceStartCmd, serviceStopCmd, serviceRestartCmd, serviceStatusCmd, serviceLogsCmd} {
 		user, err := c.Flags().GetBool("user")
 		if err != nil {
 			t.Fatal(err)
@@ -122,38 +98,5 @@ func TestServiceConfigPrecedence(t *testing.T) {
 		if got != want {
 			t.Fatalf("%s: got %s want %s", tc.flag, got, want)
 		}
-	}
-}
-
-func TestUserMigrationCopiesSystemConfigWithoutRemovingSource(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", "")
-	oldLegacy, oldNew := legacyConfigPath, newConfigPath
-	legacyConfigPath = filepath.Join(t.TempDir(), "missing.toml")
-	newConfigPath = filepath.Join(t.TempDir(), "config.toml")
-	t.Cleanup(func() { legacyConfigPath, newConfigPath = oldLegacy, oldNew })
-	if err := os.WriteFile(newConfigPath, validLegacyConfig(), 0600); err != nil {
-		t.Fatal(err)
-	}
-	c := &cobra.Command{}
-	c.Flags().String("config", "", "")
-	c.Flags().String("backup-dir", "", "")
-	paths, err := resolveConfigMigrationPaths(c, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if paths.Source != newConfigPath || paths.RemoveSource {
-		t.Fatalf("system source must be copied and preserved: %+v", paths)
-	}
-	result, err := migrateConfigFile(paths, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !result.Found || !result.TargetCreated || result.RemoveSource {
-		t.Fatalf("result = %+v", result)
-	}
-	if _, err := os.Stat(newConfigPath); err != nil {
-		t.Fatal(err)
 	}
 }

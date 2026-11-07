@@ -349,12 +349,11 @@ func TestCheckDockerVolume_SharedVolumeIsNotOrphanedByExistence(t *testing.T) {
 	}
 }
 
-// TestCheckDockerVolumeReportsCurrentAndLegacyNames covers both names
-// sharedVolumeNames looks for existing at once: both are reported, neither
-// is removed, and reporting an existing shared volume is never counted as
+// TestCheckDockerVolumeReportsCurrentName covers both names
+// The shared volume is reported and never removed; its presence is not
 // an unresolved issue — it is expected steady state, not a problem.
-func TestCheckDockerVolumeReportsCurrentAndLegacyNames(t *testing.T) {
-	md := &orphanFake{volumes: []string{"runner-shared", "runscaler-shared"}}
+func TestCheckDockerVolumeReportsCurrentName(t *testing.T) {
+	md := &orphanFake{volumes: []string{"runner-shared"}}
 
 	issues, err := checkDockerVolume(context.Background(), md, true)
 	if err != nil {
@@ -369,10 +368,10 @@ func TestCheckDockerVolumeReportsCurrentAndLegacyNames(t *testing.T) {
 }
 
 // TestCheckDockerVolumeReportsWithoutFix asserts fix=false behaves
-// identically to fix=true (see TestCheckDockerVolumeReportsCurrentAndLegacyNames):
+// identically to fix=true (see TestCheckDockerVolumeReportsCurrentName):
 // this check no longer branches on fix at all.
 func TestCheckDockerVolumeReportsWithoutFix(t *testing.T) {
-	md := &orphanFake{volumes: []string{"runner-shared", "runscaler-shared"}}
+	md := &orphanFake{volumes: []string{"runner-shared"}}
 
 	issues, err := checkDockerVolume(context.Background(), md, false)
 	if err != nil {

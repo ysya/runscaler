@@ -42,7 +42,7 @@ func resolveLogFile(cfg config.Config, id layout.Identity) logFileDecision {
 		return logFileDecision{Path: lay.LogFile, Enabled: true}
 	}
 	path := *cfg.LogFile
-	if !id.Root {
+	if !id.System() {
 		return logFileDecision{Path: path, Enabled: true}
 	}
 	if abs, err := filepath.Abs(path); err == nil {
@@ -93,6 +93,40 @@ func openRunLog(id layout.Identity, d logFileDecision) (*config.LogFileWriter, s
 	return w, d.Fallback, warnings
 }
 
+func diagnosticDirectory(id layout.Identity, openedLog string) (string, error) {
+	if openedLog == "" {
+		lay, err := layout.For(id)
+		if err != nil {
+			return "", err
+		}
+		openedLog = lay.LogFile
+	}
+	// Use the directory actually opened (including fallback), resolving OS
+	// aliases such as macOS /var before the report store's no-symlink walk.
+	parent := filepath.Dir(openedLog)
+	var missing []string
+	for {
+		resolved, err := filepath.EvalSymlinks(parent)
+		if err == nil {
+			parent = resolved
+			break
+		}
+		if !os.IsNotExist(err) {
+			return "", err
+		}
+		next := filepath.Dir(parent)
+		if next == parent {
+			return "", err
+		}
+		missing = append(missing, filepath.Base(parent))
+		parent = next
+	}
+	for i := len(missing) - 1; i >= 0; i-- {
+		parent = filepath.Join(parent, missing[i])
+	}
+	return filepath.Join(parent, "diagnostics"), nil
+}
+
 // stdoutIsDevNull reports whether stdout is discarded, as generated launchd
 // agents set it.
 func stdoutIsDevNull() bool {
@@ -111,20 +145,4 @@ func logConsole(stdoutDiscarded, fileOpen bool) *os.File {
 		return os.Stderr
 	}
 	return os.Stdout
-}
-
-// oldDefaultLogFile returns the log older releases wrote beside the config
-// when it still exists and is not where runner writes now.
-func oldDefaultLogFile(cfg config.Config, usedConfig, current string) string {
-	if cfg.LogFile != nil || usedConfig == "" || current == "" {
-		return ""
-	}
-	old := filepath.Join(filepath.Dir(usedConfig), config.DefaultLogFileName)
-	if sameFilePath(old, current) {
-		return ""
-	}
-	if info, err := os.Stat(old); err != nil || !info.Mode().IsRegular() {
-		return ""
-	}
-	return old
 }

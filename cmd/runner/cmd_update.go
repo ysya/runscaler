@@ -8,14 +8,12 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
-	"github.com/ysya/runscaler/internal/config"
 	"github.com/ysya/runscaler/internal/health"
 	"github.com/ysya/runscaler/internal/versioncheck"
 )
@@ -23,8 +21,13 @@ import (
 var updateCmd = &cobra.Command{
 	Use:   "update",
 	Short: "Update runner to the latest release",
-	Long: `Check GitHub for the latest release and, if newer, download and replace
-the current binary in-place. The checksum is verified before installation.`,
+	Long: `Check GitHub for the latest release and replace the installed service's
+binary, or the current binary when no service is installed. Use --binary-path
+for an explicit binary-only update. Checksums are verified before installation.
+Configuration/provider compatibility is not validated, service definitions are
+not rewritten, and services are not restarted. Existing service scope and
+runtime user are retained. Prepare older settings and installations first:
+` + upgradeRequirementsURL,
 	Example: `  runner update            # Update to latest release
   runner update --check    # Check for updates without installing`,
 	RunE: runUpdate,
@@ -32,58 +35,86 @@ the current binary in-place. The checksum is verified before installation.`,
 
 func init() {
 	updateCmd.Flags().Bool("check", false, "Check for updates without installing")
+	updateCmd.Flags().String("binary-path", "", "Update only this explicit binary, without selecting or restarting a service")
 	cmd.AddCommand(updateCmd)
 }
 
 func runUpdate(cmd *cobra.Command, _ []string) error {
 	checkOnly, _ := cmd.Flags().GetBool("check")
+	invoking, err := updateExecutablePath()
+	if err != nil {
+		return fmt.Errorf("cannot determine updater path: %w", err)
+	}
+	execPath, target, err := resolveUpdateDestination(cmd, invoking)
+	if err != nil {
+		return err
+	}
+	if !checkOnly {
+		if err := checkUpdateAccess(execPath, invoking); err != nil {
+			return err
+		}
+	}
+	current := version
+	if !sameFilePath(execPath, invoking) {
+		current, err = installedBinaryVersion(cmd.Context(), execPath)
+		if err != nil {
+			return err
+		}
+	}
+	if target != nil {
+		announceInstallation(cmd, target)
+	} else {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Update target: %s\n", execPath)
+	}
 
-	if version == "dev" {
+	if current == "dev" {
 		fmt.Fprintln(cmd.ErrOrStderr(), "Warning: running a dev build — version comparison may be inaccurate.")
 	}
 
 	fmt.Fprintln(cmd.OutOrStdout(), "Checking for updates...")
 
-	release, err := versioncheck.Latest(cmd.Context())
+	release, err := latestUpdateRelease(cmd.Context())
 	if err != nil {
 		return fmt.Errorf("could not check for updates: %w", err)
 	}
 
-	if !versioncheck.IsNewer(version, release.TagName) {
-		fmt.Fprintf(cmd.OutOrStdout(), "Already up to date (%s).\n", version)
+	if !versioncheck.IsNewer(current, release.TagName) {
+		fmt.Fprintf(cmd.OutOrStdout(), "Installed binary is up to date (%s). Running service version, readiness and configuration compatibility were not checked.\n", current)
 		return nil
 	}
 
-	fmt.Fprintf(cmd.OutOrStdout(), "New version available: %s (current: %s)\n", release.TagName, version)
+	fmt.Fprintf(cmd.OutOrStdout(), "New version available: %s (current: %s)\n", release.TagName, current)
+	printUpgradeNotice(cmd.OutOrStdout(), release.TagName)
 
 	if checkOnly {
-		fmt.Fprintf(cmd.OutOrStdout(), "Run without --check to install.\n")
+		fmt.Fprintln(cmd.OutOrStdout(), "Check only: no files changed. After reviewing the upgrade requirements, run this command without --check to install.")
 		return nil
-	}
-
-	execPath, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("could not determine executable path: %w", err)
 	}
 
 	fmt.Fprintf(cmd.OutOrStdout(), "Downloading %s...\n", release.TagName)
 
-	if err := versioncheck.Update(cmd.Context(), release.TagName, execPath); err != nil {
-		return updateFailure(err, execPath)
+	if err := installUpdateRelease(cmd.Context(), release.TagName, execPath); err != nil {
+		return updateFailure(err, execPath, invoking)
 	}
 
-	fmt.Fprintf(cmd.OutOrStdout(), "Updated to %s.\n", release.TagName)
+	fmt.Fprintf(cmd.OutOrStdout(), "Binary installed: %s at %s. Configuration/provider compatibility has not been validated; no services were restarted.\n", release.TagName, execPath)
+	if target == nil {
+		fmt.Fprintln(cmd.OutOrStdout(), updateRestartNotice(release.TagName, "", nil))
+		return nil
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "Before restarting, validate the configuration with the new binary in the service's runtime environment (credentials, provider access and groups):\n  %s validate --config %s\n", shellQuotePath(execPath), shellQuotePath(target.ConfigPath))
 
 	// A replaced binary does not change an already-running process. Query the
 	// same local health endpoint as `runner status` and make that mismatch
 	// explicit when it is observable; failure is best-effort because health may
 	// be disabled or no service may be running.
-	address, port := config.DefaultHealthAddress, config.DefaultHealthPort
-	if cfg, cfgErr := loadConfig(cmd); cfgErr == nil {
-		address, port = cfg.HealthAddress, cfg.HealthPort
+	running := ""
+	if cfg, cfgErr := loadConfigAtPath(cmd, target.ConfigPath); cfgErr == nil {
+		running = fetchRunningVersion(cmd.Context(), cfg.HealthAddress, cfg.HealthPort, &http.Client{Timeout: 2 * time.Second})
+	} else {
+		fmt.Fprintln(cmd.OutOrStdout(), "The selected config could not be loaded by this updater; validate it with the newly installed binary before restarting.")
 	}
-	running := fetchRunningVersion(cmd.Context(), address, port, &http.Client{Timeout: 2 * time.Second})
-	if notice := updateRestartNotice(release.TagName, running); notice != "" {
+	if notice := updateRestartNotice(release.TagName, running, target); notice != "" {
 		fmt.Fprintln(cmd.OutOrStdout(), notice)
 	}
 	return nil
@@ -91,21 +122,31 @@ func runUpdate(cmd *cobra.Command, _ []string) error {
 
 // updateFailure adds a sudo hint when the binary lives in a directory only
 // root can write, as a system service's binary must.
-func updateFailure(err error, execPath string) error {
+func updateFailure(err error, execPath, updater string) error {
 	if errors.Is(err, fs.ErrPermission) {
-		return fmt.Errorf("update failed: %w\n\n  %s is not writable by this user; run: sudo runner update", err, filepath.Dir(execPath))
+		return fmt.Errorf("update failed: %w\n\n  %s is not writable by this user; %s", err, filepath.Dir(execPath), updatePermissionHint(updater, execPath, lstatFile))
 	}
 	return fmt.Errorf("update failed: %w", err)
 }
 
-// updateRestartNotice returns the actionable message shown after a successful
-// update. It is empty when no running instance can be observed or when that
-// instance already matches the installed binary.
-func updateRestartNotice(installed, running string) string {
-	if running == "" || normalizeVersion(installed) == normalizeVersion(running) {
+// Unknown health is not proof that a service stopped. Explicit binary-only
+// updates never print commands that control an unrelated installed service.
+func updateRestartNotice(installed, running string, target *installationTarget) string {
+	if target == nil {
+		return "No service was selected. After validating its configuration, restart any process using this binary manually; service state was not checked."
+	}
+	if normalizeVersion(installed) == normalizeVersion(running) {
 		return ""
 	}
-	return fmt.Sprintf("Runner service is still running %s while the installed binary is %s. Run 'runner service restart' to apply the update safely (add sudo for a system-level service).", running, installed)
+	command := shellQuotePath(target.BinaryPath) + " service restart --scope " + string(target.Scope)
+	prefix := fmt.Sprintf("The selected service still reports %s while the installed binary is %s. After preparing and validating the upgrade, restart it with:", running, installed)
+	if running == "" {
+		prefix = "The running service version could not be verified (health is disabled or unavailable). If the selected service is running, restart it only after preparing and validating the upgrade:"
+	}
+	if target.Scope == scopeSystem {
+		prefix += "\nUse an administrative shell for this system service."
+	}
+	return prefix + "\n  " + command + "\nReview drain-timeout and the service stop timeout first; jobs may be terminated if drain is disabled or a deadline expires."
 }
 
 func normalizeVersion(value string) string {

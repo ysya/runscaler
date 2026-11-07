@@ -34,6 +34,7 @@ import (
 	"github.com/ysya/runscaler/internal/capacity"
 	"github.com/ysya/runscaler/internal/config"
 	"github.com/ysya/runscaler/internal/controller"
+	"github.com/ysya/runscaler/internal/diagnostics"
 	"github.com/ysya/runscaler/internal/diskguard"
 	"github.com/ysya/runscaler/internal/health"
 	"github.com/ysya/runscaler/internal/layout"
@@ -55,7 +56,7 @@ func init() {
 
 	flags := runCommand.Flags()
 
-	// Per-scaleset (also used as legacy single mode)
+	// Per-scaleset (also used by flat single mode)
 	flags.String("url", "", "Registration URL (e.g. https://github.com/org)")
 	flags.String("name", "", "Name of the scale set (also used as runs-on label)")
 	flags.String("token", "", "Personal access token")
@@ -66,8 +67,6 @@ func init() {
 	flags.String("runner-group", config.DefaultRunnerGroup, "Runner group name")
 	flags.String("runner-image", config.DefaultRunnerImage, "Docker image for runners")
 	flags.String("provider", config.DefaultProvider, "Instance provider (docker or tart)")
-	flags.String("backend", "", "Deprecated alias for --provider")
-	_ = flags.MarkDeprecated("backend", "use --provider instead")
 
 	// Docker provider
 	flags.String("docker-socket", config.DefaultDockerSocket, "Path to Docker socket")
@@ -137,7 +136,7 @@ func main() {
 }
 
 // startManager loads config, sets up signal handling, and runs the runner manager.
-// Shared by `runner run` and the root drop-in compat path. var (not func) so
+// Used by `runner run`. var (not func) so
 // tests can stub it.
 var startManager = func(cmd *cobra.Command) error {
 	// Runtime failures are not usage errors; the full flag list buried the
@@ -248,14 +247,6 @@ or a single scale set via 'runner run' CLI flags.`,
   # Using CLI flags
   runner run --url https://github.com/org --name my-runners --token ghp_xxx`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		// Drop-in compat: an old `runscaler --config X` invocation (e.g. a
-		// pre-rename systemd unit after self-update) reaches the root with
-		// --config set and no subcommand. Warn and start anyway so the
-		// service keeps working; bare `runner` still just prints help.
-		if cmd.PersistentFlags().Changed("config") {
-			warnLegacy("starting via `runner --config` is deprecated — use `runner run` (or `runner migrate` to update your service)")
-			return startManager(cmd)
-		}
 		return cmd.Help()
 	},
 }
@@ -278,7 +269,7 @@ func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) e
 		return fmt.Errorf("invalid global configuration: %w", err)
 	}
 	id := layout.CurrentIdentity()
-	logFile, logPath, logWarnings := openRunLog(id, resolveLogFile(cfg, id))
+	logFile, openedLog, logWarnings := openRunLog(id, resolveLogFile(cfg, id))
 	for _, w := range logWarnings {
 		fmt.Fprintln(os.Stderr, "Warning: "+w)
 	}
@@ -287,9 +278,13 @@ func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) e
 	}
 	console := logConsole(stdoutIsDevNull(), logFile != nil)
 	logger := config.NewLoggerWithWriter(cfg.LogLevel, cfg.LogFormat, console, logWriter(logFile))
-	if old := oldDefaultLogFile(cfg, viper.ConfigFileUsed(), logPath); old != "" {
-		logger.Info("Log file location changed; the old file is left in place",
-			slog.String("path", logPath), slog.String("old", old))
+	var diagnosticStore *diagnostics.Store
+	if cfg.Diagnostics.IsEnabled() {
+		if dir, err := diagnosticDirectory(id, openedLog); err == nil {
+			diagnosticStore = diagnostics.NewStore(dir, cfg.Diagnostics.CaptureLogs)
+		} else {
+			logger.Warn("Failure diagnostics unavailable: cannot resolve log directory")
+		}
 	}
 
 	// Non-fatal config diagnostics (unknown keys, mixed single/multi mode).
@@ -543,10 +538,7 @@ func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) e
 			return
 		}
 		if versioncheck.IsNewer(version, release.TagName) {
-			logger.Warn("A newer version of runner is available — run 'runner update' to upgrade",
-				slog.String("current", version),
-				slog.String("latest", release.TagName),
-			)
+			logAvailableUpdate(logger, version, release.TagName)
 		}
 	}()
 
@@ -561,7 +553,7 @@ func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) e
 		go func() {
 			defer wg.Done()
 			ssLogger := config.NewScaleSetLoggerWithWriter(cfg.LogLevel, cfg.LogFormat, ss.ScaleSetName, i, console, logWriter(logFile))
-			if err := runScaleSetController(runCtx, drain, cfg.EffectiveDrainTimeout(), ss, dockerClients[ss.Docker.Socket], ssLogger, healthServer, tartCoordinator, guard, capacityAllocators[i]); err != nil {
+			if err := runScaleSetController(runCtx, drain, cfg.EffectiveDrainTimeout(), ss, dockerClients[ss.Docker.Socket], ssLogger, healthServer, tartCoordinator, guard, capacityAllocators[i], diagnosticStore, cfg.Diagnostics.CaptureLogs); err != nil {
 				errs <- fmt.Errorf("scaleset %q: %w", ss.ScaleSetName, err)
 				cancelRun()
 			}
@@ -594,7 +586,7 @@ func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) e
 // shared disk-pressure guard built once in runManager() (nil when the disk guard
 // is disabled); it is wired into this ScaleSetController as its
 // pre-job-start check, see controller.WithDiskChecker below.
-func runScaleSetController(ctx context.Context, drain <-chan struct{}, drainTimeout time.Duration, ss config.ScaleSetConfig, dockerClient *dockerclient.Client, logger *slog.Logger, h *health.HealthServer, tartCoordinator *provider.TartHostCoordinator, guard *diskguard.Guard, capacityAllocator *capacity.Allocator) error {
+func runScaleSetController(ctx context.Context, drain <-chan struct{}, drainTimeout time.Duration, ss config.ScaleSetConfig, dockerClient *dockerclient.Client, logger *slog.Logger, h *health.HealthServer, tartCoordinator *provider.TartHostCoordinator, guard *diskguard.Guard, capacityAllocator *capacity.Allocator, diagnosticStore *diagnostics.Store, captureLogs bool) error {
 	// Create scaleset client
 	scalesetClient, err := ss.NewScalesetClient(logger)
 	if err != nil {
@@ -618,7 +610,9 @@ func runScaleSetController(ctx context.Context, drain <-chan struct{}, drainTime
 		tb.StartPool(ctx) // starts warm pool if tart-pool-size > 0
 		instanceProvider = tb
 	} else {
-		instanceProvider = provider.NewDockerProvider(ss, dockerClient, logger)
+		dp := provider.NewDockerProvider(ss, dockerClient, logger)
+		dp.EnableDiagnosticLogs(captureLogs && diagnosticStore != nil)
+		instanceProvider = dp
 	}
 
 	// guard is a *diskguard.Guard; only wrap it into the controller.DiskChecker
@@ -630,6 +624,7 @@ func runScaleSetController(ctx context.Context, drain <-chan struct{}, drainTime
 		controllerOpts = append(controllerOpts, controller.WithDiskChecker(guard))
 	}
 	controllerOpts = append(controllerOpts, controller.WithCapacityAllocator(capacityAllocator))
+	controllerOpts = append(controllerOpts, controller.WithDiagnostics(diagnosticStore, ss.ScaleSetName, ss.Provider, ss.Token), controller.WithRetry(ss.EffectiveRetry()))
 	s := controller.NewScaleSetController(scaleSet.ID, ss.MinRunners, ss.MaxRunners, instanceProvider, scalesetClient, logger, controllerOpts...)
 	defer s.Shutdown(context.WithoutCancel(ctx))
 

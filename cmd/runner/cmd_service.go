@@ -697,11 +697,11 @@ func renderSystemdUnit(opts installOpts) (string, error) {
 		if !filepath.IsAbs(path) {
 			return "", errors.New("service environment file must be absolute")
 		}
-		quoted, err := systemdValue(path)
+		literal, err := systemdEnvironmentFile(path)
 		if err != nil {
 			return "", err
 		}
-		data.EnvironmentFiles = append(data.EnvironmentFiles, quoted)
+		data.EnvironmentFiles = append(data.EnvironmentFiles, literal)
 	}
 	for _, v := range serviceEnvironment(opts) {
 		assignment, err := systemdValue(v.Key + "=" + v.Value)
@@ -793,6 +793,16 @@ func systemdValue(s string) (string, error) {
 		return "", err
 	}
 	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`, `%`, `%%`).Replace(s) + `"`, nil
+}
+
+// EnvironmentFile takes one literal absolute path, not a quoted word list.
+// systemd's config_parse_unit_env_file expands specifiers but does not unquote
+// or C-unescape the value. Refuse glob/continuation/trim ambiguity instead.
+func systemdEnvironmentFile(path string) (string, error) {
+	if !filepath.IsAbs(path) || rejectControlChars(path) != nil || strings.TrimSpace(path) != path || strings.ContainsAny(path, `\*?[`) {
+		return "", errors.New("systemd environment file must be an absolute literal path without control, glob, backslash or surrounding whitespace characters")
+	}
+	return strings.ReplaceAll(path, "%", "%%"), nil
 }
 
 // rejectControlChars refuses values that would break line-based unit files.

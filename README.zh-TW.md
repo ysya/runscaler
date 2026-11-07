@@ -817,7 +817,7 @@ runner service restart     # waits for active jobs automatically
 
 ### 服務配置
 
-- **Linux 新系統安裝**由 root 安裝，以專用的 `runscaler` 非登入帳號執行。binary 保持 root 擁有；config／App key 為 `root:runscaler`、`0640`，`/etc/runner` 為 `0750`。HOME 與工作目錄為 `/var/lib/runner`；state 與 log 目錄由服務帳號擁有、權限為 `0750`。`ProtectSystem=strict` 讓設定維持唯讀，只開放 `/tmp`、state 與 `/var/log` 下的有效日誌目錄寫入。安裝會拒絕衝突帳號、連結或共用的憑證檔，以及已有其他擁有者資料的目錄。
+- **Linux 新系統安裝**由 root 安裝，以專用的 `runscaler` 非登入帳號執行。binary 保持 root 擁有；config／App key 為 `root:runscaler`、`0640`，`/etc/runner` 為 `0750`。HOME 與工作目錄為 `/var/lib/runner`；state 與 log 目錄由服務帳號擁有、權限為 `0750`。`ProtectSystem=strict` 讓設定維持唯讀，只開放 `/tmp`、state 與 `/var/log` 下的有效日誌目錄寫入。安裝會拒絕衝突帳號、連結或共用的憑證檔，以及已有其他擁有者資料的目錄。父目錄（包含日誌目錄的父層）必須由 root 擁有，且不可讓群組或其他使用者寫入；請由管理員先準備主機路徑，安裝器不會更改父目錄權限。
 - **Linux user 安裝**使用 `runner service install --scope user`（或 `--user`），沿用使用者的 XDG 路徑、憑證與 Docker socket，不需要 sudo。拒絕建立 root 的 user service。
 - **macOS** 僅支援已登入使用者的 LaunchAgent。它會在登入時啟動，因此無人值守的主機請啟用自動登入，並從本機 GUI 工作階段安裝，而非透過 SSH。runner 在 macOS 上會拒絕以 root 身分執行、初始化、安裝或遷移。launchd 啟動 agent 時使用精簡的 `PATH`；若 `/opt/homebrew/bin` 與 `/usr/local/bin` 存在，runner 會將其附加至路徑，以便找到透過 Homebrew 安裝的 `tart`。agent 會捨棄 stdout（runner 會自行寫入輪替日誌），並將 stderr 保留在 `~/Library/Logs/runner/stderr.log`；此檔案不會輪替。
 - `/tmp/runner.lock` 的執行鎖可避免意外啟動第二個 runner；它不是防範本機使用者的安全邊界。

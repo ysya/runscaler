@@ -146,7 +146,7 @@ func TestSystemdInstallationFixture(t *testing.T) {
 			run(mode == "user", "systemctl", append(flags, "daemon-reload")...)
 		}
 		if mode != "user" {
-			for _, path := range []string{configPath, "/etc/runner/service env.conf", filepath.Join(state, "fixture.info"), filepath.Join(state, "fixture.stopped"), "/var/log/runner/fixture.log", helper} {
+			for _, path := range []string{configPath, "/etc/runner/service env.conf", filepath.Join(state, "fixture.info"), filepath.Join(state, "fixture.info.tmp"), filepath.Join(state, "fixture.stopped"), "/var/log/runner/fixture.log", helper} {
 				_ = os.Remove(path)
 			}
 			for _, dir := range []string{"/etc/runner", serviceStateDir, "/var/log/runner"} {

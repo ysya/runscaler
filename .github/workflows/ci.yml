@@ -65,6 +65,11 @@ jobs:
 
       - name: Verify actual service identity and update selection
         run: |
+          # The installer requires root-protected ancestors. Prepare this
+          # ephemeral host rather than relaxing checks for writable parents.
+          test ! -L /var/log
+          test "$(stat -c %u /var/log)" = 0
+          sudo chmod g-w /var/log
           sudo systemctl start docker
           sudo env \
             GITHUB_ACTIONS=true \

@@ -953,6 +953,9 @@ runner service restart     # waits for active jobs automatically
   read-only; explicit writable paths cover `/tmp`, state and the configured
   log directory below `/var/log`. Installation refuses conflicting accounts,
   linked/shared credential files and populated directories owned by others.
+  Ancestor directories, including the log parent, must be root-owned without
+  group/other write permission. Administrators must prepare these host paths;
+  the installer does not change ancestor permissions.
 - **Linux user services** use `runner service install --scope user` (or
   `--user`), XDG config/state paths and the invoking user's credentials and
   Docker socket. No sudo is needed. Root user-services are rejected.

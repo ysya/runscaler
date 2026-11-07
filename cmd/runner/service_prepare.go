@@ -142,6 +142,17 @@ func loadServicePreparationConfig(path string) (config.Config, []byte, error) {
 		return config.Config{}, nil, err
 	}
 	v := viper.New()
+	// Preparation uses an isolated Viper without the manager's bound flags.
+	// Seed the same compiled defaults; explicit file values (including zero)
+	// still win, and credentials are never copied from the installing shell.
+	for key, value := range map[string]any{
+		"log-level": config.DefaultLogLevel, "log-format": config.DefaultLogFormat,
+		"health-address": config.DefaultHealthAddress, "health-port": config.DefaultHealthPort,
+		"provider": config.DefaultProvider, "runner-image": config.DefaultRunnerImage,
+		"runner-group": config.DefaultRunnerGroup, "max-runners": config.DefaultMaxRunners,
+	} {
+		v.SetDefault(key, value)
+	}
 	v.SetConfigFile(path)
 	if err := v.ReadInConfig(); err != nil {
 		return config.Config{}, nil, errors.New("invalid service configuration")

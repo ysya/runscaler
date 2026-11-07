@@ -150,7 +150,7 @@ func TestSystemdInstallationFixture(t *testing.T) {
 				_ = os.Remove(path)
 			}
 			for _, dir := range []string{"/etc/runner", serviceStateDir, "/var/log/runner"} {
-				if err := os.Remove(dir); err != nil {
+				if err := os.Remove(dir); err != nil && !os.IsNotExist(err) {
 					t.Errorf("fixture directory not empty or removable: %s: %v", dir, err)
 				}
 			}
@@ -251,7 +251,8 @@ func TestSystemdInstallationFixture(t *testing.T) {
 		t.Fatal("user HOME changed")
 	}
 	if mode != "user" && !strings.Contains(info, "env=literal-environment-file\n") {
-		t.Fatal("literal EnvironmentFile was not loaded")
+		unit, _ := os.ReadFile(filepath.Join(systemdSystemDir, systemdUnitFile))
+		t.Fatalf("literal EnvironmentFile was not loaded: identity=%q\nunit:\n%s", info, unit)
 	}
 	// --force must keep the runtime identity and selected config/binary.
 	run(mode == "user", cli, append(args, "--force", "--no-start")...)
@@ -357,7 +358,8 @@ if [ "$operation" = doctor ]; then
   exit 0
 fi
 umask 077
-printf 'uid=%s\ngid=%s\nhome=%s\ncwd=%s\ngroups= %s \nconfig=%s\nscope=%s\nenv=%s\n' "$(id -u)" "$(id -g)" "${HOME:-}" "$PWD" "$(id -G)" "$config" "$scope" "${RUNNER_FIXTURE_ENV:-}" > "$state/fixture.info"
+printf 'uid=%s\ngid=%s\nhome=%s\ncwd=%s\ngroups= %s \nconfig=%s\nscope=%s\nenv=%s\n' "$(id -u)" "$(id -g)" "${HOME:-}" "$PWD" "$(id -G)" "$config" "$scope" "${RUNNER_FIXTURE_ENV:-}" > "$state/fixture.info.tmp"
+mv "$state/fixture.info.tmp" "$state/fixture.info"
 trap 'printf stopped > "$state/fixture.stopped"; exit 0' TERM QUIT
 while :; do sleep 1 & wait $! || :; done
 `

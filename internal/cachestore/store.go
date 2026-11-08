@@ -65,8 +65,7 @@ type CacheStore interface {
 	// pressure. Enabled() means "skip my own routine schedule", not "never
 	// touch this even if the disk is full"; a host whose disk the guard
 	// must never touch opts out wholesale via `[disk] guard = false`
-	// instead (see docs/superpowers/specs/
-	// 2026-08-13-cache-architecture-design.md, "各 store 的啟用開關只約束例行清理").
+	// instead.
 	Enabled() bool
 	// Measure reports current usage. May be expensive (it can walk a
 	// volume), so it is never called on the pre-job check path.

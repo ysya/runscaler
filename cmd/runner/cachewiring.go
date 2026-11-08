@@ -108,8 +108,7 @@ func dockerCacheStoresForSocket(sets []config.ScaleSetConfig, client *dockerclie
 // Docker scaleset in sets (defaults applied the same way) rather than a
 // bare zero value — the disk guard reclaims through these stores
 // regardless of Enabled() (a store's switch only gates its own routine
-// sweep; see store.go's Enabled doc comment and
-// docs/superpowers/specs/2026-08-13-cache-architecture-design.md), so
+// sweep; see store.go's Enabled doc comment), so
 // it needs real settings even when no scaleset opted into the periodic
 // sweep — a bare zero-value PruneTTL/MaxAge would leave the guard unable
 // to reclaim. enabled reports whether the *periodic sweeper* should run at

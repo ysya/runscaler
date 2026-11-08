@@ -16,5 +16,6 @@ dist/
 
 *.log
 .DS_Store
-# SDD scratch workspace (subagent-driven-development ledger, briefs, review packages)
+# Local planning notes and SDD scratch workspace (never committed)
 .superpowers/
+docs/superpowers/

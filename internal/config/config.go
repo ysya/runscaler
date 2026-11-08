@@ -270,8 +270,7 @@ func parseCacheVolumeBudget(budget string) (uint64, error) {
 // both. An entry present in both forms is resolved entirely from its
 // long-form entry — path, budget, and on-exceed all come from there, and
 // the short-form entry of the same name is discarded rather than partially
-// merged — matching docker-compose's own short/long merge convention (see
-// section E of docs/superpowers/specs/2026-08-13-cache-architecture-design.md).
+// merged — matching docker-compose's own short/long merge convention.
 //
 // Errors: an empty volume name or path, a non-absolute/non-clean container
 // path, a volume name outside Docker's volume-name pattern, the same volume

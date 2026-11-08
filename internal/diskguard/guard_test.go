@@ -39,9 +39,8 @@ func TestGuard_StopsAsSoonAsTargetMet(t *testing.T) {
 }
 
 // TestGuard_ReclaimsFromDisabledStore pins that the guard reclaims through
-// a store even when its periodic sweep is disabled
-// (docs/superpowers/specs/2026-08-13-cache-architecture-design.md,
-// "各 store 的啟用開關只約束例行清理"): Enabled()==false means the operator left
+// a store even when its periodic sweep is disabled: Enabled()==false
+// means the operator left
 // this store off its own periodic sweep schedule ("don't run routine
 // cleanup"), not "never touch this even if the disk is full". The guard
 // must reclaim from a disabled store exactly like an enabled one of the

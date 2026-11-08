@@ -15,7 +15,6 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/ysya/runscaler/internal/layout"
-	runnerlock "github.com/ysya/runscaler/internal/lock"
 )
 
 type serviceScope string
@@ -140,10 +139,6 @@ func targetFromArgs(scope serviceScope, binary string, args []string) (*installa
 }
 
 var discoverInstallations = readInstalledTargets
-
-// runnerLockPath is the machine-wide lock `runner run` holds. A fresh
-// installation probes it; tests point it at a temporary file.
-var runnerLockPath = runnerlock.DefaultPath
 
 func init() {
 	for _, c := range []*cobra.Command{serviceInstallCmd, serviceUninstallCmd, serviceStartCmd, serviceStopCmd, serviceRestartCmd, serviceStatusCmd, serviceLogsCmd, statusCmd, logsCmd, updateCmd, doctorCmd} {
@@ -273,17 +268,15 @@ func serviceCommandInstallation(c *cobra.Command, install bool) (serviceScope, *
 // refuseWhileAnotherRunnerRuns stops a fresh installation while another
 // runner holds the machine-wide lock. Discovery sees system definitions but
 // only the invoking account's user definition, so another account's running
-// user service, or a foreground `runner run`, shows up only here. The probe
-// releases the lock at once: the service being installed must take it.
+// user service, or a foreground `runner run`, shows up only here.
 func refuseWhileAnotherRunnerRuns() error {
-	release, err := runnerlock.Acquire(runnerLockPath, runnerlock.Info{PID: os.Getpid(), StartedAt: time.Now()})
-	if errors.Is(err, runnerlock.ErrAlreadyRunning) {
-		return fmt.Errorf("%w\n\n  Only one runner may run per machine, so no service was installed.\n  If another account's service runs it, uninstall that service as that account;\n  otherwise stop that runner first", err)
-	}
+	running, err := probeRunningRunner()
 	if err != nil {
 		return fmt.Errorf("cannot check for a running runner before installing: %w", err)
 	}
-	release()
+	if running != nil {
+		return fmt.Errorf("%w\n\n  Only one runner may run per machine, so no service was installed.\n  If another account's service runs it, uninstall that service as that account;\n  otherwise stop that runner first", running)
+	}
 	return nil
 }
 

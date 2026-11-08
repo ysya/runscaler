@@ -20,11 +20,10 @@ import (
 // It returns the temporary lock path.
 func withInstallations(t *testing.T, candidates []installationCandidate) string {
 	t.Helper()
-	savedDiscover, savedLock := discoverInstallations, runnerLockPath
-	t.Cleanup(func() { discoverInstallations, runnerLockPath = savedDiscover, savedLock })
+	saved := discoverInstallations
+	t.Cleanup(func() { discoverInstallations = saved })
 	discoverInstallations = func(context.Context) []installationCandidate { return candidates }
-	runnerLockPath = filepath.Join(t.TempDir(), "runner.lock")
-	return runnerLockPath
+	return withRunnerLock(t)
 }
 
 func installationCommand(t *testing.T, name string) *cobra.Command {

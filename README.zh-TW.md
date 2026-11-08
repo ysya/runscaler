@@ -269,10 +269,12 @@ runner update
 這個流程不會驗證設定／provider 相容性、重寫服務定義或重啟服務；既有 system／user
 範圍與執行身分會保留，原本以 root 執行的服務不會被轉成非 root 帳號。
 
-安裝後會列出針對實際設定檔的驗證指令，請在服務使用的憑證、provider 存取權限與群組
-環境下執行。重啟提示會使用選定 binary 與明確的 `--scope user|system`；system 服務
-管理需使用管理員 shell。健康端點回報相同版本，不代表設定相容性或就緒狀態已驗證。
+安裝後會列出完成升級的步驟：先用新 binary 驗證選定的設定檔，再重啟服務，並依設定的
+`drain-timeout` 說明重啟最多會等執行中的工作多久。非 root 的 system 服務會跟 `doctor`
+一樣，透過 `systemd-run` 以服務的身分、群組與環境檔執行驗證指令。重啟提示會使用選定
+binary 與明確的 `--scope user|system`；system 服務管理需使用管理員 shell。健康端點回報相同版本，不代表設定相容性或就緒狀態已驗證。
 健康端點停用或無法連線時，會明示執行版本未確認，不會假定服務已停止。
+binary 已是最新版、但服務仍回報舊版本時，`runner update` 會再列一次這些步驟。
 使用 `--binary-path` 或沒有安裝服務時，不會選取服務；驗證後請手動重啟使用該 binary 的程序。
 
 SIGTERM 通常會開始排空並等待工作完成，但仍受 `drain-timeout` 與服務管理器停止期限限制。
@@ -300,7 +302,8 @@ listener 斷線時，runner 會在五秒後重新連線，之後每次等待加�
 
 若 runner 意外終止（例如 `kill -9`、當機或斷電），可能會遺留 Docker 容器或 Tart VM。
 下次執行 `runner run` 時，會在取得整台機器共用的鎖定後自動清理這些資源。
-若要手動檢查，請在 runner 停止時使用 `doctor`：
+可以用 `doctor` 手動檢查。有 runner 持有這個鎖時，doctor 會把它擁有的容器和 VM
+標成使用中，不算孤立資源：
 
 ```bash
 # Check GitHub API connectivity and orphaned resources
@@ -322,7 +325,8 @@ Doctor 會使用各個已設定 runner 規模集的 App 或 PAT 憑證探測 Git
 停止 runner，再執行 `runner scaleset delete <name>`。
 找到這類規模集不會讓 doctor 失敗，但列出失敗會。
 
-即使沒有孤立資源，API 檢查失敗仍會讓指令以失敗狀態結束。
+找不到設定檔時，doctor 會跳過 GitHub API 檢查並列出找過的路徑；`runner validate`
+則會列出同樣的路徑並以失敗結束。即使沒有孤立資源，API 檢查失敗仍會讓指令以失敗狀態結束。
 報告僅包含安全的取消、逾時、DNS、TLS、速率限制或數字 HTTP 狀態分類，
 速率限制還會附上 GitHub 要求的等待時間；不會輸出原始 SDK 回應本文。
 

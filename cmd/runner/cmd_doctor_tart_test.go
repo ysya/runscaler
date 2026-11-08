@@ -17,14 +17,14 @@ func TestCheckTartVMsAppliesStartupOwnershipRules(t *testing.T) {
 	  {"Name":"runner-keep-golden","Source":"local","State":"stopped"},
 	  {"Name":"runner-0011aabb","Source":"OCI","State":"stopped"}
 	]`)
-	remaining, err := checkTartVMs(context.Background(), mc, "/Users/ci/.tart", false)
+	remaining, err := checkTartVMs(context.Background(), mc, "/Users/ci/.tart", reportOrphans)
 	if err != nil || remaining != 3 {
 		t.Fatalf("report = %d, %v; want the 3 runner-owned VMs", remaining, err)
 	}
 	if len(mc.calls) != 1 {
 		t.Fatalf("report mode ran %v, want only the listing", mc.calls)
 	}
-	remaining, err = checkTartVMs(context.Background(), mc, "/Users/ci/.tart", true)
+	remaining, err = checkTartVMs(context.Background(), mc, "/Users/ci/.tart", removeOrphans)
 	if err != nil || remaining != 0 {
 		t.Fatalf("fix = %d, %v", remaining, err)
 	}

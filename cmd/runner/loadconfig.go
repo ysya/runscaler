@@ -3,6 +3,8 @@ package main
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -21,6 +23,48 @@ func loadConfig(cmd *cobra.Command) (config.Config, error) {
 		return config.Config{}, err
 	}
 	return loadConfigAtPath(cmd, configPath)
+}
+
+// configMissing reports that no config file was found and nothing else,
+// such as `runner run` flags, configured a scale set: a command that checks
+// the configuration would only check defaults.
+func configMissing(cfg config.Config) bool {
+	if viper.ConfigFileUsed() != "" {
+		return false
+	}
+	for _, ss := range cfg.ResolveScaleSets() {
+		if ss.RegistrationURL != "" {
+			return false
+		}
+	}
+	return true
+}
+
+// searchedConfigFiles lists, in search order, the files runner looks for
+// when no config is given, or nil when they cannot be resolved.
+func searchedConfigFiles() []string {
+	dirs, err := configSearchPaths()
+	if err != nil {
+		return nil
+	}
+	files := make([]string, len(dirs))
+	for i, dir := range dirs {
+		files[i] = filepath.Join(dir, "config.toml")
+		if dir == "." {
+			files[i] = "./config.toml"
+		}
+	}
+	return files
+}
+
+// missingConfigError explains that no config file was found and how to give
+// runner one.
+func missingConfigError() error {
+	msg := "no config file found"
+	if files := searchedConfigFiles(); len(files) > 0 {
+		msg += " (searched " + strings.Join(files, ", ") + ")"
+	}
+	return errors.New(msg + "\n\n  Create one with: runner init\n  Or pass its path: --config PATH")
 }
 
 func loadConfigAtPath(cmd *cobra.Command, configPath string) (config.Config, error) {

@@ -200,3 +200,23 @@ func TestAcquireIgnoresCorruptDiagnosticContent(t *testing.T) {
 	}
 	release()
 }
+
+func TestAlreadyRunningErrorDetailNamesTheHolder(t *testing.T) {
+	started := time.Date(2026, 11, 9, 10, 30, 0, 0, time.Local)
+	for _, tc := range []struct {
+		name string
+		err  *AlreadyRunningError
+		want string
+	}{
+		{"recorded holder", &AlreadyRunningError{Path: "/tmp/runner.lock", Info: &Info{PID: 4242, StartedAt: started, ConfigPath: "/etc/runner/config.toml"}}, "PID 4242, started 2026-11-09 10:30:00, config /etc/runner/config.toml"},
+		{"holder without config", &AlreadyRunningError{Path: "/tmp/runner.lock", Info: &Info{PID: 7, StartedAt: started}}, "PID 7, started 2026-11-09 10:30:00"},
+		{"unrecorded holder", &AlreadyRunningError{Path: "/tmp/runner.lock"}, "lock /tmp/runner.lock is held"},
+	} {
+		if got := tc.err.Detail(); got != tc.want {
+			t.Errorf("%s: Detail() = %q, want %q", tc.name, got, tc.want)
+		}
+		if !strings.Contains(tc.err.Error(), "("+tc.want+")") {
+			t.Errorf("%s: Error() = %q, want it to carry the detail", tc.name, tc.err.Error())
+		}
+	}
+}

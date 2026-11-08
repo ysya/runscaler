@@ -1,11 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -13,9 +15,27 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 
 	runnerlock "github.com/ysya/runscaler/internal/lock"
 )
+
+// declaredSilenceUsage is each command's SilenceUsage before any test runs
+// the root. An execution leaves SilenceUsage set on the package-level
+// commands, while a real process executes once.
+var declaredSilenceUsage = map[*cobra.Command]bool{}
+
+func TestMain(m *testing.M) {
+	var record func(*cobra.Command)
+	record = func(c *cobra.Command) {
+		declaredSilenceUsage[c] = c.SilenceUsage
+		for _, sub := range c.Commands() {
+			record(sub)
+		}
+	}
+	record(cmd)
+	os.Exit(m.Run())
+}
 
 func TestExplainLockError(t *testing.T) {
 	const fix = "sudo /usr/local/bin/runner service install --scope system --force"
@@ -223,5 +243,102 @@ func TestRootNoLongerOwnsStartFlags(t *testing.T) {
 func TestConfigStaysPersistentOnRoot(t *testing.T) {
 	if cmd.PersistentFlags().Lookup("config") == nil {
 		t.Error("--config must remain a persistent flag on root")
+	}
+}
+
+// executeRoot runs the real root command with args as main does and returns
+// what the user sees on stderr, with the exit status. With no writers set, as
+// in production, Cobra writes both its error and its usage to stderr, so both
+// writers share the buffer main prints to.
+func executeRoot(t *testing.T, args ...string) (string, int) {
+	t.Helper()
+	reset := func() {
+		for c, silenced := range declaredSilenceUsage {
+			c.SilenceUsage = silenced
+		}
+		if f := cmd.PersistentFlags().Lookup("config"); f != nil {
+			f.Changed = false
+			_ = f.Value.Set(f.DefValue)
+		}
+		cmd.SetArgs(nil)
+		cmd.SetOut(nil)
+		cmd.SetErr(nil)
+	}
+	reset()
+	t.Cleanup(reset)
+
+	var stderr bytes.Buffer
+	cmd.SetArgs(args)
+	cmd.SetOut(&stderr)
+	cmd.SetErr(&stderr)
+	code := execute(cmd, &stderr)
+	return stderr.String(), code
+}
+
+// assertFailedOnce checks that an execution exited with status 1 and showed
+// msg exactly once.
+func assertFailedOnce(t *testing.T, stderr string, code int, msg string) {
+	t.Helper()
+	if code != 1 {
+		t.Errorf("exit status = %d, want 1", code)
+	}
+	if n := strings.Count(stderr, msg); n != 1 {
+		t.Errorf("stderr shows %q %d times, want once:\n%s", msg, n, stderr)
+	}
+}
+
+func TestRuntimeErrorPrintsOnceWithoutUsage(t *testing.T) {
+	failing := &cobra.Command{
+		Use: "fail-at-runtime",
+		RunE: func(*cobra.Command, []string) error {
+			return errors.New("synthetic runtime failure")
+		},
+	}
+	cmd.AddCommand(failing)
+	t.Cleanup(func() { cmd.RemoveCommand(failing) })
+
+	stderr, code := executeRoot(t, "fail-at-runtime")
+	assertFailedOnce(t, stderr, code, "synthetic runtime failure")
+	if strings.Contains(stderr, "Usage:") {
+		t.Errorf("a runtime error printed usage:\n%s", stderr)
+	}
+}
+
+// Real subcommands, nested ones included, get the same handling from root.
+func TestSubcommandRuntimeErrorsPrintOnceWithoutUsage(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing.toml")
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"validate", []string{"validate", "--config", missing}},
+		{"run", []string{"run", "--config", missing}},
+		{"nested", []string{"scaleset", "delete", "builders", "--config", missing}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			viper.Reset()
+			t.Cleanup(viper.Reset)
+			stderr, code := executeRoot(t, tc.args...)
+			assertFailedOnce(t, stderr, code, "failed to read config file")
+			if strings.Contains(stderr, "Usage:") {
+				t.Errorf("a runtime error printed usage:\n%s", stderr)
+			}
+		})
+	}
+}
+
+func TestUnknownFlagPrintsUsageAndErrorOnce(t *testing.T) {
+	stderr, code := executeRoot(t, "validate", "--no-such-flag")
+	assertFailedOnce(t, stderr, code, "unknown flag: --no-such-flag")
+	if !strings.Contains(stderr, "Usage:") {
+		t.Errorf("an unknown flag did not print usage:\n%s", stderr)
+	}
+}
+
+func TestWrongArgCountPrintsUsageAndErrorOnce(t *testing.T) {
+	stderr, code := executeRoot(t, "scaleset", "delete")
+	assertFailedOnce(t, stderr, code, "accepts 1 arg(s), received 0")
+	if !strings.Contains(stderr, "Usage:") {
+		t.Errorf("a wrong argument count did not print usage:\n%s", stderr)
 	}
 }

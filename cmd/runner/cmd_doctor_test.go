@@ -340,7 +340,7 @@ func TestCheckDockerVolume_SharedVolumeIsNotOrphanedByExistence(t *testing.T) {
 	// fix=true must still not remove it: the volume is designed to outlive
 	// the process, so its mere existence says nothing about whether it is
 	// still needed.
-	if _, err := checkDockerVolume(context.Background(), md, true); err != nil {
+	if _, err := checkDockerVolume(context.Background(), md, []string{"runner-shared"}); err != nil {
 		t.Fatalf("checkDockerVolume: %v", err)
 	}
 	if len(md.volumesRemoved) != 0 {
@@ -355,7 +355,7 @@ func TestCheckDockerVolume_SharedVolumeIsNotOrphanedByExistence(t *testing.T) {
 func TestCheckDockerVolumeReportsCurrentName(t *testing.T) {
 	md := &orphanFake{volumes: []string{"runner-shared"}}
 
-	issues, err := checkDockerVolume(context.Background(), md, true)
+	issues, err := checkDockerVolume(context.Background(), md, []string{"runner-shared"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -373,7 +373,7 @@ func TestCheckDockerVolumeReportsCurrentName(t *testing.T) {
 func TestCheckDockerVolumeReportsWithoutFix(t *testing.T) {
 	md := &orphanFake{volumes: []string{"runner-shared"}}
 
-	issues, err := checkDockerVolume(context.Background(), md, false)
+	issues, err := checkDockerVolume(context.Background(), md, []string{"runner-shared"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -388,7 +388,7 @@ func TestCheckDockerVolumeReportsWithoutFix(t *testing.T) {
 func TestCheckDockerVolumeNoneFound(t *testing.T) {
 	md := &orphanFake{}
 
-	issues, err := checkDockerVolume(context.Background(), md, false)
+	issues, err := checkDockerVolume(context.Background(), md, []string{"runner-shared"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -400,7 +400,7 @@ func TestCheckDockerVolumeNoneFound(t *testing.T) {
 func TestCheckDockerVolumeSurfacesInspectFailure(t *testing.T) {
 	md := &orphanFake{volumeInspectErr: fmt.Errorf("permission denied")}
 
-	if _, err := checkDockerVolume(context.Background(), md, false); err == nil {
+	if _, err := checkDockerVolume(context.Background(), md, []string{"runner-shared"}); err == nil {
 		t.Fatal("expected volume inspection failure to be returned")
 	}
 }
@@ -409,7 +409,7 @@ func TestCheckDockerVolumeSurfacesInspectFailure(t *testing.T) {
 // sees from a plain VolumeInspect call (UsageData is only populated by the
 // disk-usage endpoint, so it is nil in practice) as well as the driver's
 // explicit "-1 means unavailable" sentinel, and confirms a real size is
-// formatted through provider.FormatBytes.
+// formatted through bytesize.Format.
 func TestVolumeSizeText(t *testing.T) {
 	cases := []struct {
 		name  string

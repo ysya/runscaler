@@ -3,7 +3,6 @@ package main
 import (
 	"os"
 	"path/filepath"
-	"strings"
 )
 
 // writeFileAtomic replaces a file only after its private temporary copy is
@@ -38,10 +37,6 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 		_ = dir.Close()
 	}
 	return nil
-}
-
-func shellQuotePath(path string) string {
-	return "'" + strings.ReplaceAll(path, "'", "'\\''") + "'"
 }
 
 func sameFilePath(a, b string) bool {

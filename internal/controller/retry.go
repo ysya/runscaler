@@ -5,7 +5,6 @@ import (
 	"math/rand/v2"
 	"time"
 
-	"github.com/ysya/runscaler/internal/backoff"
 	"github.com/ysya/runscaler/internal/config"
 )
 
@@ -30,11 +29,11 @@ func (s *ScaleSetController) recordStartFailureFor(ctx context.Context, reason s
 	s.runtime.FailureReason = reason
 	s.failureGeneration++
 	s.lastFailureAttempt = attempt.id
-	r := s.retryConfig
-	delay := backoff.Delay(int(s.runtime.ConsecutiveStartFailures), r.Initial, r.Max, r.Cooldown, r.CooldownAfter, rand.Float64())
+	failures := int(s.runtime.ConsecutiveStartFailures)
+	delay := s.retryConfig.Delay(failures, rand.Float64())
 	s.runtime.NextRetryAt = time.Now().Add(delay)
 	s.runtime.RetryState = "backoff"
-	if int(s.runtime.ConsecutiveStartFailures) >= r.CooldownAfter {
+	if s.retryConfig.CoolingDown(failures) {
 		s.runtime.RetryState = "cooldown"
 	}
 	if s.retryTimer != nil {

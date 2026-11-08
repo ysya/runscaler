@@ -62,10 +62,11 @@ type CacheStore interface {
 	// periodic cleanup on — consulted by that periodic sweep, not by the
 	// disk guard (internal/diskguard.Guard), which reclaims from every
 	// store regardless of Enabled() once the disk is actually under
-	// pressure (revised 2026-08-14: Enabled() means "skip my own routine
-	// schedule", not "never touch this even if the disk is full" — a host
-	// whose disk the guard must never touch opts out wholesale via
-	// `[disk] guard = false` instead).
+	// pressure. Enabled() means "skip my own routine schedule", not "never
+	// touch this even if the disk is full"; a host whose disk the guard
+	// must never touch opts out wholesale via `[disk] guard = false`
+	// instead (see docs/superpowers/specs/
+	// 2026-08-13-cache-architecture-design.md, "各 store 的啟用開關只約束例行清理").
 	Enabled() bool
 	// Measure reports current usage. May be expensive (it can walk a
 	// volume), so it is never called on the pre-job check path.
@@ -108,9 +109,10 @@ type CacheStore interface {
 // that was merely skipped. Waiting is bounded — each store's own Reclaim
 // already carries a 10-minute cap (volumeHelperTimeout, dockerReclaimTimeout)
 // — and the wait itself honors ctx, so a caller on the job-start path is
-// still released the moment its own deadline expires (see the timeout
-// controller.startInstance wraps its pre-job Sweep in) rather than inheriting the
-// holder's.
+// still released the moment its own deadline expires (see the
+// preJobReclaimTimeout the controller's pre-job-start check,
+// controller.WithDiskChecker, wraps its Sweep in) rather than inheriting
+// the holder's.
 type serialized struct {
 	CacheStore
 	sem chan struct{} // capacity 1: acquiring is a context-aware Lock

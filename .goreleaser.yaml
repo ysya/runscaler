@@ -1,7 +1,7 @@
 version: 2
 
 builds:
-  # Primary build: the `runner` binary, shipped as runner-* archives.
+  # The `runner` binary, shipped as runner-* archives.
   - id: runner
     main: ./cmd/runner
     binary: runner
@@ -22,7 +22,7 @@ builds:
       - arm64
 
 archives:
-  # runner-{os}-{arch}.tar.gz containing the `runner` binary — what the new
+  # runner-{os}-{arch}.tar.gz containing the `runner` binary — what
   # self-update (internal/versioncheck) fetches.
   - id: runner
     ids:

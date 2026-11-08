@@ -25,7 +25,6 @@ linters:
         # scaleset MessageSessionClient.Close takes a context but the error
         # is informational.
         - github.com/spf13/viper.BindPFlag
-        - (*github.com/docker/docker/client.Client).Close
         - (*github.com/actions/scaleset.MessageSessionClient).Close
         - (*net/http.Server).Shutdown
         - viper.ReadInConfig

@@ -55,7 +55,7 @@ func TestSystemdUnitUserModeOmitsDockerDependency(t *testing.T) {
 		binaryPath: "/home/test/runner/runner",
 		configPath: "/home/test/runner/config.toml",
 		provider:   "docker",
-		user:       true,
+		scope:      scopeUser,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -208,14 +208,14 @@ func TestSystemdUnitRejectsControlCharacters(t *testing.T) {
 	if _, err := renderSystemdUnit(installOpts{binaryPath: "/opt/run\nner", configPath: "/etc/runner/config.toml"}); err == nil {
 		t.Fatal("a newline in the binary path was written into the unit")
 	}
-	if _, err := renderSystemdUnit(installOpts{user: true, binaryPath: "/opt/runner", configPath: "/etc/runner/config.toml", xdgStateHome: "/xdg/\tstate"}); err == nil {
+	if _, err := renderSystemdUnit(installOpts{scope: scopeUser, binaryPath: "/opt/runner", configPath: "/etc/runner/config.toml", xdgStateHome: "/xdg/\tstate"}); err == nil {
 		t.Fatal("a tab in an environment value was written into the unit")
 	}
 }
 
 func TestSystemdUserUnitRecordsAbsoluteXDG(t *testing.T) {
 	unit, err := renderSystemdUnit(installOpts{
-		user: true, binaryPath: "/home/ada/.local/bin/runner", configPath: "/home/ada/.config/runner/config.toml",
+		scope: scopeUser, binaryPath: "/home/ada/.local/bin/runner", configPath: "/home/ada/.config/runner/config.toml",
 		xdgStateHome: "/xdg/state", xdgConfigHome: "relative/config",
 	})
 	if err != nil {
@@ -233,7 +233,7 @@ func TestLaunchdPlistDiscardsStdoutAndRecordsEnvironment(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	plist, err := renderLaunchdPlist(installOpts{
-		user: true, binaryPath: "/Users/ada/.local/bin/runner", configPath: "/Users/ada/.config/runner/config.toml",
+		scope: scopeUser, binaryPath: "/Users/ada/.local/bin/runner", configPath: "/Users/ada/.config/runner/config.toml",
 		xdgStateHome: "/xdg/state",
 	})
 	if err != nil {
@@ -254,7 +254,7 @@ func TestLaunchdPlistDiscardsStdoutAndRecordsEnvironment(t *testing.T) {
 
 func TestLaunchdPlistEscapesXML(t *testing.T) {
 	binary := "/Users/a&b/<bin>/runner"
-	plist, err := renderLaunchdPlist(installOpts{user: true, binaryPath: binary, configPath: "/Users/a&b/config.toml"})
+	plist, err := renderLaunchdPlist(installOpts{scope: scopeUser, binaryPath: binary, configPath: "/Users/a&b/config.toml"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -284,7 +284,7 @@ func TestLaunchdPlistPassesPlutil(t *testing.T) {
 	if err != nil {
 		t.Skip("plutil not found")
 	}
-	plist, err := renderLaunchdPlist(installOpts{user: true, binaryPath: "/Users/a&b/runner", configPath: "/Users/a b/config.toml"})
+	plist, err := renderLaunchdPlist(installOpts{scope: scopeUser, binaryPath: "/Users/a&b/runner", configPath: "/Users/a b/config.toml"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -315,7 +315,7 @@ func TestLaunchdPlistInvokesRunSubcommand(t *testing.T) {
 
 func TestSystemdTemplateBoundsStopByDrainTimeout(t *testing.T) {
 	unit, err := renderSystemdUnit(installOpts{
-		user: true, configPath: "/etc/runner/config.toml", binaryPath: "/usr/local/bin/runner",
+		scope: scopeUser, configPath: "/etc/runner/config.toml", binaryPath: "/usr/local/bin/runner",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -434,21 +434,21 @@ func TestBuildInstallOptsRecordsConfigFactsAndXDG(t *testing.T) {
 	}
 	env := envFrom(map[string]string{"XDG_STATE_HOME": "/xdg/state", "XDG_CONFIG_HOME": "/xdg/config"})
 
-	opts, warnings, err := buildInstallOpts(true, valid, "/usr/local/bin/runner", true, env)
+	opts, warnings, err := buildInstallOpts(scopeUser, valid, "/usr/local/bin/runner", true, env)
 	if err != nil || len(warnings) != 0 {
 		t.Fatalf("buildInstallOpts() warnings=%q err=%v", warnings, err)
 	}
-	if !opts.user || opts.configPath != valid || opts.binaryPath != "/usr/local/bin/runner" || opts.provider != "tart" ||
+	if opts.scope != scopeUser || opts.configPath != valid || opts.binaryPath != "/usr/local/bin/runner" || opts.provider != "tart" ||
 		opts.logFile == nil || *opts.logFile != "/var/log/custom/runner.log" ||
 		opts.xdgStateHome != "/xdg/state" || opts.xdgConfigHome != "/xdg/config" {
 		t.Fatalf("installOpts = %+v", opts)
 	}
 
 	missing := filepath.Join(dir, "missing.toml")
-	if _, warnings, err := buildInstallOpts(true, missing, "/usr/local/bin/runner", false, env); err != nil || len(warnings) != 1 || !strings.Contains(warnings[0], "Config file not found") {
+	if _, warnings, err := buildInstallOpts(scopeUser, missing, "/usr/local/bin/runner", false, env); err != nil || len(warnings) != 1 || !strings.Contains(warnings[0], "Config file not found") {
 		t.Fatalf("fresh install without config: warnings=%q err=%v", warnings, err)
 	}
-	if _, _, err := buildInstallOpts(true, missing, "/usr/local/bin/runner", true, env); err == nil {
+	if _, _, err := buildInstallOpts(scopeUser, missing, "/usr/local/bin/runner", true, env); err == nil {
 		t.Fatal("--force without a config was accepted")
 	}
 }
@@ -474,7 +474,7 @@ func TestValidateServiceBinary(t *testing.T) {
 	tests := []struct {
 		name    string
 		goos    string
-		user    bool
+		scope   serviceScope
 		euid    int
 		path    string
 		stat    map[string]fileStat
@@ -485,15 +485,15 @@ func TestValidateServiceBinary(t *testing.T) {
 	}{
 		{name: "linux system resolves the symlink then passes", goos: "linux", euid: 0, path: "/usr/local/bin/link", stat: safe, want: "/usr/local/bin/runner"},
 		{name: "linux system user-owned binary", goos: "linux", euid: 0, path: "/home/ada/runner", stat: unsafe, wantUntrusted: "/home/ada/runner"},
-		{name: "linux user service skips the check", goos: "linux", user: true, euid: 1000, path: "/home/ada/runner", stat: unsafe, want: "/home/ada/runner"},
-		{name: "linux user service installed by root is checked", goos: "linux", user: true, euid: 0, path: "/home/ada/runner", stat: unsafe, wantUntrusted: "/home/ada/runner"},
+		{name: "linux user service skips the check", goos: "linux", scope: scopeUser, euid: 1000, path: "/home/ada/runner", stat: unsafe, want: "/home/ada/runner"},
+		{name: "linux user service installed by root is checked", goos: "linux", scope: scopeUser, euid: 0, path: "/home/ada/runner", stat: unsafe, wantUntrusted: "/home/ada/runner"},
 		{name: "darwin system scope skips the check", goos: "darwin", euid: 0, path: "/home/ada/runner", stat: unsafe, want: "/home/ada/runner"},
 		{name: "unresolvable binary", goos: "linux", euid: 0, path: "/missing", stat: safe, wantErr: "resolve binary"},
 		{name: "system binary that is a directory", goos: "linux", euid: 0, path: "/usr/local/bin", stat: safe, wantErr: "not a regular file"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := validateServiceBinary(tt.goos, tt.user, tt.euid, tt.path, resolve, fakeStat(tt.stat))
+			got, err := validateServiceBinary(tt.goos, tt.scope, tt.euid, tt.path, resolve, fakeStat(tt.stat))
 			if tt.wantUntrusted != "" {
 				var untrusted *untrustedBinaryError
 				if !errors.As(err, &untrusted) || untrusted.Path != tt.wantUntrusted {
@@ -520,19 +520,19 @@ func TestValidateServiceBinary(t *testing.T) {
 func TestInstallServiceValidatesBeforeTouchingExistingDefinition(t *testing.T) {
 	manager := &identityInstallManager{}
 	opts := installOpts{binaryPath: "/home/ada/runner", configPath: "/etc/runner/config.toml", force: true}
-	err := installService(manager, opts, func(bool, string) (string, error) { return "", errors.New("unsafe binary") })
+	err := installService(manager, opts, func(serviceScope, string) (string, error) { return "", errors.New("unsafe binary") })
 	if err == nil || manager.installed != nil {
 		t.Fatalf("failed validation wrote a service: %v", err)
 	}
 	saved := renderServiceDefinition
 	t.Cleanup(func() { renderServiceDefinition = saved })
 	renderServiceDefinition = func(installOpts) (string, error) { return "", errors.New("render failed") }
-	err = installService(manager, opts, func(_ bool, p string) (string, error) { return p, nil })
+	err = installService(manager, opts, func(_ serviceScope, p string) (string, error) { return p, nil })
 	if err == nil || manager.installed != nil {
 		t.Fatalf("failed render wrote a service: %v", err)
 	}
 	renderServiceDefinition = saved
-	err = installService(manager, opts, func(bool, string) (string, error) { return "/usr/local/bin/runner", nil })
+	err = installService(manager, opts, func(serviceScope, string) (string, error) { return "/usr/local/bin/runner", nil })
 	if err != nil || manager.installed == nil || manager.installed.binaryPath != "/usr/local/bin/runner" {
 		t.Fatalf("valid install: opts=%+v err=%v", manager.installed, err)
 	}
@@ -547,17 +547,17 @@ func TestInstallRetryCommand(t *testing.T) {
 		{
 			name: "system scope",
 			opts: installOpts{configPath: "/etc/runner/config.toml"},
-			want: "sudo /usr/local/bin/runner service install --user=false --config-path '/etc/runner/config.toml' --binary-path /usr/local/bin/runner",
+			want: "sudo /usr/local/bin/runner service install --scope system --config-path /etc/runner/config.toml --binary-path /usr/local/bin/runner",
 		},
 		{
 			name: "system scope with --force",
 			opts: installOpts{configPath: "/etc/runner/config.toml", force: true},
-			want: "sudo /usr/local/bin/runner service install --user=false --force --config-path '/etc/runner/config.toml' --binary-path /usr/local/bin/runner",
+			want: "sudo /usr/local/bin/runner service install --scope system --force --config-path /etc/runner/config.toml --binary-path /usr/local/bin/runner",
 		},
 		{
-			name: "user scope with --force and --no-start",
-			opts: installOpts{user: true, configPath: "/root/my runner/config.toml", force: true, noStart: true},
-			want: "sudo /usr/local/bin/runner service install --user --force --no-start --config-path '/root/my runner/config.toml' --binary-path /usr/local/bin/runner",
+			name: "every install input, with a path that needs quoting",
+			opts: installOpts{configPath: "/root/my runner/config.toml", force: true, noStart: true, environmentFiles: []string{"/etc/runner/credentials.env"}},
+			want: "sudo /usr/local/bin/runner service install --scope system --force --no-start --config-path '/root/my runner/config.toml' --binary-path /usr/local/bin/runner --environment-file /etc/runner/credentials.env",
 		},
 	}
 	for _, tt := range tests {
@@ -570,7 +570,7 @@ func TestInstallRetryCommand(t *testing.T) {
 }
 
 func TestUntrustedBinaryHint(t *testing.T) {
-	retry := "sudo /usr/local/bin/runner service install --user=false --force --config-path '/etc/runner/config.toml' --binary-path /usr/local/bin/runner"
+	retry := "sudo /usr/local/bin/runner service install --scope system --force --config-path /etc/runner/config.toml --binary-path /usr/local/bin/runner"
 	tests := []struct {
 		name   string
 		binary string
@@ -580,7 +580,7 @@ func TestUntrustedBinaryHint(t *testing.T) {
 			name:   "binary elsewhere",
 			binary: "/home/ada/.local/bin/runner",
 			want: "\n\n  Install a copy only root can modify, then retry:\n" +
-				"    sudo install -m 0755 '/home/ada/.local/bin/runner' /usr/local/bin/runner\n" +
+				"    sudo install -m 0755 /home/ada/.local/bin/runner /usr/local/bin/runner\n" +
 				"    " + retry,
 		},
 		{
@@ -602,33 +602,14 @@ func TestLaunchdServiceLogFile(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	current := filepath.Join(home, "Library", "Logs", "runner", "stderr.log")
-	legacy := filepath.Join(home, "Library", "Logs", "runner.log")
 	only := func(paths ...string) func(string) bool {
 		return func(p string) bool { return slices.Contains(paths, p) }
 	}
-	if path, note := launchdServiceLogFile(true, only(current, legacy)); path != current || note != "" {
-		t.Errorf("with the current log = %q, %q", path, note)
+	if path := launchdServiceLogFile(scopeUser, only(current)); path != current {
+		t.Errorf("with the current log = %q", path)
 	}
-	if path, note := launchdServiceLogFile(true, only(legacy)); path != "" || note != "" {
-		t.Errorf("retired log fallback = %q, %q", path, note)
-	}
-	if path, _ := launchdServiceLogFile(true, only()); path != "" {
+	if path := launchdServiceLogFile(scopeUser, only()); path != "" {
 		t.Errorf("with no log = %q, want empty", path)
-	}
-}
-
-func TestStatusPrivilegeError(t *testing.T) {
-	if err := statusPrivilegeError("darwin", false, 501); err == nil || !strings.Contains(err.Error(), "sudo runner service status --user=false") {
-		t.Errorf("macOS system status as a user = %v", err)
-	}
-	for _, tc := range []struct {
-		goos string
-		user bool
-		euid int
-	}{{"darwin", true, 501}, {"darwin", false, 0}, {"linux", false, 1000}} {
-		if err := statusPrivilegeError(tc.goos, tc.user, tc.euid); err != nil {
-			t.Errorf("statusPrivilegeError(%+v) = %v, want nil", tc, err)
-		}
 	}
 }
 

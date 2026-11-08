@@ -61,19 +61,6 @@ func TestOutdatedServiceWarnings(t *testing.T) {
 	}
 }
 
-func TestServiceReinstallCommand(t *testing.T) {
-	got := serviceReinstallCommand(true, "/home/ada/runner/config.toml", "/opt/my runner/runner")
-	want := "sudo '/opt/my runner/runner' service install --user=false --force --config-path '/home/ada/runner/config.toml' --binary-path '/opt/my runner/runner'"
-	if got != want {
-		t.Errorf("root command = %q\nwant %q", got, want)
-	}
-	got = serviceReinstallCommand(false, "", "/Users/ada/.local/bin/runner")
-	want = "'/Users/ada/.local/bin/runner' service install --user --force --binary-path '/Users/ada/.local/bin/runner'"
-	if got != want {
-		t.Errorf("user command = %q\nwant %q", got, want)
-	}
-}
-
 func TestServiceFixCommand(t *testing.T) {
 	trusted := map[string]fileStat{
 		"/": rootDir(0o755), "/usr": rootDir(0o755), "/usr/local": rootDir(0o755),
@@ -92,41 +79,41 @@ func TestServiceFixCommand(t *testing.T) {
 	tests := []struct {
 		name       string
 		goos       string
-		root       bool
+		scope      serviceScope
 		configPath string
 		binaryPath string
 		stat       map[string]fileStat
 		want       string
 	}{
 		{
-			name: "trusted root binary", goos: "linux", root: true,
+			name: "trusted root binary", goos: "linux", scope: scopeSystem,
 			configPath: "/etc/runner/config.toml", binaryPath: "/usr/local/bin/runner", stat: trusted,
-			want: "sudo '/usr/local/bin/runner' service install --user=false --force --config-path '/etc/runner/config.toml' --binary-path '/usr/local/bin/runner'",
+			want: "sudo /usr/local/bin/runner service install --scope system --force --config-path /etc/runner/config.toml --binary-path /usr/local/bin/runner",
 		},
 		{
-			name: "untrusted root binary on linux", goos: "linux", root: true,
+			name: "untrusted root binary on linux", goos: "linux", scope: scopeSystem,
 			configPath: "/etc/runner/config.toml", binaryPath: "/home/ada/.local/bin/runner", stat: untrusted,
-			want: "sudo install -m 0755 '/home/ada/.local/bin/runner' /usr/local/bin/runner && sudo '/usr/local/bin/runner' service install --user=false --force --config-path '/etc/runner/config.toml' --binary-path '/usr/local/bin/runner'",
+			want: "sudo install -m 0755 /home/ada/.local/bin/runner /usr/local/bin/runner && sudo /usr/local/bin/runner service install --scope system --force --config-path /etc/runner/config.toml --binary-path /usr/local/bin/runner",
 		},
 		{
-			name: "untrusted binary already at the root path", goos: "linux", root: true,
+			name: "untrusted binary already at the root path", goos: "linux", scope: scopeSystem,
 			configPath: "/etc/runner/config.toml", binaryPath: "/usr/local/bin/runner", stat: groupWritableBin,
-			want: "sudo '/usr/local/bin/runner' service install --user=false --force --config-path '/etc/runner/config.toml' --binary-path '/usr/local/bin/runner'",
+			want: "sudo /usr/local/bin/runner service install --scope system --force --config-path /etc/runner/config.toml --binary-path /usr/local/bin/runner",
 		},
 		{
-			name: "untrusted binary for a user", goos: "linux",
+			name: "untrusted binary for a user", goos: "linux", scope: scopeUser,
 			configPath: "/home/ada/.config/runner/config.toml", binaryPath: "/home/ada/.local/bin/runner", stat: untrusted,
-			want: "'/home/ada/.local/bin/runner' service install --user --force --config-path '/home/ada/.config/runner/config.toml' --binary-path '/home/ada/.local/bin/runner'",
+			want: "/home/ada/.local/bin/runner service install --scope user --force --config-path /home/ada/.config/runner/config.toml --binary-path /home/ada/.local/bin/runner",
 		},
 		{
-			name: "darwin root", goos: "darwin", root: true,
+			name: "darwin root", goos: "darwin", scope: scopeSystem,
 			configPath: "/etc/runner/config.toml", binaryPath: "/home/ada/.local/bin/runner", stat: untrusted,
-			want: "sudo '/home/ada/.local/bin/runner' service install --user=false --force --config-path '/etc/runner/config.toml' --binary-path '/home/ada/.local/bin/runner'",
+			want: "sudo /home/ada/.local/bin/runner service install --scope system --force --config-path /etc/runner/config.toml --binary-path /home/ada/.local/bin/runner",
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := serviceFixCommand(tt.goos, tt.root, tt.configPath, tt.binaryPath, fakeStat(tt.stat))
+			got := serviceFixCommand(tt.goos, tt.scope, tt.configPath, tt.binaryPath, fakeStat(tt.stat))
 			if got != tt.want {
 				t.Errorf("serviceFixCommand() = %q\nwant %q", got, tt.want)
 			}

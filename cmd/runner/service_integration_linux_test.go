@@ -353,7 +353,7 @@ test -r "$config"
 test -w "$state"
 if [ "$scope" = system ]; then printf log-probe > /var/log/runner/fixture.log; fi
 if [ "$scope" = system ] && [ "$(id -u)" -ne 0 ]; then test ! -w "$config"; fi
-if [ "$operation" = doctor ]; then
+if [ "$operation" = validate ]; then
   /usr/bin/curl --fail --silent --max-time 5 --unix-socket /var/run/docker.sock http://localhost/_ping >/dev/null
   exit 0
 fi

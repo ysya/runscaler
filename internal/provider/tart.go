@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"math/rand/v2"
 	"net"
 	"os"
 	"os/exec"
@@ -18,7 +17,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ysya/runscaler/internal/backoff"
 	"github.com/ysya/runscaler/internal/config"
+	"github.com/ysya/runscaler/internal/shell"
 )
 
 // CommandRunner abstracts shell command execution for testability.
@@ -27,6 +28,41 @@ type CommandRunner interface {
 	// RunStreaming executes a command with stdout/stderr piped to the terminal.
 	// Used for long-running commands where progress output is important (e.g. tart pull).
 	RunStreaming(ctx context.Context, name string, args ...string) error
+}
+
+// TartCommandRunner runs tart against home, or against tart's default
+// ($HOME/.tart) when home is empty.
+func TartCommandRunner(home string) CommandRunner {
+	if home == "" {
+		return execCommandRunner{}
+	}
+	return execCommandRunner{extraEnv: []string{"TART_HOME=" + home}}
+}
+
+// TartVM is one entry of `tart list --format json`.
+type TartVM struct {
+	Name   string `json:"Name"`
+	Source string `json:"Source"` // "local" for VMs, "OCI" for cached images
+	State  string `json:"State"`
+}
+
+// ListTartVMs lists every VM and cached image visible through runner. extra
+// narrows the listing with further `tart list` flags, such as
+// "--source", "oci".
+func ListTartVMs(ctx context.Context, runner CommandRunner, extra ...string) ([]TartVM, error) {
+	out, err := runner.Run(ctx, "tart", append([]string{"list", "--format", "json"}, extra...)...)
+	if err != nil {
+		return nil, err
+	}
+	return decodeTartList(out)
+}
+
+func decodeTartList(out []byte) ([]TartVM, error) {
+	var vms []TartVM
+	if err := json.Unmarshal(out, &vms); err != nil {
+		return nil, fmt.Errorf("parse tart list: %w", err)
+	}
+	return vms, nil
 }
 
 // execCommandRunner executes real shell commands via os/exec.
@@ -155,18 +191,12 @@ type TartProvider struct {
 	activeVMs sync.Map // instanceID -> *warmVM, for exit watching and cleanup
 }
 
-// NewTartProvider creates a TartProvider from scale set config.
-func NewTartProvider(ss config.ScaleSetConfig, logger *slog.Logger) *TartProvider {
-	return NewTartProviderWithCoordinator(ss, logger, NewTartHostCoordinator(2))
-}
-
+// NewTartProviderWithCoordinator creates a TartProvider from scale set config.
+// coordinator is shared by every Tart scale set on the host so MAC slots and
+// the two-VM limit are host-wide; nil gets a private one.
 func NewTartProviderWithCoordinator(ss config.ScaleSetConfig, logger *slog.Logger, coordinator *TartHostCoordinator) *TartProvider {
 	if coordinator == nil {
-		coordinator = NewTartHostCoordinator(2)
-	}
-	var extraEnv []string
-	if ss.Tart.Home != "" {
-		extraEnv = append(extraEnv, "TART_HOME="+ss.Tart.Home)
+		coordinator = NewTartHostCoordinator(config.MaxTartVMsPerHost)
 	}
 	p := &TartProvider{
 		baseImage:   ss.RunnerImage,
@@ -177,7 +207,7 @@ func NewTartProviderWithCoordinator(ss config.ScaleSetConfig, logger *slog.Logge
 		poolSize:    ss.Tart.PoolSize,
 		maxRunners:  ss.MaxRunners,
 		logger:      logger,
-		cmd:         execCommandRunner{extraEnv: extraEnv},
+		cmd:         TartCommandRunner(ss.Tart.Home),
 		coordinator: coordinator,
 		retryConfig: ss.EffectiveRetry(),
 		mtu:         ss.Tart.MTU,
@@ -225,7 +255,7 @@ func (p *TartProvider) fillPool(slot int) {
 			return
 		}
 
-		vm, err := p.bootVM(p.poolCtx, fmt.Sprintf("pool-%d-%d", slot, time.Now().UnixMilli()))
+		vm, err := p.bootVM(p.poolCtx, poolVMName(slot, time.Now()))
 		if err != nil {
 			if p.poolCtx.Err() != nil {
 				return
@@ -236,7 +266,7 @@ func (p *TartProvider) fillPool(slot int) {
 				slog.Duration("retryIn", delay),
 				slog.Any("error", err),
 			)
-			if !waitPoolRetry(p.poolCtx, delay) {
+			if backoff.Sleep(p.poolCtx, delay) != nil {
 				return
 			}
 			continue
@@ -616,146 +646,49 @@ func (p *TartProvider) Shutdown(ctx context.Context) {
 // waitForExec polls `tart exec <name> true` until the Guest Agent is ready.
 // This replaces the old waitForIP + waitForSSH flow — tart exec uses Virtio
 // gRPC, bypassing the network stack entirely.
-func (p *TartProvider) waitForExec(ctx context.Context, name string) error {
-	timeout := 2 * time.Minute
-	deadline := time.Now().Add(timeout)
-	wait := 1 * time.Second
+// Guest-agent polling after a VM boots: 1s doubling to 5s, for up to two
+// minutes.
+const (
+	guestAgentPollInitial = time.Second
+	guestAgentPollMax     = 5 * time.Second
+	guestAgentTimeout     = 2 * time.Minute
+)
 
-	for {
+func (p *TartProvider) waitForExec(ctx context.Context, name string) error {
+	deadline := time.Now().Add(guestAgentTimeout)
+	for attempt := 1; ; attempt++ {
 		_, err := p.cmd.Run(ctx, "tart", "exec", name, "true")
 		if err == nil {
 			return nil
 		}
-
 		if time.Now().After(deadline) {
-			return fmt.Errorf("timeout after %s waiting for guest agent on %s: %w", timeout, name, err)
+			return fmt.Errorf("timeout after %s waiting for guest agent on %s: %w", guestAgentTimeout, name, err)
 		}
-
+		wait := backoff.Exponential(attempt, guestAgentPollInitial, guestAgentPollMax)
 		p.logger.Debug("Guest agent not ready, retrying",
 			slog.String("name", name),
 			slog.Duration("retry_in", wait),
 		)
-
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(wait):
+		if err := backoff.Sleep(ctx, wait); err != nil {
+			return err
 		}
-
-		wait = min(wait*2, 5*time.Second)
 	}
 }
 
-// PruneTartCache runs `tart prune --entries caches` against the given TART_HOME,
-// trimming OCI/IPSW caches. Local VMs are never touched. Two criteria can apply:
-// age (maxAge, via --older-than) reclaims layers left behind by image updates,
-// and an optional size cap (spaceBudgetGB, via --space-budget) bounds the total.
-// A no-op when both criteria are off (maxAge <= 0 and spaceBudgetGB <= 0).
-//
-// tartHome may be empty, meaning use tart's default ($HOME/.tart). It is passed
-// through TART_HOME so a single binary can prune multiple independent caches.
-func PruneTartCache(ctx context.Context, tartHome string, maxAge time.Duration, spaceBudgetGB int, keepImages []string, logger *slog.Logger) error {
-	if maxAge <= 0 && spaceBudgetGB <= 0 {
-		return nil
-	}
-	var extraEnv []string
-	if tartHome != "" {
-		extraEnv = append(extraEnv, "TART_HOME="+tartHome)
-	}
-	return pruneTartCacheWith(ctx, execCommandRunner{extraEnv: extraEnv}, tartHome, maxAge, spaceBudgetGB, keepImages, logger)
-}
-
-// pruneTartCacheWith is the testable core: it issues the prune command via the
-// supplied CommandRunner. The exported wrapper above provides the default
-// execCommandRunner wired with TART_HOME.
-func pruneTartCacheWith(ctx context.Context, runner CommandRunner, tartHome string, maxAge time.Duration, spaceBudgetGB int, keepImages []string, logger *slog.Logger) error {
-	args := []string{"prune", "--entries", "caches"}
-	attrs := []any{slog.String("home", tartHome)}
-
-	if maxAge > 0 {
-		// tart --older-than granularity is whole days. Floor sub-day windows to
-		// 1 day: --older-than=0 would mean "older than 0 days" and wipe the
-		// entire cache, which is never the intent.
-		days := int(maxAge.Hours() / 24)
-		if days < 1 {
-			days = 1
-		}
-		args = append(args, "--older-than", strconv.Itoa(days))
-		attrs = append(attrs, slog.Int("older_than_days", days))
-	}
-	if spaceBudgetGB > 0 {
-		args = append(args, "--space-budget", strconv.Itoa(spaceBudgetGB))
-		attrs = append(attrs, slog.Int("space_budget_gb", spaceBudgetGB))
-	}
-	if len(args) == 3 {
-		// No pruning criterion — `tart prune` requires at least one and would
-		// error. Treat as a disabled sweep rather than failing.
-		return nil
-	}
-	markTartImagesUsed(ctx, runner, keepImages, logger)
-
-	logger.Info("Pruning Tart cache", attrs...)
-	if _, err := runner.Run(ctx, "tart", args...); err != nil {
-		return fmt.Errorf("tart prune (home=%q): %w", tartHome, err)
-	}
-	return nil
-}
-
-// markTartImagesUsed protects images from the prune that follows. tart prune
-// evicts by last access, and cloning an image is what records an access, so
-// each image still in the OCI cache is cloned into a throwaway VM that is
-// deleted right away. An image missing from the cache is skipped, since
-// cloning it would pull it. Best-effort: failures are logged.
 // tartListNames returns the names in `tart list --format json` output. Match
 // against these rather than the raw output: tart's JSON escapes "/", so an
 // OCI reference never appears verbatim, and a substring test would also take
 // "macos-base-old" for "macos-base".
 func tartListNames(out []byte) (map[string]bool, error) {
-	var entries []struct {
-		Name string `json:"Name"`
-	}
-	if err := json.Unmarshal(out, &entries); err != nil {
-		return nil, fmt.Errorf("parse tart list: %w", err)
+	entries, err := decodeTartList(out)
+	if err != nil {
+		return nil, err
 	}
 	names := make(map[string]bool, len(entries))
 	for _, e := range entries {
 		names[e.Name] = true
 	}
 	return names, nil
-}
-
-func markTartImagesUsed(ctx context.Context, runner CommandRunner, images []string, logger *slog.Logger) {
-	if len(images) == 0 {
-		return
-	}
-	out, err := runner.Run(ctx, "tart", "list", "--source", "oci", "--format", "json")
-	if err != nil {
-		logger.Warn("Failed to list the Tart cache; runner images are not protected from this prune",
-			slog.Any("error", err))
-		return
-	}
-	cached, err := tartListNames(out)
-	if err != nil {
-		logger.Warn("Failed to parse the Tart cache listing; runner images are not protected from this prune",
-			slog.Any("error", err))
-		return
-	}
-
-	for _, image := range images {
-		if !cached[image] {
-			continue
-		}
-		vm := fmt.Sprintf("runner-keep-%08x", rand.Uint32())
-		if _, err := runner.Run(ctx, "tart", "clone", image, vm); err != nil {
-			logger.Warn("Failed to mark a runner image as used; this prune may evict it",
-				slog.String("image", image), slog.Any("error", err))
-			continue
-		}
-		if _, err := runner.Run(ctx, "tart", "delete", vm); err != nil {
-			logger.Warn("Failed to delete a throwaway VM; startup reconciliation will remove it",
-				slog.String("vm", vm), slog.Any("error", err))
-		}
-	}
 }
 
 // runRunner starts the GitHub Actions runner inside the VM via `tart exec`.
@@ -777,7 +710,7 @@ func runnerStartCmd(runScript, jitPath string) string {
 	return fmt.Sprintf(
 		"JIT=$(cat %[2]s); rm -f %[2]s; "+
 			"ACTIONS_RUNNER_INPUT_JITCONFIG=\"$JIT\" nohup %[1]s > /tmp/runner.log 2>&1 &",
-		shellQuote(runScript), shellQuote(jitPath),
+		shell.Quote(runScript), shell.Quote(jitPath),
 	)
 }
 
@@ -786,7 +719,7 @@ func runnerStartCmd(runScript, jitPath string) string {
 const jitConfigPath = "/tmp/jitconfig"
 
 func writeJITCmd(path, jitConfig string) string {
-	return fmt.Sprintf("umask 077; printf %%s %s > %s", shellQuote(jitConfig), shellQuote(path))
+	return fmt.Sprintf("umask 077; printf %%s %s > %s", shell.Quote(jitConfig), shell.Quote(path))
 }
 
 // Uses Virtio gRPC (Guest Agent) instead of SSH — no network dependency.
@@ -818,30 +751,26 @@ func (p *TartProvider) runRunner(ctx context.Context, vmName, jitConfig string) 
 	return p.waitRunnerListening(ctx, vmName)
 }
 
-const (
-	defaultRunnerPoll          = 2 * time.Second
-	defaultRunnerListenTimeout = 5 * time.Minute
-	// A runner GitHub has retired connects and prints "Listening for Jobs",
-	// then is refused on its first poll for messages and exits.
-	defaultRunnerSettle = 5 * time.Second
-)
+// defaultRunnerPoll spaces the readiness checks while a runner starts. Each
+// one is a `tart exec` round trip, so Tart polls less often than Docker.
+const defaultRunnerPoll = 2 * time.Second
 
 // waitRunnerListening polls until the runner prints "Listening for Jobs",
 // then checks that it survives its first poll for messages. Errors carry the
 // runner's own explanation, since the VM is deleted right after.
 func (p *TartProvider) waitRunnerListening(ctx context.Context, vmName string) error {
 	poll := cmp.Or(p.runnerPoll, defaultRunnerPoll)
-	timeout := cmp.Or(p.runnerListenTimeout, defaultRunnerListenTimeout)
+	timeout := cmp.Or(p.runnerListenTimeout, config.DefaultReadyTimeout)
 	deadline := time.Now().Add(timeout)
 	for {
-		if err := sleepContext(ctx, poll); err != nil {
+		if err := backoff.Sleep(ctx, poll); err != nil {
 			return err
 		}
 		if !p.runnerAlive(ctx, vmName) {
 			return fmt.Errorf("runner process exited on %s before connecting to GitHub; runner log:\n%s",
 				vmName, p.runnerLogTail(ctx, vmName))
 		}
-		if _, err := p.cmd.Run(ctx, "tart", "exec", vmName, "grep", "-q", "Listening for Jobs", "/tmp/runner.log"); err == nil {
+		if _, err := p.cmd.Run(ctx, "tart", "exec", vmName, "grep", "-q", readyMarker, "/tmp/runner.log"); err == nil {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -850,7 +779,7 @@ func (p *TartProvider) waitRunnerListening(ctx context.Context, vmName string) e
 		}
 	}
 
-	if err := sleepContext(ctx, cmp.Or(p.runnerSettle, defaultRunnerSettle)); err != nil {
+	if err := backoff.Sleep(ctx, cmp.Or(p.runnerSettle, defaultReadySettle)); err != nil {
 		return err
 	}
 	if !p.runnerAlive(ctx, vmName) {
@@ -885,13 +814,4 @@ func (p *TartProvider) runnerDiagTail(ctx context.Context, vmName string) string
 		}
 	}
 	return fmt.Sprintf("(no Runner_*.log in %s)", dir)
-}
-
-func sleepContext(ctx context.Context, d time.Duration) error {
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-time.After(d):
-		return nil
-	}
 }

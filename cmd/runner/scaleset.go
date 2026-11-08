@@ -2,10 +2,15 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/url"
 	"os"
+	"regexp"
 	"time"
 
 	"github.com/actions/scaleset"
@@ -23,6 +28,79 @@ type scaleSetAPI interface {
 	CreateRunnerScaleSet(ctx context.Context, runnerScaleSet *scaleset.RunnerScaleSet) (*scaleset.RunnerScaleSet, error)
 	UpdateRunnerScaleSet(ctx context.Context, runnerScaleSetID int, runnerScaleSet *scaleset.RunnerScaleSet) (*scaleset.RunnerScaleSet, error)
 	DeleteRunnerScaleSet(ctx context.Context, runnerScaleSetID int) error
+}
+
+// apiProbeTimeout bounds each read-only GitHub probe made by `runner doctor`
+// and `runner validate`, so one unreachable registration cannot stall the
+// rest.
+const apiProbeTimeout = 5 * time.Second
+
+// newScaleSetClient builds the real client for a read-only probe.
+func newScaleSetClient(ss config.ScaleSetConfig) (scaleSetAPI, error) {
+	return ss.NewScalesetClient(nil)
+}
+
+// probeScaleSet checks, read-only, that GitHub accepts ss's credentials for
+// its configured runner group, and reports whether its scale set is
+// registered. Its errors may carry SDK text; print them through
+// safeAPIError.
+func probeScaleSet(ctx context.Context, ss config.ScaleSetConfig, newClient func(config.ScaleSetConfig) (scaleSetAPI, error)) (bool, error) {
+	// Match ScaleSetConfig.Validate's URL boundary before the factory can
+	// read App credentials or the SDK can issue an authenticated request.
+	registrationURL, err := url.ParseRequestURI(ss.RegistrationURL)
+	if err != nil || registrationURL.Scheme != "https" || registrationURL.Host == "" || registrationURL.User != nil {
+		return false, errors.New("invalid registration URL")
+	}
+	if ss.Token == "" && ss.GitHubApp == nil {
+		return false, fmt.Errorf("registration URL and credentials are required")
+	}
+	client, err := newClient(ss)
+	if err != nil {
+		return false, err
+	}
+	groupID, err := resolveRunnerGroupID(ctx, client, ss.RunnerGroup)
+	if err != nil {
+		return false, err
+	}
+	registered, err := client.GetRunnerScaleSet(ctx, groupID, ss.ScaleSetName)
+	return registered != nil, err
+}
+
+// The SDK wraps response bodies, URLs and authentication failures in error
+// strings. Never return or print those strings: App JWTs and exchanged tokens
+// are not available for configured-value redaction. Only fixed categories and
+// a bounded numeric HTTP status may cross the diagnostic output boundary.
+var apiHTTPStatus = regexp.MustCompile(`\(status="([1-5][0-9]{2})(?: |")`)
+
+func safeAPIError(err error) error {
+	if errors.Is(err, context.Canceled) {
+		return fmt.Errorf("cancelled: %w", context.Canceled)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return fmt.Errorf("timed out: %w", context.DeadlineExceeded)
+	}
+	var networkErr net.Error
+	if errors.As(err, &networkErr) && networkErr.Timeout() {
+		return errors.New("request timed out")
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return errors.New("DNS lookup failed")
+	}
+	var verificationErr *tls.CertificateVerificationError
+	var authorityErr x509.UnknownAuthorityError
+	var hostnameErr x509.HostnameError
+	var certificateErr x509.CertificateInvalidError
+	var recordErr tls.RecordHeaderError
+	if errors.As(err, &verificationErr) || errors.As(err, &authorityErr) || errors.As(err, &hostnameErr) || errors.As(err, &certificateErr) || errors.As(err, &recordErr) {
+		return errors.New("TLS verification failed")
+	}
+	// SDK v0.4.0 exposes response status only in its formatted error. Copy
+	// just the three validated digits, never arbitrary response text.
+	if match := apiHTTPStatus.FindStringSubmatch(err.Error()); len(match) == 2 {
+		return fmt.Errorf("HTTP %s request failed", match[1])
+	}
+	return errors.New("request failed")
 }
 
 // resolveRunnerGroupID maps the configured runner group to its ID; the

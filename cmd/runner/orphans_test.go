@@ -11,6 +11,8 @@ import (
 	cerrdefs "github.com/containerd/errdefs"
 	"github.com/moby/moby/api/types/container"
 	dockerclient "github.com/moby/moby/client"
+
+	"github.com/ysya/runscaler/internal/provider"
 )
 
 // fakeContainer is a minimal fixture for driving orphanFake.ContainerList in
@@ -34,9 +36,6 @@ type fakeContainer struct {
 // volumesRemoved after exercising either is itself part of what these
 // tests assert. Every other method returns its zero value — nothing under
 // test here calls them.
-//
-// Field names here are relied on by later tasks' tests (Task 3 builds on
-// this double too) — see task-2-report.md and task-3-report.md.
 type orphanFake struct {
 	containers  []fakeContainer
 	removed     []string
@@ -73,53 +72,8 @@ func (f *orphanFake) VolumeInspect(_ context.Context, id string, _ dockerclient.
 	return dockerclient.VolumeInspectResult{}, cerrdefs.ErrNotFound
 }
 
-func (f *orphanFake) VolumeRemove(_ context.Context, volumeID string, _ dockerclient.VolumeRemoveOptions) (dockerclient.VolumeRemoveResult, error) {
-	f.volumesRemoved = append(f.volumesRemoved, volumeID)
-	return dockerclient.VolumeRemoveResult{}, nil
-}
-
 // The remaining provider.DockerAPI methods are unused by orphans.go; each
 // returns its zero value.
-
-func (f *orphanFake) ContainerCreate(_ context.Context, _ dockerclient.ContainerCreateOptions) (dockerclient.ContainerCreateResult, error) {
-	return dockerclient.ContainerCreateResult{}, nil
-}
-
-func (f *orphanFake) ContainerStart(_ context.Context, _ string, _ dockerclient.ContainerStartOptions) (dockerclient.ContainerStartResult, error) {
-	return dockerclient.ContainerStartResult{}, nil
-}
-
-func (f *orphanFake) ContainerWait(_ context.Context, _ string, _ dockerclient.ContainerWaitOptions) dockerclient.ContainerWaitResult {
-	return dockerclient.ContainerWaitResult{}
-}
-
-func (f *orphanFake) ContainerPrune(_ context.Context, _ dockerclient.ContainerPruneOptions) (dockerclient.ContainerPruneResult, error) {
-	return dockerclient.ContainerPruneResult{}, nil
-}
-
-func (f *orphanFake) ImagePrune(_ context.Context, _ dockerclient.ImagePruneOptions) (dockerclient.ImagePruneResult, error) {
-	return dockerclient.ImagePruneResult{}, nil
-}
-
-func (f *orphanFake) BuildCachePrune(_ context.Context, _ dockerclient.BuildCachePruneOptions) (dockerclient.BuildCachePruneResult, error) {
-	return dockerclient.BuildCachePruneResult{}, nil
-}
-
-func (f *orphanFake) VolumeList(_ context.Context, _ dockerclient.VolumeListOptions) (dockerclient.VolumeListResult, error) {
-	return dockerclient.VolumeListResult{}, nil
-}
-
-func (f *orphanFake) ContainerLogs(_ context.Context, _ string, _ dockerclient.ContainerLogsOptions) (dockerclient.ContainerLogsResult, error) {
-	return nil, nil
-}
-
-func (f *orphanFake) Info(_ context.Context, _ dockerclient.InfoOptions) (dockerclient.SystemInfoResult, error) {
-	return dockerclient.SystemInfoResult{}, nil
-}
-
-func (f *orphanFake) DiskUsage(_ context.Context, _ dockerclient.DiskUsageOptions) (dockerclient.DiskUsageResult, error) {
-	return dockerclient.DiskUsageResult{}, nil
-}
 
 func TestFindOrphanContainers_MatchesLabelAndNamePattern(t *testing.T) {
 	md := &orphanFake{containers: []fakeContainer{
@@ -224,9 +178,9 @@ func TestFindOrphanTartVMs_MatchesRunnerAndPoolNames(t *testing.T) {
 	if len(got) != len(want) {
 		t.Fatalf("got %v, want exactly %v — base images and user VMs must not be claimed", got, want)
 	}
-	for _, name := range got {
-		if !want[name] {
-			t.Errorf("claimed %q, which runner did not create", name)
+	for _, vm := range got {
+		if !want[vm.Name] {
+			t.Errorf("claimed %q, which runner did not create", vm.Name)
 		}
 	}
 }
@@ -238,7 +192,7 @@ func TestRemoveOrphanTartVMs_ContinuesAfterDeleteFailure(t *testing.T) {
 	}}
 
 	removed := removeOrphanTartVMs(context.Background(), mc,
-		[]string{"runner-deadbeef", "pool-0-1778066579017"}, slog.New(slog.DiscardHandler))
+		[]provider.TartVM{{Name: "runner-deadbeef"}, {Name: "pool-0-1778066579017"}}, slog.New(slog.DiscardHandler))
 
 	if removed != 1 {
 		t.Errorf("removed = %d, want 1", removed)

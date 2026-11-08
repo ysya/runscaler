@@ -24,7 +24,7 @@ func TestBuildxStore_OnlyTier1(t *testing.T) {
 }
 
 // TestBuildxStore_Tier1RemovesOrphanedBuildersAndStateVolumes verifies the
-// store is actually wired to provider.CleanupOrphanedBuildxBuilders — not
+// store is actually wired to cleanupOrphanedBuildxBuilders — not
 // just that other tiers no-op: an old buildx builder container and its
 // `_state` volume both get removed, and young ones are left alone.
 func TestBuildxStore_Tier1RemovesOrphanedBuildersAndStateVolumes(t *testing.T) {
@@ -47,7 +47,7 @@ func TestBuildxStore_Tier1RemovesOrphanedBuildersAndStateVolumes(t *testing.T) {
 		t.Fatalf("Reclaim(Tier1) error: %v", err)
 	}
 	if freed != 0 {
-		t.Errorf("Reclaim(Tier1) freed = %d, want 0 (CleanupOrphanedBuildxBuilders reports no total — see comment)", freed)
+		t.Errorf("Reclaim(Tier1) freed = %d, want 0 (cleanupOrphanedBuildxBuilders reports no total — see comment)", freed)
 	}
 	if len(fake.containersRemoved) != 1 || fake.containersRemoved[0] != "c1" {
 		t.Errorf("containersRemoved = %v, want [c1] (only the old buildx builder)", fake.containersRemoved)
@@ -57,8 +57,9 @@ func TestBuildxStore_Tier1RemovesOrphanedBuildersAndStateVolumes(t *testing.T) {
 	}
 }
 
-// TestBuildxStore_ReclaimsRegardlessOfEnabled pins the 2026-08-14 spec
-// revision (see store.go's Enabled doc comment): Enabled()==false means the
+// TestBuildxStore_ReclaimsRegardlessOfEnabled pins that the disk guard
+// reclaims through this store even when its periodic sweep is disabled
+// (see store.go's Enabled doc comment): Enabled()==false means the
 // operator left buildx-cleanup off cmd/runner's own periodic schedule, not
 // "never touch this even under disk pressure" — the disk guard calls
 // Reclaim on a disabled store exactly like an enabled one, so this method
@@ -82,7 +83,7 @@ func TestBuildxStore_ReclaimsRegardlessOfEnabled(t *testing.T) {
 		t.Fatalf("Reclaim(Tier1) error: %v", err)
 	}
 	if freed != 0 {
-		t.Errorf("Reclaim(Tier1) freed = %d, want 0 (CleanupOrphanedBuildxBuilders reports no total — see comment on the enabled-path test)", freed)
+		t.Errorf("Reclaim(Tier1) freed = %d, want 0 (cleanupOrphanedBuildxBuilders reports no total — see comment on the enabled-path test)", freed)
 	}
 	if len(fake.containersRemoved) != 1 || fake.containersRemoved[0] != "c1" {
 		t.Errorf("containersRemoved = %v, want [c1] — a disabled store must still reclaim when Reclaim is called directly", fake.containersRemoved)
@@ -105,7 +106,7 @@ func TestBuildxStore_ZeroMaxAgeSkipsReclaim(t *testing.T) {
 		t.Fatalf("Reclaim(Tier1) error: %v", err)
 	}
 	if freed != 0 || len(fake.containersRemoved) != 0 {
-		t.Error("MaxAge <= 0 should skip the sweep entirely (CleanupOrphanedBuildxBuilders' own no-op)")
+		t.Error("MaxAge <= 0 should skip the sweep entirely (cleanupOrphanedBuildxBuilders' own no-op)")
 	}
 }
 

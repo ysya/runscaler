@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
+	"os"
 	"os/exec"
 	"time"
 
@@ -39,25 +41,19 @@ func runValidate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("validation failed")
 	}
 
-	// Validate scale sets
 	scaleSets := cfg.ResolveScaleSets()
 	if len(scaleSets) == 0 {
 		return fmt.Errorf("no scale sets configured")
 	}
-
-	for i := range scaleSets {
-		if err := scaleSets[i].Validate(); err != nil {
-			fmt.Printf("  ✗ scaleset[%d] %q: %s\n", i, scaleSets[i].ScaleSetName, err)
-			return fmt.Errorf("validation failed")
-		}
-		fmt.Printf("  ✓ scaleset[%d] %q — provider=%s url=%s max=%d min=%d\n",
-			i, scaleSets[i].ScaleSetName, scaleSets[i].Provider, scaleSets[i].RegistrationURL,
-			scaleSets[i].MaxRunners, scaleSets[i].MinRunners,
-		)
-	}
-	if err := validateScaleSetCollection(scaleSets); err != nil {
-		fmt.Printf("  ✗ scale set collection: %s\n", err)
+	// The same offline checks `runner run` applies before it starts, so a
+	// config that validates also starts.
+	if err := checkScaleSets(cfg, scaleSets); err != nil {
+		fmt.Printf("  ✗ %s\n", err)
 		return fmt.Errorf("validation failed")
+	}
+	for i, ss := range scaleSets {
+		fmt.Printf("  ✓ scaleset[%d] %q — provider=%s url=%s max=%d min=%d\n",
+			i, ss.ScaleSetName, ss.Provider, ss.RegistrationURL, ss.MaxRunners, ss.MinRunners)
 	}
 
 	// Check which instance providers are needed.
@@ -119,27 +115,37 @@ func runValidate(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Test GitHub API connectivity for each scale set
-	logger := config.NewLogger(cfg.LogLevel, cfg.LogFormat)
-	for i, ss := range scaleSets {
-		client, err := ss.NewScalesetClient(logger)
-		if err != nil {
-			fmt.Printf("  ✗ scaleset[%d] %q GitHub API: %s\n", i, ss.ScaleSetName, err)
-			return fmt.Errorf("validation failed")
-		}
-		_, err = client.GetRunnerGroupByName(ctx, "default")
-		if err != nil {
-			fmt.Printf("  ✗ scaleset[%d] %q GitHub API: %s\n", i, ss.ScaleSetName, err)
-			if ss.GitHubApp != nil {
-				fmt.Println("    Check the GitHub App installation, private key, and runner permissions")
-			} else {
-				fmt.Println("    Check that your token has the correct scopes (admin:org or repo)")
-			}
-			return fmt.Errorf("validation failed")
-		}
-		fmt.Printf("  ✓ scaleset[%d] %q GitHub API is reachable\n", i, ss.ScaleSetName)
+	if err := validateGitHubAccess(commandContext(cmd), os.Stdout, scaleSets, newScaleSetClient); err != nil {
+		return err
 	}
 
 	fmt.Println("\nAll checks passed.")
+	return nil
+}
+
+// validateGitHubAccess probes each scale set through the same read-only
+// probe as `runner doctor`: its configured runner group, a bounded timeout,
+// and only safe error categories in the output. Unlike doctor it stops at
+// the first failure.
+func validateGitHubAccess(ctx context.Context, out io.Writer, scaleSets []config.ScaleSetConfig, newClient func(config.ScaleSetConfig) (scaleSetAPI, error)) error {
+	for i, ss := range scaleSets {
+		probeCtx, cancel := context.WithTimeout(ctx, apiProbeTimeout)
+		registered, err := probeScaleSet(probeCtx, ss, newClient)
+		cancel()
+		if err != nil {
+			fmt.Fprintf(out, "  ✗ scaleset[%d] %q GitHub API: %s\n", i, ss.ScaleSetName, safeAPIError(err))
+			if ss.GitHubApp != nil {
+				fmt.Fprintln(out, "    Check the GitHub App installation, private key, and runner permissions")
+			} else {
+				fmt.Fprintln(out, "    Check that your token has the correct scopes (admin:org or repo)")
+			}
+			return fmt.Errorf("validation failed")
+		}
+		state := "not registered yet"
+		if registered {
+			state = "registered"
+		}
+		fmt.Fprintf(out, "  ✓ scaleset[%d] %q GitHub API is reachable; scale set %s\n", i, ss.ScaleSetName, state)
+	}
 	return nil
 }

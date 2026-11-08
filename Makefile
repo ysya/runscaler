@@ -11,7 +11,7 @@ PLATFORMS := \
 	darwin/amd64 \
 	darwin/arm64
 
-.PHONY: build clean test all dev release
+.PHONY: build clean test all dev release help
 
 ## dev: Run locally with debug logging (requires config.toml)
 dev:
@@ -19,7 +19,7 @@ dev:
 
 ## build: Build for current platform
 build:
-	go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BINARY_NAME) ./cmd/runner
+	CGO_ENABLED=0 go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BINARY_NAME) ./cmd/runner
 
 ## test: Run tests
 test:
@@ -31,12 +31,11 @@ all: clean $(PLATFORMS)
 $(PLATFORMS):
 	$(eval OS := $(word 1,$(subst /, ,$@)))
 	$(eval ARCH := $(word 2,$(subst /, ,$@)))
-	$(eval EXT := $(if $(filter windows,$(OS)),.exe,))
 	@echo "Building $(OS)/$(ARCH)..."
 	@mkdir -p dist
-	GOOS=$(OS) GOARCH=$(ARCH) go build \
+	CGO_ENABLED=0 GOOS=$(OS) GOARCH=$(ARCH) go build \
 		$(GOFLAGS) -ldflags "$(LDFLAGS)" \
-		-o dist/$(BINARY_NAME)-$(OS)-$(ARCH)$(EXT) ./cmd/runner
+		-o dist/$(BINARY_NAME)-$(OS)-$(ARCH) ./cmd/runner
 
 ## clean: Remove build artifacts
 clean:

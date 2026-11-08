@@ -163,15 +163,16 @@ func popScaleSets(settings map[string]any) ([]map[string]any, error) {
 
 // builtinDefaults returns the compiled-in scale set defaults as a map, so
 // Load produces sane scale sets even when no CLI flag bindings seeded the
-// viper instance (tests, library use). Duration and tart defaults are
-// applied at their use sites and deliberately not seeded here.
+// viper instance (tests, library use). Retry defaults are seeded once into
+// the top-level settings (see Load), which every [[scaleset]] inherits.
+// Retention defaults are applied by the accessors in retention.go and are
+// deliberately not seeded here, so an unset value stays visibly unset.
 func builtinDefaults() map[string]any {
 	return map[string]any{
 		"runner-image": DefaultRunnerImage,
 		"runner-group": DefaultRunnerGroup,
 		"max-runners":  DefaultMaxRunners,
 		"provider":     DefaultProvider,
-		"retry":        defaultRetrySettings(),
 		"docker": map[string]any{
 			"socket": DefaultDockerSocket,
 			"dind":   DefaultDinD,

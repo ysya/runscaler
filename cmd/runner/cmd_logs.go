@@ -48,7 +48,10 @@ func runLogs(cmd *cobra.Command, _ []string) error {
 		}
 		return fmt.Errorf("runner file logging is disabled by log-file = \"\"")
 	}
-	path := decision.Path
+	path, fellBack := logFileToRead(decision, pathMissing)
+	if fellBack {
+		fmt.Fprintf(cmd.ErrOrStderr(), "%s does not exist; showing %s, where runner writes when it cannot open the configured log\n", decision.Path, path)
+	}
 	lines, _ := cmd.Flags().GetInt("lines")
 	if lines < 0 {
 		return fmt.Errorf("lines must be >= 0")

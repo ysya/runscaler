@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 )
 
 func TestMaintenanceReproducesUnitGroupsAndScopeWithoutChangingAccounts(t *testing.T) {
@@ -28,25 +30,66 @@ func TestMaintenanceReproducesUnitGroupsAndScopeWithoutChangingAccounts(t *testi
 	}
 }
 
-func TestPreparedServiceProbeMarksThePreUnitContext(t *testing.T) {
+// The install probe runs `runner validate` as the prepared service identity:
+// it fails when that identity cannot reach the configured Docker socket or
+// GitHub, and never fails over orphaned containers the way doctor does.
+func TestPreparedServiceProbeRunsValidate(t *testing.T) {
 	savedOutput, savedAdmin := installationOutput, serviceAdminCommand
 	t.Cleanup(func() { installationOutput = savedOutput; serviceAdminCommand = savedAdmin })
 	installationOutput = func(context.Context, string, ...string) ([]byte, error) {
 		return []byte("--wait --pipe --collect --expand-environment"), nil
 	}
-	called := false
+	var probe []string
 	serviceAdminCommand = func(_ context.Context, name string, args ...string) error {
-		called = true
-		if name != "systemd-run" || !slices.Contains(args, "--setenv=RUNNER_SERVICE_PREPARATION=1") {
-			t.Fatalf("probe context missing: %s %q", name, args)
+		if name != "systemd-run" {
+			t.Fatalf("probe ran %s", name)
 		}
+		probe = args
 		return nil
 	}
 	if err := verifyPreparedService(installOpts{runtimeUser: "runscaler", runtimeGroup: "runscaler", binaryPath: "/usr/local/bin/runner", configPath: "/etc/runner/config.toml"}); err != nil {
 		t.Fatal(err)
 	}
-	if !called {
-		t.Fatal("service identity probe was not run")
+	split := slices.Index(probe, "--")
+	if split < 0 {
+		t.Fatalf("probe has no command: %q", probe)
+	}
+	command := probe[split+1:]
+	if !slices.Equal(command, []string{"/usr/local/bin/runner", "validate", "--config", "/etc/runner/config.toml"}) {
+		t.Fatalf("probe command = %q, want runner validate on the prepared config", command)
+	}
+	for _, arg := range probe {
+		if strings.Contains(arg, "RUNNER_SERVICE_PREPARATION") {
+			t.Fatalf("probe still sets the retired doctor preparation gate: %q", probe)
+		}
+	}
+}
+
+// validate selects no installation, so it can run before the unit exists.
+func TestProbeCommandNeedsNoInstalledUnit(t *testing.T) {
+	saved := discoverInstallations
+	t.Cleanup(func() { discoverInstallations = saved })
+	discoverInstallations = func(context.Context) []installationCandidate {
+		t.Error("the install probe looked for an installed unit")
+		return nil
+	}
+	if got, err := managedConfigPath(validateCmd, "/etc/runner/config.toml"); err != nil || got != "/etc/runner/config.toml" {
+		t.Fatalf("validate config = %q, %v", got, err)
+	}
+}
+
+func TestDoctorMaintenanceHintKeepsTheSystemScope(t *testing.T) {
+	saved := installationOutput
+	t.Cleanup(func() { installationOutput = saved })
+	installationOutput = func(context.Context, string, ...string) ([]byte, error) {
+		return []byte("--wait --pipe --collect --expand-environment"), nil
+	}
+	c := &cobra.Command{Use: "doctor"}
+	c.Flags().Bool("fix", false, "")
+	target := &installationTarget{Scope: scopeSystem, RuntimeUser: "runscaler-hint-test", RuntimeGroup: "runscaler-hint-test", BinaryPath: "/usr/local/bin/runner", ConfigPath: "/etc/runner/config.toml"}
+	err := requireDoctorIdentity(c, target)
+	if err == nil || !strings.Contains(err.Error(), "'doctor' '--scope' 'system' '--config' '/etc/runner/config.toml'") {
+		t.Fatalf("doctor hint = %v, want doctor to select the system installation", err)
 	}
 }
 

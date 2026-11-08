@@ -14,11 +14,12 @@ import (
 )
 
 // fakeDockerAPI implements provider.DockerAPI for cachestore's own tests.
-// Field names are relied on by later cachestore tasks' tests (shared-volume
-// and cache-volume stores reuse this exact double) — see task-2-report.md
-// and task-3-report.md.
+// It is the one shared double for every Docker-backed store in this package
+// (garbage, build-cache, shared-volume, cache-volume, buildx), so each
+// store's test file relies on these field names.
 type fakeDockerAPI struct {
-	rootDir string // Info() 回傳的 DockerRootDir
+	rootDir   string // Info() 回傳的 DockerRootDir
+	infoCalls int
 
 	containersPruneCalls int
 	imagesPruneCalls     int
@@ -28,8 +29,7 @@ type fakeDockerAPI struct {
 	// Optional error injection for the three prune calls, so tests can pin
 	// that dockerGarbageStore/dockerBuildCacheStore's errors.Join behavior
 	// (one prune failing does not stop the others, and every failure
-	// surfaces in the returned error) actually holds — coverage that moved
-	// here from internal/provider's now-deleted PruneDockerRuntime tests.
+	// surfaces in the returned error) actually holds.
 	containerPruneErr  error
 	imagePruneErr      error
 	buildCachePruneErr error
@@ -57,14 +57,15 @@ type fakeDockerAPI struct {
 	// framed as a single stdcopy stdout frame (see stdcopyStdoutFrame) so
 	// callers exercise the same demultiplexing path (stdcopy.StdCopy)
 	// production code uses against a real daemon. The shared-volume and
-	// cache-volume stores (Task 3) parse this to read `du -sb` output.
+	// cache-volume stores parse this to read `du -sb` output.
 	containerLogsStdout string
 
 	// containerList and volumeList are the canned results ContainerList and
-	// VolumeList return (default empty Items, matching every prior test's
-	// expectations). The buildx store's tests (Task 4) populate these to
-	// exercise CleanupOrphanedBuildxBuilders' actual builder-matching and
-	// dangling-volume-reap logic through fakeDockerAPI, not just call counts.
+	// VolumeList return (empty Items by default, which is what every test
+	// outside buildx_test.go expects). The buildx store's tests populate
+	// these to exercise cleanupOrphanedBuildxBuilders' actual
+	// builder-matching and dangling-volume-reap logic through fakeDockerAPI,
+	// not just call counts.
 	containerList dockerclient.ContainerListResult
 	volumeList    dockerclient.VolumeListResult
 }
@@ -72,10 +73,9 @@ type fakeDockerAPI struct {
 func (f *fakeDockerAPI) ContainerCreate(_ context.Context, options dockerclient.ContainerCreateOptions) (dockerclient.ContainerCreateResult, error) {
 	f.createdContainers++
 	f.createCalls = append(f.createCalls, options)
-	// Helper containers (shared-volume/cache-volume stores, Task 3) run
-	// `sh -c <script>`, matching CleanupSharedVolumeStale's shape in
-	// internal/provider/docker.go. Capture the script when present so those
-	// tests can assert on it.
+	// Helper containers (runVolumeHelper, used by the shared-volume and
+	// cache-volume stores) run `sh -c <script>`. Capture the script when
+	// present so those tests can assert on it.
 	if options.Config != nil && len(options.Config.Cmd) == 3 &&
 		options.Config.Cmd[0] == "sh" && options.Config.Cmd[1] == "-c" {
 		f.helperScripts = append(f.helperScripts, options.Config.Cmd[2])
@@ -164,6 +164,7 @@ func (f *fakeDockerAPI) VolumeList(_ context.Context, _ dockerclient.VolumeListO
 }
 
 func (f *fakeDockerAPI) Info(_ context.Context, _ dockerclient.InfoOptions) (dockerclient.SystemInfoResult, error) {
+	f.infoCalls++
 	return dockerclient.SystemInfoResult{Info: system.Info{DockerRootDir: f.rootDir}}, nil
 }
 

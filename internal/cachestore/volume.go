@@ -15,12 +15,14 @@ import (
 	dockerclient "github.com/moby/moby/client"
 
 	"github.com/ysya/runscaler/internal/provider"
+	"github.com/ysya/runscaler/internal/shell"
 )
 
 // volumeHelperTimeout bounds every helper-container round trip
-// runVolumeHelper makes (create/start/wait/logs/remove) — mirroring
-// provider.CleanupSharedVolumeStale's own bound — so a wedged daemon can
-// never hang a Measure or Reclaim call.
+// runVolumeHelper makes (create/start/wait/logs/remove), so a wedged daemon
+// can never hang a Measure or Reclaim call — and through them the periodic
+// sweeper goroutine or the disk guard. See dockerReclaimTimeout in
+// docker.go for the equivalent bound on the daemon-prune stores.
 const volumeHelperTimeout = 10 * time.Minute
 
 // runVolumeHelper runs a throwaway container with volumeName mounted at
@@ -28,16 +30,13 @@ const volumeHelperTimeout = 10 * time.Minute
 // container is always removed, and the call is bounded by
 // volumeHelperTimeout so a wedged daemon cannot hang a sweep.
 //
-// This is provider.CleanupSharedVolumeStale's own container-orchestration
-// shape (create with the volume mounted → defer a forced remove → start →
-// wait via a three-way select) copied into this package and generalized:
-// script is a parameter instead of a fixed find command, and the
-// container's stdout comes back to the caller instead of being discarded —
-// Measure needs to read `du -sb` output, and Reclaim needs it to report
-// bytes freed. CleanupSharedVolumeStale itself has since been retired
-// (Task 7 rewired cmd/runner/main.go's periodic sweep to this store's own
-// Reclaim(Tier3) and deleted it, since nothing else called it).
-func runVolumeHelper(ctx context.Context, client provider.DockerAPI, image, volumeName, mountPath, script string) (string, error) {
+// The sequence is: create with the volume mounted → defer a forced remove →
+// start → wait via a three-way select (wait error, exit status, timeout).
+// script is a parameter rather than a fixed command, and the container's
+// stdout comes back to the caller instead of being discarded, because this
+// one helper serves both Measure (which reads `du -sb` output) and Reclaim
+// (which reads the before/after `du` lines to report bytes freed).
+func runVolumeHelper(ctx context.Context, client DockerAPI, image, volumeName, mountPath, script string) (string, error) {
 	timeoutCtx, cancel := context.WithTimeout(ctx, volumeHelperTimeout)
 	defer cancel()
 
@@ -48,8 +47,8 @@ func runVolumeHelper(ctx context.Context, client provider.DockerAPI, image, volu
 			User:  "root",
 			Cmd:   []string{"sh", "-c", script},
 			Labels: map[string]string{
-				"managed-by": "runner",
-				"purpose":    "cachestore-volume-helper",
+				provider.ManagedByLabel: provider.ManagedByValue,
+				"purpose":               "cachestore-volume-helper",
 			},
 		},
 		HostConfig: &container.HostConfig{
@@ -100,7 +99,7 @@ func runVolumeHelper(ctx context.Context, client provider.DockerAPI, image, volu
 // doc comment in github.com/moby/moby/client — so the stream is
 // demultiplexed via stdcopy before being handed back as plain text; stderr
 // is discarded since no caller here needs it.
-func readContainerStdout(ctx context.Context, client provider.DockerAPI, containerID string) (string, error) {
+func readContainerStdout(ctx context.Context, client DockerAPI, containerID string) (string, error) {
 	logs, err := client.ContainerLogs(ctx, containerID, dockerclient.ContainerLogsOptions{ShowStdout: true})
 	if err != nil {
 		return "", fmt.Errorf("read volume helper logs: %w", err)
@@ -114,19 +113,11 @@ func readContainerStdout(ctx context.Context, client provider.DockerAPI, contain
 	return stdout.String(), nil
 }
 
-// shellQuote single-quotes value for safe interpolation into a `sh -c`
-// script. Duplicated from internal/provider/docker.go's unexported helper of
-// the same name rather than exported across the package boundary for one
-// function.
-func shellQuote(value string) string {
-	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
-}
-
 // duCommand measures mountPath's usage in bytes. Both stores' Measure run
 // exactly this inside a container with the volume mounted at mountPath, and
 // Reclaim runs it before and after a delete to compute bytes freed.
 func duCommand(mountPath string) string {
-	return "du -sb " + shellQuote(mountPath)
+	return "du -sb " + shell.Quote(mountPath)
 }
 
 // parseDuSizes reads the leading byte-count field from each of the first
@@ -175,7 +166,7 @@ func parseDuSizes(stdout string, want int) ([]uint64, error) {
 // non-zero container exit status as a failed reclaim. Measurement must
 // never decide whether the delete happens, only what it can report about
 // it — the same tolerance both `find` invocations already carry.
-func reclaimAndMeasureFreed(ctx context.Context, client provider.DockerAPI, image, volumeName, mountPath, deleteScript string) (uint64, error) {
+func reclaimAndMeasureFreed(ctx context.Context, client DockerAPI, image, volumeName, mountPath, deleteScript string) (uint64, error) {
 	du := duCommand(mountPath)
 	script := fmt.Sprintf("%s || true; %s; %s || true", du, deleteScript, du)
 	stdout, err := runVolumeHelper(ctx, client, image, volumeName, mountPath, script)
@@ -206,7 +197,7 @@ type SharedVolumeConfig struct {
 }
 
 type sharedVolumeStore struct {
-	client provider.DockerAPI
+	client DockerAPI
 	cfg    SharedVolumeConfig
 }
 
@@ -215,7 +206,7 @@ type sharedVolumeStore struct {
 // same workflow run. It is KindScratch: its un-expired contents are live
 // data a later job may still read, so it participates only in Tier3 (its
 // TTL-expired portion; see TiersFor) and is never removed wholesale.
-func NewSharedVolumeStore(client provider.DockerAPI, cfg SharedVolumeConfig) CacheStore {
+func NewSharedVolumeStore(client DockerAPI, cfg SharedVolumeConfig) CacheStore {
 	return serialize(&sharedVolumeStore{client: client, cfg: cfg})
 }
 
@@ -244,12 +235,13 @@ func (s *sharedVolumeStore) Measure(ctx context.Context) (uint64, error) {
 	return sizes[0], nil
 }
 
-// Reclaim acts only at Tier3, deleting shared-volume files (and any
-// directories left empty by that delete) whose mtime is older than MaxAge —
-// the same two-phase delete provider.CleanupSharedVolumeStale used to run
-// before Task 7 retired it and rewired cmd/runner/main.go's periodic sweep
-// to call this method directly, so both what used to be two sweeps agree on
-// what "stale" means.
+// Reclaim acts only at Tier3, deleting shared-volume files whose mtime is
+// older than MaxAge. Stale files are removed in two phases: files (and
+// symlinks) older than MaxAge first, then directories left empty by that
+// delete. cmd/runner's periodic shared-volume sweeper
+// (startSharedVolumeCleanup in cmd/runner/main.go) and the disk guard both
+// reclaim through this one method, so there is a single definition of
+// "stale".
 //
 // Every other tier — Tier4 included — is a strict no-op. TiersFor(KindScratch)
 // already keeps the guard from calling Reclaim(Tier4) on this store at all;
@@ -262,16 +254,16 @@ func (s *sharedVolumeStore) Reclaim(ctx context.Context, tier Tier) (uint64, err
 		return 0, nil
 	}
 
-	// find -mtime works in 24h units; round up so sub-day TTLs still sweep,
-	// matching provider.CleanupSharedVolumeStale exactly.
+	// find -mtime works in whole 24h units: MaxAge is truncated to days and
+	// clamped to at least 1 so a sub-day TTL still sweeps.
 	days := int(s.cfg.MaxAge / (24 * time.Hour))
 	if days < 1 {
 		days = 1
 	}
-	mountPath := shellQuote(s.cfg.MountPath)
+	mountPath := shell.Quote(s.cfg.MountPath)
 	// `|| true` on both finds keeps a mid-walk error (e.g. a file another
-	// job removed concurrently) from failing the whole sweep — matching
-	// CleanupSharedVolumeStale's own comment on this exact script shape.
+	// job removed concurrently) from failing the whole sweep: runVolumeHelper
+	// treats a non-zero container exit as a failed reclaim.
 	deleteScript := fmt.Sprintf(
 		"find %[1]s -mindepth 1 -mtime +%[2]d \\( -type f -o -type l \\) -delete 2>/dev/null || true; "+
 			"find %[1]s -mindepth 1 -type d -empty -delete 2>/dev/null || true",
@@ -294,9 +286,10 @@ func (s *sharedVolumeStore) Budget() (uint64, string) { return 0, "" }
 
 // CacheVolumeConfig configures one persistent cache-volume store (e.g.
 // ccache, a Gradle cache). One store is constructed per configured cache
-// volume mount. BudgetBytes and OnExceed are not consumed by this store —
-// they carry the operator's budget policy for a later task's tier-reclaim
-// loop to act on.
+// volume mount. BudgetBytes and OnExceed are not consumed by this store's
+// own Reclaim: Budget() hands them to the disk guard, whose independent
+// budget-enforcement pass is what acts on them (see CacheStore.Budget in
+// store.go).
 type CacheVolumeConfig struct {
 	VolumeName  string
 	MountPath   string
@@ -307,7 +300,7 @@ type CacheVolumeConfig struct {
 }
 
 type cacheVolumeStore struct {
-	client provider.DockerAPI
+	client DockerAPI
 	cfg    CacheVolumeConfig
 }
 
@@ -316,7 +309,7 @@ type cacheVolumeStore struct {
 // time on the next build — so it participates in Tier4 (see TiersFor);
 // unlike the daemon's own build cache, it has no age metadata to trim
 // safely by, so Tier2 is always a no-op here (see Reclaim).
-func NewCacheVolumeStore(client provider.DockerAPI, cfg CacheVolumeConfig) CacheStore {
+func NewCacheVolumeStore(client DockerAPI, cfg CacheVolumeConfig) CacheStore {
 	return serialize(&cacheVolumeStore{client: client, cfg: cfg})
 }
 
@@ -352,7 +345,7 @@ func (s *cacheVolumeStore) Reclaim(ctx context.Context, tier Tier) (uint64, erro
 		return 0, nil
 	}
 
-	deleteScript := fmt.Sprintf("find %s -mindepth 1 -delete 2>/dev/null || true", shellQuote(s.cfg.MountPath))
+	deleteScript := fmt.Sprintf("find %s -mindepth 1 -delete 2>/dev/null || true", shell.Quote(s.cfg.MountPath))
 	freed, err := reclaimAndMeasureFreed(ctx, s.client, s.cfg.HelperImage, s.cfg.VolumeName, s.cfg.MountPath, deleteScript)
 	if err != nil {
 		return 0, fmt.Errorf("reclaim cache volume: %w", err)
@@ -360,11 +353,10 @@ func (s *cacheVolumeStore) Reclaim(ctx context.Context, tier Tier) (uint64, erro
 	return freed, nil
 }
 
-// Budget reports cfg.BudgetBytes/cfg.OnExceed verbatim — carried unused
-// since NewCacheVolumeStore (see CacheVolumeConfig's doc comment) precisely
-// so the disk guard's independent budget-enforcement pass could act on
-// them once it existed. Unlike the Docker build cache and Tart stores, this
-// store has no tool-native "trim to budget" mechanism of its own (Reclaim
-// only ever does a full Tier4 wipe), so there is no other consumer of this
-// cap to entangle with — the guard's own enforcement is the only one.
+// Budget reports cfg.BudgetBytes/cfg.OnExceed verbatim for the disk guard's
+// independent budget-enforcement pass to act on. Unlike the Docker build
+// cache and Tart stores, this store has no tool-native "trim to budget"
+// mechanism of its own (Reclaim only ever does a full Tier4 wipe), so there
+// is no other consumer of this cap to entangle with — the guard's own
+// enforcement is the only one.
 func (s *cacheVolumeStore) Budget() (uint64, string) { return s.cfg.BudgetBytes, s.cfg.OnExceed }

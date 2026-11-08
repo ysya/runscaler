@@ -38,12 +38,16 @@ type Layout struct {
 	LogFile    string
 }
 
+// ServiceScopeEnv names the installation scope a generated service
+// definition was written for; it selects the system or user layout.
+const ServiceScopeEnv = "RUNNER_SERVICE_SCOPE"
+
 // CurrentIdentity describes the running process. It never fails: root needs
 // no home directory, and users need one only where XDG does not apply.
 func CurrentIdentity() Identity {
 	home, _ := os.UserHomeDir()
 	return Identity{
-		ServiceScope:  os.Getenv("RUNNER_SERVICE_SCOPE"),
+		ServiceScope:  os.Getenv(ServiceScopeEnv),
 		GOOS:          runtime.GOOS,
 		Root:          os.Geteuid() == 0,
 		Home:          home,

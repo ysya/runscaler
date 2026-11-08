@@ -7,15 +7,20 @@ import (
 	"os"
 	osuser "os/user"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/ysya/runscaler/internal/layout"
+	"github.com/ysya/runscaler/internal/shell"
 )
 
+// buildMaintenanceArgs builds a `systemd-run` command that runs the runner
+// operation once, as the system service's identity: its user, groups,
+// working directory, sandbox, environment files and allowlisted
+// environment. The operation gets the service's config; any further flags,
+// such as an installation scope, are the caller's to pass.
 func buildMaintenanceArgs(target *installationTarget, operation []string, noExpand bool) ([]string, error) {
 	if target == nil || target.Scope != scopeSystem || !validServicePrincipal(target.RuntimeUser) || !validServicePrincipal(target.RuntimeGroup) || target.RuntimeUser == "root" || target.RuntimeUser == "0" || target.RuntimeGroup == "root" || target.RuntimeGroup == "0" || !filepath.IsAbs(target.BinaryPath) || !filepath.IsAbs(target.ConfigPath) {
 		return nil, errors.New("cannot reproduce the selected system service identity")
@@ -49,7 +54,7 @@ func buildMaintenanceArgs(target *installationTarget, operation []string, noExpa
 		return nil, errors.New("service working directory is not absolute")
 	}
 	args = append(args, "--property=WorkingDirectory="+working)
-	allowed := []string{"HOME", "RUNNER_SERVICE_SCOPE", "RUNNER_SERVICE_VERSION", "RUNNER_SERVICE_STOP_TIMEOUT", "XDG_CONFIG_HOME", "XDG_STATE_HOME"}
+	allowed := serviceManagedEnvKeys
 	for key := range target.Environment {
 		found := false
 		for _, safe := range allowed {
@@ -67,8 +72,8 @@ func buildMaintenanceArgs(target *installationTarget, operation []string, noExpa
 		if key == "HOME" && !ok {
 			value, ok = serviceStateDir, true
 		}
-		if key == "RUNNER_SERVICE_SCOPE" {
-			value, ok = "system", true
+		if key == serviceScopeEnv {
+			value, ok = string(scopeSystem), true
 		}
 		if ok {
 			if strings.ContainsAny(value, "\x00\r\n") {
@@ -85,7 +90,7 @@ func buildMaintenanceArgs(target *installationTarget, operation []string, noExpa
 		args = append(args, "--property=EnvironmentFile="+path)
 	}
 	command := append([]string{target.BinaryPath}, operation...)
-	command = append(command, "--config", target.ConfigPath, "--scope", "system")
+	command = append(command, "--config", target.ConfigPath)
 	if !noExpand {
 		for _, arg := range command {
 			if strings.Contains(arg, "$") {
@@ -121,7 +126,7 @@ func maintenanceHint(ctx context.Context, target *installationTarget, operation 
 		return "", err
 	}
 	for i := range args {
-		args[i] = shellQuotePath(args[i])
+		args[i] = shell.Quote(args[i])
 	}
 	return "sudo " + strings.Join(args, " "), nil
 }
@@ -180,14 +185,16 @@ func runtimeIdentityMatches(target *installationTarget) bool {
 			return false
 		}
 	}
-	return os.Getenv("RUNNER_MAINTENANCE_CONTEXT") == "1" && os.Getenv("RUNNER_SERVICE_SCOPE") == "system" && os.Getenv("HOME") == target.Environment["HOME"]
+	return os.Getenv("RUNNER_MAINTENANCE_CONTEXT") == "1" && os.Getenv(serviceScopeEnv) == string(scopeSystem) && os.Getenv("HOME") == target.Environment["HOME"]
 }
 
 func requireDoctorIdentity(c *cobra.Command, target *installationTarget) error {
 	if target.Scope != scopeSystem || target.RuntimeUser == "root" || target.RuntimeUser == "0" || runtimeIdentityMatches(target) {
 		return nil
 	}
-	operation := []string{"doctor"}
+	// Inside the transient unit there is no user bus, so doctor must select
+	// the system installation explicitly rather than discover it.
+	operation := []string{"doctor", "--scope", string(scopeSystem)}
 	if fix, _ := c.Flags().GetBool("fix"); fix {
 		operation = append(operation, "--fix")
 	}
@@ -198,8 +205,14 @@ func requireDoctorIdentity(c *cobra.Command, target *installationTarget) error {
 	return fmt.Errorf("diagnose the selected installation with its service identity and groups:\n\n  %s", hint)
 }
 
+// verifyPreparedService runs `runner validate` once as the prepared service
+// identity before the unit is written: the Docker socket, credentials and
+// GitHub access are checked exactly as the service will use them. validate
+// selects no installation, so it runs before the unit exists, and unlike
+// doctor it never fails over leftover containers that are not this
+// installation's concern.
 func verifyPreparedService(opts installOpts) error {
-	target := &installationTarget{Scope: scopeSystem, RuntimeUser: opts.runtimeUser, RuntimeGroup: opts.runtimeGroup, SupplementaryGroups: opts.supplementaryGroups, BinaryPath: opts.binaryPath, ConfigPath: opts.configPath, WorkingDirectory: serviceStateDir, Environment: map[string]string{"HOME": serviceStateDir, "RUNNER_SERVICE_SCOPE": "system"}, EnvironmentFiles: opts.environmentFiles}
+	target := &installationTarget{Scope: scopeSystem, RuntimeUser: opts.runtimeUser, RuntimeGroup: opts.runtimeGroup, SupplementaryGroups: opts.supplementaryGroups, BinaryPath: opts.binaryPath, ConfigPath: opts.configPath, WorkingDirectory: serviceStateDir, Environment: map[string]string{"HOME": serviceStateDir, serviceScopeEnv: string(scopeSystem)}, EnvironmentFiles: opts.environmentFiles}
 	target.ReadWritePaths = []string{systemServiceLogDir(opts)}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
@@ -207,11 +220,10 @@ func verifyPreparedService(opts installOpts) error {
 	if err != nil {
 		return err
 	}
-	args, err := buildMaintenanceArgs(target, []string{"doctor"}, noExpand)
+	args, err := buildMaintenanceArgs(target, []string{"validate"}, noExpand)
 	if err != nil {
 		return err
 	}
-	args = slices.Insert(args, slices.Index(args, "--"), "--setenv=RUNNER_SERVICE_PREPARATION=1")
 	if err := serviceAdminCommand(ctx, args[0], args[1:]...); err != nil {
 		return fmt.Errorf("service-identity provider probe failed; no service definition was changed: %w", err)
 	}

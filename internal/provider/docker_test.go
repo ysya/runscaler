@@ -8,16 +8,14 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
-	"time"
 
 	cerrdefs "github.com/containerd/errdefs"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/mount"
-	"github.com/moby/moby/api/types/system"
-	"github.com/moby/moby/api/types/volume"
 	dockerclient "github.com/moby/moby/client"
 
 	"github.com/ysya/runscaler/internal/config"
+	"github.com/ysya/runscaler/internal/shell"
 )
 
 // --- Docker Mock ---
@@ -29,21 +27,16 @@ type createCall struct {
 }
 
 type mockDocker struct {
-	created        []string     // container names
-	createCalls    []createCall // full create args
-	started        []string     // container IDs
-	removed        []string     // container IDs
-	volumesRemoved []string     // volume names
+	created     []string     // container names
+	createCalls []createCall // full create args
+	started     []string     // container IDs
+	removed     []string     // container IDs
 
 	// Optional overrides for ContainerWait. When unset, the wait succeeds
 	// immediately with status 0.
 	waitStatus int64
 	waitErr    error
 	removeErr  error
-
-	// Optional fixtures for ContainerList / VolumeList.
-	containers []container.Summary
-	volumes    []volume.Volume
 }
 
 func (m *mockDocker) ContainerCreate(_ context.Context, options dockerclient.ContainerCreateOptions) (dockerclient.ContainerCreateResult, error) {
@@ -66,39 +59,6 @@ func (m *mockDocker) ContainerRemove(_ context.Context, id string, _ dockerclien
 // The three prune methods exist only to satisfy DockerAPI. Nothing in this
 // package prunes any more: reclamation moved to internal/cachestore, whose
 // own fakeDockerAPI records and injects errors into these calls.
-
-func (m *mockDocker) ContainerPrune(_ context.Context, _ dockerclient.ContainerPruneOptions) (dockerclient.ContainerPruneResult, error) {
-	return dockerclient.ContainerPruneResult{}, nil
-}
-
-func (m *mockDocker) ImagePrune(_ context.Context, _ dockerclient.ImagePruneOptions) (dockerclient.ImagePruneResult, error) {
-	return dockerclient.ImagePruneResult{}, nil
-}
-
-func (m *mockDocker) BuildCachePrune(_ context.Context, _ dockerclient.BuildCachePruneOptions) (dockerclient.BuildCachePruneResult, error) {
-	return dockerclient.BuildCachePruneResult{}, nil
-}
-
-func (m *mockDocker) VolumeRemove(_ context.Context, volumeID string, _ dockerclient.VolumeRemoveOptions) (dockerclient.VolumeRemoveResult, error) {
-	m.volumesRemoved = append(m.volumesRemoved, volumeID)
-	return dockerclient.VolumeRemoveResult{}, nil
-}
-
-func (m *mockDocker) ContainerList(_ context.Context, _ dockerclient.ContainerListOptions) (dockerclient.ContainerListResult, error) {
-	return dockerclient.ContainerListResult{Items: m.containers}, nil
-}
-
-func (m *mockDocker) VolumeList(_ context.Context, _ dockerclient.VolumeListOptions) (dockerclient.VolumeListResult, error) {
-	return dockerclient.VolumeListResult{Items: m.volumes}, nil
-}
-
-func (m *mockDocker) Info(_ context.Context, _ dockerclient.InfoOptions) (dockerclient.SystemInfoResult, error) {
-	return dockerclient.SystemInfoResult{Info: system.Info{DockerRootDir: "/var/lib/docker"}}, nil
-}
-
-func (m *mockDocker) DiskUsage(_ context.Context, _ dockerclient.DiskUsageOptions) (dockerclient.DiskUsageResult, error) {
-	return dockerclient.DiskUsageResult{}, nil
-}
 
 // ContainerLogs is unused by this package's own tests (only
 // internal/cachestore's volume helper reads logs) — a minimal stub keeps
@@ -186,7 +146,7 @@ func assertFixOwnCmd(t *testing.T, cmd []string, targets ...string) {
 		t.Errorf("script should chown only when the owner is wrong, got: %q", script)
 	}
 	for _, target := range targets {
-		if !strings.Contains(script, "fix_own "+shellQuote(target)+";") {
+		if !strings.Contains(script, "fix_own "+shell.Quote(target)+";") {
 			t.Errorf("script should fix ownership of %s, got: %q", target, script)
 		}
 	}
@@ -516,9 +476,8 @@ func TestDockerProvider_Shutdown_IsNoOp(t *testing.T) {
 	ctx := context.Background()
 
 	b.Shutdown(ctx)
-
-	if len(md.volumesRemoved) != 0 {
-		t.Errorf("Shutdown should not remove volumes, removed %d", len(md.volumesRemoved))
+	if len(md.removed) != 0 {
+		t.Errorf("Shutdown removed %v, want nothing touched at exit", md.removed)
 	}
 }
 
@@ -621,74 +580,6 @@ func TestDockerProvider_StartInstance_WithoutResourceLimits(t *testing.T) {
 	}
 }
 
-func TestCleanupOrphanedBuildxBuilders_NoOpWhenMaxAgeZero(t *testing.T) {
-	md := &mockDocker{containers: []container.Summary{
-		{ID: "old", Names: []string{"/buildx_buildkit_builder-abc0"}, Created: 0},
-	}}
-	if err := CleanupOrphanedBuildxBuilders(context.Background(), md, 0, slog.New(slog.DiscardHandler)); err != nil {
-		t.Fatalf("error: %v", err)
-	}
-	if len(md.removed) != 0 {
-		t.Errorf("expected nothing removed, got %d", len(md.removed))
-	}
-}
-
-func TestCleanupOrphanedBuildxBuilders_RemovesOldKeepsYoungAndOthers(t *testing.T) {
-	now := time.Now()
-	md := &mockDocker{containers: []container.Summary{
-		{ID: "old", Names: []string{"/buildx_buildkit_builder-old0"}, Created: now.Add(-48 * time.Hour).Unix()},
-		{ID: "young", Names: []string{"/buildx_buildkit_builder-young0"}, Created: now.Add(-1 * time.Hour).Unix()},
-		{ID: "runner", Names: []string{"/runner-deadbeef"}, Created: now.Add(-72 * time.Hour).Unix()},
-	}}
-
-	if err := CleanupOrphanedBuildxBuilders(context.Background(), md, 24*time.Hour, slog.New(slog.DiscardHandler)); err != nil {
-		t.Fatalf("error: %v", err)
-	}
-
-	// Only the old buildx builder container is removed.
-	if len(md.removed) != 1 || md.removed[0] != "old" {
-		t.Errorf("expected only 'old' removed, got %v", md.removed)
-	}
-	// Its state volume is removed explicitly.
-	if len(md.volumesRemoved) != 1 || md.volumesRemoved[0] != "buildx_buildkit_builder-old0_state" {
-		t.Errorf("expected old builder's _state volume removed, got %v", md.volumesRemoved)
-	}
-}
-
-func TestCleanupOrphanedBuildxBuilders_ReapsDanglingVolumes(t *testing.T) {
-	md := &mockDocker{volumes: []volume.Volume{
-		{Name: "buildx_buildkit_builder-gone0_state"},
-		{Name: "runner-shared"}, // must be left untouched
-	}}
-
-	if err := CleanupOrphanedBuildxBuilders(context.Background(), md, 24*time.Hour, slog.New(slog.DiscardHandler)); err != nil {
-		t.Fatalf("error: %v", err)
-	}
-
-	if len(md.volumesRemoved) != 1 || md.volumesRemoved[0] != "buildx_buildkit_builder-gone0_state" {
-		t.Errorf("expected only dangling buildx volume removed, got %v", md.volumesRemoved)
-	}
-}
-
-func TestFormatBytes(t *testing.T) {
-	tests := []struct {
-		input uint64
-		want  string
-	}{
-		{0, "0 B"},
-		{512, "512 B"},
-		{1024, "1.0 KiB"},
-		{1536, "1.5 KiB"},
-		{1048576, "1.0 MiB"},
-		{1073741824, "1.0 GiB"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.want, func(t *testing.T) {
-			got := FormatBytes(tt.input)
-			if got != tt.want {
-				t.Errorf("FormatBytes(%d) = %q, want %q", tt.input, got, tt.want)
-			}
-		})
-	}
+func (m *mockDocker) ContainerInspect(_ context.Context, _ string, _ dockerclient.ContainerInspectOptions) (dockerclient.ContainerInspectResult, error) {
+	return dockerclient.ContainerInspectResult{Container: container.InspectResponse{State: &container.State{Running: true}, Config: &container.Config{}}}, nil
 }

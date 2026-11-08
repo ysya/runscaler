@@ -2,27 +2,20 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
-	"crypto/x509"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
-	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
-	"regexp"
-	"strings"
+	"slices"
 	"time"
 
 	cerrdefs "github.com/containerd/errdefs"
-	"github.com/moby/moby/api/types/container"
 	dockerclient "github.com/moby/moby/client"
 	"github.com/spf13/cobra"
 
+	"github.com/ysya/runscaler/internal/bytesize"
 	"github.com/ysya/runscaler/internal/config"
 	runnerlock "github.com/ysya/runscaler/internal/lock"
 	"github.com/ysya/runscaler/internal/provider"
@@ -44,18 +37,10 @@ By default, only reports what it finds. Use --fix to remove orphaned resources.`
 
 func init() {
 	doctorCmd.Flags().Bool("fix", false, "Remove orphaned containers and VMs")
-	doctorCmd.Flags().Int("health-port", config.DefaultHealthPort, "Health check port to detect running instance")
-	doctorCmd.Flags().String("health-address", config.DefaultHealthAddress, "Health check address to detect older runner instances")
 }
-
-// runnerNamePattern matches container/VM names created by runner.
-// controller.go generates: runner-{uuid[:8]} where uuid[:8] is 8 hex chars.
-var runnerNamePattern = regexp.MustCompile(`^/?runner-[0-9a-f]{8}$`)
 
 func runDoctor(cmd *cobra.Command, args []string) error {
 	fix, _ := cmd.Flags().GetBool("fix")
-	healthPort, _ := cmd.Flags().GetInt("health-port")
-	healthAddress, _ := cmd.Flags().GetString("health-address")
 
 	// Include the default and configured provider locations.
 	dockerSockets := map[string]bool{config.DefaultDockerSocket: true}
@@ -72,13 +57,8 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		dockerSockets = map[string]bool{}
 		tartHomes = map[string]bool{}
 	}
-	if !cmd.Flags().Changed("health-port") {
-		healthPort = cfg.HealthPort
-	}
-	if !cmd.Flags().Changed("health-address") {
-		healthAddress = cfg.HealthAddress
-	}
-	for _, ss := range cfg.ResolveScaleSets() {
+	scaleSets := cfg.ResolveScaleSets()
+	for _, ss := range scaleSets {
 		if ss.IsTart() {
 			tartHomes[ss.Tart.Home] = true
 		} else {
@@ -110,14 +90,6 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("cannot verify runner lock before cleanup: %w", err)
 		}
 		defer releaseLock()
-
-		// Keep the health probe as defense in depth for older runner versions
-		// that predate the machine lock.
-		if isRunnerRunning(healthAddress, healthPort) {
-			fmt.Println("  ✗ runner is currently running (health endpoint responded)")
-			fmt.Println("    Stop runner first before using --fix")
-			return fmt.Errorf("cannot fix while runner is running")
-		}
 	}
 
 	// Scaleset API connectivity check (if config is available)
@@ -129,8 +101,9 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	var totalOrphans int
 
 	// Docker checks
+	sharedVolumes := doctorSharedVolumes(dockerSockets, scaleSets)
 	for socket := range dockerSockets {
-		orphans, err := checkDocker(ctx, socket, fix)
+		orphans, err := checkDocker(ctx, socket, sharedVolumes[socket], fix)
 		if err != nil {
 			return errors.Join(apiErr, err)
 		}
@@ -167,9 +140,7 @@ func reportDoctorSummary(out io.Writer, totalOrphans int, fix bool, apiErr error
 
 // checkScalesetAPI probes the read-only API for every configured scale set.
 func checkScalesetAPI(ctx context.Context, cfg *config.Config) error {
-	return checkScalesetAPIWith(ctx, cfg, os.Stdout, func(ss config.ScaleSetConfig) (scaleSetAPI, error) {
-		return ss.NewScalesetClient(nil)
-	})
+	return checkScalesetAPIWith(ctx, cfg, os.Stdout, newScaleSetClient)
 }
 
 func checkScalesetAPIWith(ctx context.Context, cfg *config.Config, out io.Writer, newClient func(config.ScaleSetConfig) (scaleSetAPI, error)) error {
@@ -179,11 +150,11 @@ func checkScalesetAPIWith(ctx context.Context, cfg *config.Config, out io.Writer
 		if err := ctx.Err(); err != nil {
 			return errors.Join(append(failures, err)...)
 		}
-		probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		registered, err := probeDoctorScaleSet(probeCtx, ss, newClient)
+		probeCtx, cancel := context.WithTimeout(ctx, apiProbeTimeout)
+		registered, err := probeScaleSet(probeCtx, ss, newClient)
 		cancel()
 		if err != nil {
-			safeErr := safeDoctorAPIError(err)
+			safeErr := safeAPIError(err)
 			fmt.Fprintf(out, "  ✗ GitHub API [%s]: %s\n", ss.ScaleSetName, safeErr)
 			failures = append(failures, fmt.Errorf("GitHub API [%s]: %w", ss.ScaleSetName, safeErr))
 			continue
@@ -197,81 +168,9 @@ func checkScalesetAPIWith(ctx context.Context, cfg *config.Config, out io.Writer
 	return errors.Join(failures...)
 }
 
-func probeDoctorScaleSet(ctx context.Context, ss config.ScaleSetConfig, newClient func(config.ScaleSetConfig) (scaleSetAPI, error)) (bool, error) {
-	// Match ScaleSetConfig.Validate's URL boundary before the factory can
-	// read App credentials or the SDK can issue an authenticated request.
-	registrationURL, err := url.ParseRequestURI(ss.RegistrationURL)
-	if err != nil || registrationURL.Scheme != "https" || registrationURL.Host == "" || registrationURL.User != nil {
-		return false, errors.New("invalid registration URL")
-	}
-	if ss.Token == "" && ss.GitHubApp == nil {
-		return false, fmt.Errorf("registration URL and credentials are required")
-	}
-	client, err := newClient(ss)
-	if err != nil {
-		return false, err
-	}
-	groupID, err := resolveRunnerGroupID(ctx, client, ss.RunnerGroup)
-	if err != nil {
-		return false, err
-	}
-	registered, err := client.GetRunnerScaleSet(ctx, groupID, ss.ScaleSetName)
-	return registered != nil, err
-}
-
-// The SDK wraps response bodies, URLs and authentication failures in error
-// strings. Never return or print those strings: App JWTs and exchanged tokens
-// are not available for configured-value redaction. Only fixed categories and
-// a bounded numeric HTTP status may cross the diagnostic output boundary.
-var doctorHTTPStatus = regexp.MustCompile(`\(status="([1-5][0-9]{2})(?: |")`)
-
-func safeDoctorAPIError(err error) error {
-	if errors.Is(err, context.Canceled) {
-		return fmt.Errorf("cancelled: %w", context.Canceled)
-	}
-	if errors.Is(err, context.DeadlineExceeded) {
-		return fmt.Errorf("timed out: %w", context.DeadlineExceeded)
-	}
-	var networkErr net.Error
-	if errors.As(err, &networkErr) && networkErr.Timeout() {
-		return errors.New("request timed out")
-	}
-	var dnsErr *net.DNSError
-	if errors.As(err, &dnsErr) {
-		return errors.New("DNS lookup failed")
-	}
-	var verificationErr *tls.CertificateVerificationError
-	var authorityErr x509.UnknownAuthorityError
-	var hostnameErr x509.HostnameError
-	var certificateErr x509.CertificateInvalidError
-	var recordErr tls.RecordHeaderError
-	if errors.As(err, &verificationErr) || errors.As(err, &authorityErr) || errors.As(err, &hostnameErr) || errors.As(err, &certificateErr) || errors.As(err, &recordErr) {
-		return errors.New("TLS verification failed")
-	}
-	// SDK v0.4.0 exposes response status only in its formatted error. Copy
-	// just the three validated digits, never arbitrary response text.
-	if match := doctorHTTPStatus.FindStringSubmatch(err.Error()); len(match) == 2 {
-		return fmt.Errorf("HTTP %s request failed", match[1])
-	}
-	return errors.New("request failed")
-}
-
-// isRunnerRunning checks if a runner instance is responding on the health port.
-func isRunnerRunning(address string, port int) bool {
-	if port <= 0 {
-		return false
-	}
-	client := &http.Client{Timeout: 2 * time.Second}
-	resp, err := client.Get(fmt.Sprintf("http://%s/readyz", net.JoinHostPort(address, fmt.Sprintf("%d", port))))
-	if err != nil {
-		return false
-	}
-	resp.Body.Close()
-	return resp.StatusCode == http.StatusOK
-}
-
-// checkDocker checks for Docker daemon reachability, orphaned containers, and volumes.
-func checkDocker(ctx context.Context, socket string, fix bool) (int, error) {
+// checkDocker checks for Docker daemon reachability, orphaned containers, and
+// the shared volumes configured on socket.
+func checkDocker(ctx context.Context, socket string, sharedVolumes []string, fix bool) (int, error) {
 	dockerClient, err := dockerclient.New(
 		dockerclient.FromEnv,
 		dockerclient.WithHost("unix://"+socket),
@@ -298,8 +197,8 @@ func checkDocker(ctx context.Context, socket string, fix bool) (int, error) {
 	}
 	totalOrphans += orphans
 
-	// Check orphaned volume
-	orphans, err = checkDockerVolume(ctx, dockerClient, fix)
+	// Report shared volumes
+	orphans, err = checkDockerVolume(ctx, dockerClient, sharedVolumes)
 	if err != nil {
 		return totalOrphans, err
 	}
@@ -308,22 +207,9 @@ func checkDocker(ctx context.Context, socket string, fix bool) (int, error) {
 	return totalOrphans, nil
 }
 
-// containerDisplayName returns a human-friendly name for a container,
-// falling back to a short container ID when Docker reports no names
-// (e.g. partially-created containers tagged only by label).
-func containerDisplayName(c container.Summary) string {
-	if len(c.Names) > 0 {
-		return strings.TrimPrefix(c.Names[0], "/")
-	}
-	if len(c.ID) >= 12 {
-		return c.ID[:12]
-	}
-	return c.ID
-}
-
 // checkDockerContainers finds and optionally removes orphaned runner
 // containers, via findOrphanContainers and removeOrphanContainers.
-func checkDockerContainers(ctx context.Context, client provider.DockerAPI, fix bool) (int, error) {
+func checkDockerContainers(ctx context.Context, client containerAPI, fix bool) (int, error) {
 	orphans, err := findOrphanContainers(ctx, client)
 	if err != nil {
 		fmt.Printf("  ✗ Failed to list Docker containers: %s\n", err)
@@ -361,17 +247,31 @@ type volumeAPI interface {
 	VolumeInspect(ctx context.Context, id string, options dockerclient.VolumeInspectOptions) (dockerclient.VolumeInspectResult, error)
 }
 
-// sharedVolumeNames lists the default shared handoff volume doctor inspects.
-var sharedVolumeNames = []string{"runner-shared"}
+// doctorSharedVolumes lists, per Docker socket, the shared volumes doctor
+// reports: the default name, which a scale set uses when it names none, and
+// every name the scale sets on that socket configure.
+func doctorSharedVolumes(sockets map[string]bool, scaleSets []config.ScaleSetConfig) map[string][]string {
+	names := make(map[string][]string, len(sockets))
+	for socket := range sockets {
+		names[socket] = []string{config.DefaultSharedVolumeName}
+	}
+	for _, ss := range scaleSets {
+		if ss.IsTart() || ss.Docker.SharedVolume == "" {
+			continue
+		}
+		if name := ss.SharedVolumeName(); !slices.Contains(names[ss.Docker.Socket], name) {
+			names[ss.Docker.Socket] = append(names[ss.Docker.Socket], name)
+		}
+	}
+	return names
+}
 
-// checkDockerVolume reports whether runner's shared handoff volume(s)
-// exist and, for each one found, prints its name and size. It never
-// removes anything, regardless of fix: fix is accepted only so this
-// function's signature matches checkDockerContainers' and the shared call
-// site in checkDocker can pass the same variable to both — the value is
-// not read below, and volumeAPI does not even expose a VolumeRemove method
-// to call. Returns the number of unresolved issues, which this check never
-// contributes to (a real Docker failure is instead returned as an error).
+// checkDockerVolume reports whether each named shared handoff volume exists
+// and, for each one found, prints its name and size. It never removes
+// anything, even under --fix: volumeAPI does not even expose a VolumeRemove
+// method to call. Returns the number of unresolved issues, which this check
+// never contributes to (a real Docker failure is instead returned as an
+// error).
 //
 // Existence used to be a reliable orphan signal: runner deleted this
 // volume itself at process exit, so anything still there after a run meant
@@ -402,9 +302,9 @@ var sharedVolumeNames = []string{"runner-shared"}
 // signal for doctor to act on. An operator who has independently
 // confirmed the volume is no longer needed (e.g. no workflow is running)
 // can still remove it by hand with `docker volume rm`.
-func checkDockerVolume(ctx context.Context, client volumeAPI, fix bool) (int, error) {
+func checkDockerVolume(ctx context.Context, client volumeAPI, names []string) (int, error) {
 	found := 0
-	for _, name := range sharedVolumeNames {
+	for _, name := range names {
 		result, err := client.VolumeInspect(ctx, name, dockerclient.VolumeInspectOptions{})
 		if err != nil {
 			if cerrdefs.IsNotFound(err) {
@@ -435,14 +335,7 @@ func volumeSizeText(result dockerclient.VolumeInspectResult) string {
 	if usage == nil || usage.Size < 0 {
 		return "size not reported"
 	}
-	return provider.FormatBytes(uint64(usage.Size))
-}
-
-// tartListEntry represents a VM from `tart list --format json`.
-type tartListEntry struct {
-	Name   string `json:"Name"`
-	State  string `json:"State"`
-	Source string `json:"Source"`
+	return bytesize.Format(uint64(usage.Size))
 }
 
 // checkTart checks for Tart binary and orphaned VMs.
@@ -455,7 +348,7 @@ func checkTart(ctx context.Context, fix bool, homes map[string]bool) (int, error
 
 	var total int
 	for home := range homes {
-		issues, err := checkTartVMs(ctx, fix, home)
+		issues, err := checkTartVMs(ctx, provider.TartCommandRunner(home), home, fix)
 		if err != nil {
 			return total, err
 		}
@@ -464,25 +357,14 @@ func checkTart(ctx context.Context, fix bool, homes map[string]bool) (int, error
 	return total, nil
 }
 
-// checkTartVMs finds and optionally removes orphaned Tart VMs.
-func checkTartVMs(ctx context.Context, fix bool, home string) (int, error) {
-	out, err := tartDoctorCommand(ctx, home, "list", "--format", "json").Output()
+// checkTartVMs reports, and with fix removes, the Tart VMs runner left
+// behind in one TART_HOME, through the same ownership rules and removal
+// path as startup reconciliation (findOrphanTartVMs, removeOrphanTartVMs).
+func checkTartVMs(ctx context.Context, runner provider.CommandRunner, home string, fix bool) (int, error) {
+	orphans, err := findOrphanTartVMs(ctx, runner)
 	if err != nil {
 		fmt.Printf("  ✗ Failed to list Tart VMs: %s\n", err)
 		return 0, err
-	}
-
-	var vms []tartListEntry
-	if err := json.Unmarshal(out, &vms); err != nil {
-		fmt.Printf("  ✗ Failed to parse Tart VM list: %s\n", err)
-		return 0, err
-	}
-
-	var orphans []tartListEntry
-	for _, vm := range vms {
-		if strings.HasPrefix(vm.Name, "runner-") || strings.HasPrefix(vm.Name, "pool-") {
-			orphans = append(orphans, vm)
-		}
 	}
 
 	if len(orphans) == 0 {
@@ -498,25 +380,10 @@ func checkTartVMs(ctx context.Context, fix bool, home string) (int, error) {
 		return len(orphans), nil
 	}
 
-	// Fix: stop and delete orphaned VMs
-	removed := 0
-	for _, vm := range orphans {
-		// Stop first (ignore error — may already be stopped)
-		_ = tartDoctorCommand(ctx, home, "stop", vm.Name).Run()
-		if err := tartDoctorCommand(ctx, home, "delete", vm.Name).Run(); err != nil {
-			fmt.Printf("  ✗ Failed to delete VM %s: %s\n", vm.Name, err)
-		} else {
-			removed++
-		}
-	}
+	// Per-VM failures are logged (see removeOrphanTartVMs) rather than
+	// printed, as for containers: the same removal path runs unattended
+	// during startup reconciliation.
+	removed := removeOrphanTartVMs(ctx, runner, orphans, slog.Default())
 	fmt.Printf("  ✓ Removed %d orphaned Tart VM(s)\n", removed)
 	return len(orphans) - removed, nil
-}
-
-func tartDoctorCommand(ctx context.Context, home string, args ...string) *exec.Cmd {
-	c := exec.CommandContext(ctx, "tart", args...)
-	if home != "" {
-		c.Env = append(os.Environ(), "TART_HOME="+home)
-	}
-	return c
 }

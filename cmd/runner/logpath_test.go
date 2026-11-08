@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -178,5 +179,24 @@ func TestStdoutIsDevNull(t *testing.T) {
 	os.Stdout = w
 	if stdoutIsDevNull() {
 		t.Error("a pipe was reported as /dev/null")
+	}
+}
+
+func TestLogFileToReadFallsBackOnlyWhenTheDecidedLogIsMissing(t *testing.T) {
+	d := logFileDecision{Path: "/var/log/custom/runner.log", Fallback: "/var/log/runner/runner.log", Enabled: true}
+	missing := func(gone ...string) func(string) bool {
+		return func(p string) bool { return slices.Contains(gone, p) }
+	}
+	if got, fellBack := logFileToRead(d, missing("/var/log/custom/runner.log")); got != d.Fallback || !fellBack {
+		t.Errorf("decided log missing = %q, %v; want the fallback runner run wrote to", got, fellBack)
+	}
+	if got, fellBack := logFileToRead(d, missing()); got != d.Path || fellBack {
+		t.Errorf("decided log present = %q, %v", got, fellBack)
+	}
+	if got, fellBack := logFileToRead(d, missing(d.Path, d.Fallback)); got != d.Path || fellBack {
+		t.Errorf("both missing = %q, %v; want the decided path named in the error", got, fellBack)
+	}
+	if got, fellBack := logFileToRead(logFileDecision{Path: d.Path, Enabled: true}, missing(d.Path)); got != d.Path || fellBack {
+		t.Errorf("no fallback = %q, %v", got, fellBack)
 	}
 }

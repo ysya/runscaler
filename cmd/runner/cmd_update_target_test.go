@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
+	"github.com/ysya/runscaler/internal/shell"
 	"github.com/ysya/runscaler/internal/versioncheck"
 )
 
@@ -96,7 +97,7 @@ func TestUpdateUsesInstalledBinaryAndItsVersion(t *testing.T) {
 	if string(a) != "old" || string(b) != "new" {
 		t.Fatalf("wrong binary updated: invoking=%s installed=%s", a, b)
 	}
-	for _, want := range []string{"Binary installed", "compatibility has not been validated", shellQuotePath(installed) + " validate --config " + shellQuotePath(configPath), "--scope user"} {
+	for _, want := range []string{"Binary installed", "compatibility has not been validated", shell.Quote(installed) + " validate --config " + shell.Quote(configPath), "--scope user"} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("missing target-aware guidance %q: %s", want, out.String())
 		}
@@ -183,12 +184,12 @@ func TestUpdateBinaryOnlyDoesNotProbeAnotherManagersHealth(t *testing.T) {
 func TestUpdatePermissionHintUsesTheCurrentUpdaterNotTheOlderTarget(t *testing.T) {
 	trusted := func(string) (fileStat, error) { return fileStat{UID: 0, Mode: 0755}, nil }
 	got := updatePermissionHint("/opt/new runner", "/usr/local/bin/old-runner", trusted)
-	if !strings.Contains(got, "sudo '/opt/new runner' update --binary-path '/usr/local/bin/old-runner'") || strings.Contains(got, "sudo '/usr/local/bin/old-runner' update") {
+	if !strings.Contains(got, "sudo '/opt/new runner' update --binary-path /usr/local/bin/old-runner") || strings.Contains(got, "sudo /usr/local/bin/old-runner update") {
 		t.Fatalf("older target used as updater: %s", got)
 	}
 	untrusted := func(string) (fileStat, error) { return fileStat{UID: 1000, Mode: 0755}, nil }
 	got = updatePermissionHint("/home/ci/new-runner", "/usr/local/bin/old-runner", untrusted)
-	if !strings.Contains(got, "root-protected") || strings.Contains(got, "sudo '/home/ci/new-runner'") {
+	if !strings.Contains(got, "root-protected") || strings.Contains(got, "sudo /home/ci/new-runner") {
 		t.Fatalf("unprotected updater recommended for root: %s", got)
 	}
 }

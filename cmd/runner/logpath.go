@@ -1,8 +1,10 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 
@@ -56,6 +58,23 @@ func resolveLogFile(cfg config.Config, id layout.Identity) logFileDecision {
 		}
 	}
 	return logFileDecision{Path: path, Fallback: lay.LogFile, Enabled: true}
+}
+
+// logFileToRead picks the file `runner logs` shows: the decided log, or the
+// fallback runner run writes to when it cannot open that one, if the decided
+// log does not exist and the fallback does.
+func logFileToRead(d logFileDecision, missing func(string) bool) (path string, fellBack bool) {
+	if d.Fallback != "" && d.Fallback != d.Path && missing(d.Path) && !missing(d.Fallback) {
+		return d.Fallback, true
+	}
+	return d.Path, false
+}
+
+// pathMissing reports whether path definitely does not exist; an
+// unreadable parent counts as present so the read surfaces the real error.
+func pathMissing(path string) bool {
+	_, err := os.Lstat(path)
+	return errors.Is(err, fs.ErrNotExist)
 }
 
 // openLogFileFor opens a log for id: root walks from / without following

@@ -4,13 +4,11 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strings"
 )
 
-// darwinSystemPlists are LaunchDaemon definitions older releases installed.
-var darwinSystemPlists = []string{
-	launchdSystemDir + "/" + launchdPlistFile,
-}
+// darwinSystemPlist is the LaunchDaemon definition that releases before the
+// LaunchAgent-only policy could install with --user=false.
+const darwinSystemPlist = launchdSystemDir + "/" + launchdPlistFile
 
 // refuseDarwinRoot stops root from running or installing runner on
 // macOS: Tart keeps images in the invoking user's ~/.tart and Docker Desktop
@@ -20,16 +18,20 @@ func refuseDarwinRoot(goos string, euid int, action string, exists func(string) 
 		return nil
 	}
 	msg := fmt.Sprintf("refusing to %s as root on macOS: run it as the logged-in user and install a LaunchAgent with 'runner service install'", action)
-	var found []string
-	for _, plist := range darwinSystemPlists {
-		if exists(plist) {
-			found = append(found, plist)
-		}
-	}
-	if len(found) > 0 {
-		msg += fmt.Sprintf("\n\n  Found system service definitions: %s\n  Convert them as described in the README section \"macOS LaunchDaemon to LaunchAgent\"", strings.Join(found, ", "))
+	if exists(darwinSystemPlist) {
+		msg += fmt.Sprintf("\n\n  Found system service definition: %s\n  Remove it with 'sudo runner service uninstall --scope system', then install a LaunchAgent as the logged-in user", darwinSystemPlist)
 	}
 	return errors.New(msg)
+}
+
+// refuseDarwinSystemScope stops install, start and restart of a LaunchDaemon:
+// macOS supports only a LaunchAgent for the logged-in user. System scope on
+// macOS exists to show, stop or remove a daemon an older release installed.
+func refuseDarwinSystemScope(goos string, scope serviceScope, action string) error {
+	if goos != "darwin" || scope != scopeSystem {
+		return nil
+	}
+	return fmt.Errorf("refusing to %s with --scope system on macOS: only a LaunchAgent for the logged-in user is supported; system scope can only show, stop or remove an old LaunchDaemon", action)
 }
 
 func pathExists(path string) bool {

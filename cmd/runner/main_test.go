@@ -18,7 +18,7 @@ import (
 )
 
 func TestExplainLockError(t *testing.T) {
-	const fix = "sudo /usr/local/bin/runner service install --user=false --force"
+	const fix = "sudo /usr/local/bin/runner service install --scope system --force"
 	readOnly := explainLockError(fmt.Errorf("open runner lock /tmp/runner.lock: %w", syscall.EROFS), fix)
 	if !errors.Is(readOnly, syscall.EROFS) || !strings.Contains(readOnly.Error(), fix) {
 		t.Errorf("read-only lock error should keep its cause and include the fix:\n%v", readOnly)

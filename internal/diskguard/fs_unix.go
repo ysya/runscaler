@@ -9,8 +9,8 @@ import (
 
 // FSStat is a point-in-time capacity snapshot for one filesystem. ID is
 // stable across every path mounted on that filesystem, so callers group by
-// ID (see GroupByFilesystem) rather than by path — usage is measured and
-// reclaimed per filesystem, not per store.
+// ID (see Guard.statByFilesystem) rather than by path — usage is measured
+// and reclaimed per filesystem, not per store.
 type FSStat struct {
 	ID         string
 	TotalBytes uint64
@@ -42,20 +42,4 @@ func StatFor(path string) (FSStat, error) {
 		// run as root, so Bfree would overstate the space it can use.
 		FreeBytes: uint64(st.Bavail) * bsize,
 	}, nil
-}
-
-// GroupByFilesystem groups paths by the filesystem they resolve to, so a
-// caller can measure and reclaim once per filesystem instead of once per
-// path/store. It returns an error on the first path StatFor fails for; the
-// caller decides whether to drop that path and retry the rest.
-func GroupByFilesystem(paths []string) (map[string][]string, error) {
-	groups := make(map[string][]string)
-	for _, p := range paths {
-		st, err := StatFor(p)
-		if err != nil {
-			return nil, err
-		}
-		groups[st.ID] = append(groups[st.ID], p)
-	}
-	return groups, nil
 }

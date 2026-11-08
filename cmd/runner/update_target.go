@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/ysya/runscaler/internal/shell"
 	"github.com/ysya/runscaler/internal/versioncheck"
 	"golang.org/x/sys/unix"
 )
@@ -59,8 +60,9 @@ func resolveUpdateDestination(c *cobra.Command, invoking string) (string, *insta
 		if target != nil {
 			path = target.BinaryPath
 		}
-		if configPath, _ := c.Flags().GetString("config"); target != nil && configPath != "" && !sameFilePath(absConfigPath(configPath), target.ConfigPath) {
-			return "", nil, errors.New("explicit --config conflicts with the selected installation")
+		configPath, _ := c.Flags().GetString("config")
+		if err := explicitConfigConflict(configPath, target); err != nil {
+			return "", nil, err
 		}
 	}
 	abs, err := filepath.Abs(path)
@@ -100,7 +102,7 @@ func checkUpdateAccess(path, updater string) error {
 func updatePermissionHint(updater, target string, stat statFunc) string {
 	guidance := "\n  Review upgrade requirements first: " + upgradeRequirementsURL + "\n  --binary-path updates only the named binary; validate its configuration before manually restarting any process that uses it."
 	if err := checkRootOnlyChain(updater, stat); err != nil {
-		return fmt.Sprintf("Current updater: %s\n  Selected binary: %s\n  Install the current updater at a root-protected absolute path, then run that updater with sudo and --binary-path %s", updater, target, shellQuotePath(target)) + guidance
+		return fmt.Sprintf("Current updater: %s\n  Selected binary: %s\n  Install the current updater at a root-protected absolute path, then run that updater with sudo and --binary-path %s", updater, target, shell.Word(target)) + guidance
 	}
-	return fmt.Sprintf("Run: sudo %s update --binary-path %s", shellQuotePath(updater), shellQuotePath(target)) + guidance
+	return "Run: " + runnerCommand{sudo: true, binary: updater, args: []string{"update", "--binary-path", target}}.String() + guidance
 }

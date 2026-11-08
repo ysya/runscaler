@@ -19,16 +19,23 @@ import (
 
 type serviceScope string
 
+// systemdUnitObject is runner.service's D-Bus object path.
+const systemdUnitObject = "/org/freedesktop/systemd1/unit/runner_2eservice"
+
 const (
 	scopeAuto   serviceScope = "auto"
 	scopeUser   serviceScope = "user"
 	scopeSystem serviceScope = "system"
 )
 
+func (s serviceScope) String() string { return string(s) }
+
 // Installation scope is independent of the service's execution identity.
 // Environment is private metadata: never print it or copy it into errors.
 type installationTarget struct {
-	Scope               serviceScope
+	Scope serviceScope
+	// DefinitionPath is the unit file or plist the service manager loads.
+	// Uninstall removes it only when it is the file runner writes.
 	DefinitionPath      string
 	BinaryPath          string
 	ConfigPath          string
@@ -47,13 +54,12 @@ type installationCandidate struct {
 	Err    error
 }
 
+// addInstallationFlags registers both spellings of the installation scope
+// on every installation-aware command. --scope is canonical; --user and
+// --user=false remain aliases for --scope user and --scope system.
 func addInstallationFlags(c *cobra.Command) {
-	if c.Flags().Lookup("scope") == nil {
-		c.Flags().String("scope", "auto", "Installation scope: auto, user, or system")
-	}
-	if c.Flags().Lookup("user") == nil {
-		c.Flags().Bool("user", defaultUserService(), "Manage the current user's installation (alias for --scope user)")
-	}
+	c.Flags().String("scope", string(scopeAuto), "Installation scope: auto, user, or system")
+	c.Flags().Bool("user", false, "Alias for --scope user; --user=false means --scope system")
 }
 
 func requestedScope(c *cobra.Command) (serviceScope, error) {
@@ -172,19 +178,9 @@ func commandIdentity(c *cobra.Command) layout.Identity {
 }
 
 func managedConfigPath(c *cobra.Command, explicit string) (string, error) {
-	// A fresh installation probes the prepared identity before its unit
-	// exists. This context permits only a read-only, explicit-config doctor.
-	if c.Name() == "doctor" && os.Getenv("RUNNER_SERVICE_PREPARATION") == "1" {
-		scope, err := requestedScope(c)
-		if err != nil {
-			return "", err
-		}
-		fix, _ := c.Flags().GetBool("fix")
-		if scope != scopeSystem || fix || !filepath.IsAbs(explicit) || os.Getenv("RUNNER_MAINTENANCE_CONTEXT") != "1" || os.Getenv("RUNNER_SERVICE_SCOPE") != "system" {
-			return "", errors.New("service preparation requires read-only doctor with an explicit absolute system config")
-		}
-		return explicit, nil
-	}
+	// Commands without installation flags, such as validate, use exactly the
+	// config they were given; the install probe relies on this to run before
+	// its unit exists.
 	if c.Flags().Lookup("scope") == nil {
 		return explicit, nil
 	}
@@ -201,13 +197,9 @@ func managedConfigPath(c *cobra.Command, explicit string) (string, error) {
 			return "", err
 		}
 	}
-	if explicit != "" && !sameFilePath(absConfigPath(explicit), target.ConfigPath) {
+	if conflict := explicitConfigConflict(explicit, target); conflict != nil {
 		if fix, _ := c.Flags().GetBool("fix"); c.Name() == "doctor" && fix {
-			return "", errors.New("doctor --fix config conflicts with the selected installation")
-		}
-		switch c.Name() {
-		case "update", "install", "start", "stop", "restart", "uninstall":
-			return "", errors.New("explicit --config conflicts with the selected installation")
+			return "", fmt.Errorf("doctor --fix: %w", conflict)
 		}
 		fmt.Fprintf(c.ErrOrStderr(), "Using explicit config %s instead of installed config %s\n", explicit, target.ConfigPath)
 		return explicit, nil
@@ -215,10 +207,25 @@ func managedConfigPath(c *cobra.Command, explicit string) (string, error) {
 	return target.ConfigPath, nil
 }
 
-func serviceCommandInstallation(c *cobra.Command, install bool) (bool, *installationTarget, error) {
+// explicitConfigConflict reports an explicit --config that names a file
+// other than the selected installation's. Read-only commands may go on with
+// the explicit file; commands that change the service or its binary refuse,
+// so no hint or restart ever targets a config the service does not use.
+func explicitConfigConflict(explicit string, target *installationTarget) error {
+	if target == nil || explicit == "" || sameFilePath(absConfigPath(explicit), target.ConfigPath) {
+		return nil
+	}
+	return fmt.Errorf("explicit config %s conflicts with the selected installation's %s", explicit, target.ConfigPath)
+}
+
+// serviceCommandInstallation resolves the scope a service command acts on:
+// the requested scope, narrowed to the one installation that exists, or
+// the platform default for a fresh install. The result is returned, never
+// written back into the flags.
+func serviceCommandInstallation(c *cobra.Command, install bool) (serviceScope, *installationTarget, error) {
 	scope, err := requestedScope(c)
 	if err != nil {
-		return false, nil, err
+		return "", nil, err
 	}
 	candidates := discoverInstallations(commandContext(c))
 	if install {
@@ -226,43 +233,31 @@ func serviceCommandInstallation(c *cobra.Command, install bool) (bool, *installa
 		// explicit override was passed. --force never bypasses conflicts.
 		for _, candidate := range candidates {
 			if candidate.Err != nil {
-				return false, nil, fmt.Errorf("cannot verify %s installation before installing", candidate.Scope)
+				return "", nil, fmt.Errorf("cannot verify %s installation before installing", candidate.Scope)
 			}
 			if candidate.Target != nil && scope != scopeAuto && candidate.Scope != scope {
-				return false, nil, fmt.Errorf("an installation already exists in %s scope; refusing a second installation", candidate.Scope)
+				return "", nil, fmt.Errorf("an installation already exists in %s scope; refusing a second installation", candidate.Scope)
 			}
 		}
 		if _, err := selectInstallation(candidates, scopeAuto); err != nil {
-			return false, nil, err
+			return "", nil, err
 		}
 	}
 	target, err := selectInstallation(candidates, scope)
 	if err != nil {
-		return false, nil, err
+		return "", nil, err
 	}
-	if target != nil {
+	switch {
+	case target != nil:
 		scope = target.Scope
-	} else if scope == scopeAuto {
-		if !install {
-			return false, nil, errServiceNotInstalled
-		}
-		scope = scopeSystem
-		if defaultUserService() {
-			scope = scopeUser
-		}
-	}
-	if !install && target == nil {
-		return false, nil, errServiceNotInstalled
-	}
-	user := scope == scopeUser
-	if f := c.Flags().Lookup("user"); f != nil {
-		_ = f.Value.Set(fmt.Sprint(user))
-	}
-	if target != nil {
 		c.SetContext(context.WithValue(commandContext(c), installationContextKey{}, target))
 		announceInstallation(c, target)
+	case !install:
+		return "", nil, errServiceNotInstalled
+	case scope == scopeAuto:
+		scope = defaultScope()
 	}
-	return user, target, nil
+	return scope, target, nil
 }
 
 func announceInstallation(c *cobra.Command, target *installationTarget) {
@@ -286,25 +281,19 @@ func commandInstallation(c *cobra.Command) (*installationTarget, error) {
 }
 
 func readInstalledTargets(ctx context.Context) []installationCandidate {
-	home, err := os.UserHomeDir()
-	if err != nil {
+	// The user-scope paths live under HOME; without one that scope cannot
+	// be verified.
+	if _, err := os.UserHomeDir(); err != nil {
 		return []installationCandidate{{Scope: scopeUser, Err: err}}
 	}
 	var candidates []installationCandidate
 	for _, scope := range []serviceScope{scopeSystem, scopeUser} {
 		candidate := installationCandidate{Scope: scope}
-		var paths []string
+		// The same paths the service managers write, so every definition
+		// discovery selects is one they can act on.
+		paths := systemdDefinitionPaths(scope)
 		if runtime.GOOS == "darwin" {
-			path := filepath.Join(launchdSystemDir, launchdPlistFile)
-			if scope == scopeUser {
-				path = filepath.Join(home, "Library", "LaunchAgents", launchdPlistFile)
-			}
-			paths = []string{path}
-		} else {
-			paths = []string{filepath.Join(systemdSystemDir, systemdUnitFile), "/usr/lib/systemd/system/runner.service", "/lib/systemd/system/runner.service"}
-			if scope == scopeUser {
-				paths = []string{filepath.Join(home, ".config", "systemd", "user", systemdUnitFile)}
-			}
+			paths = []string{launchdPlistPath(scope)}
 		}
 		for _, path := range paths {
 			if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
@@ -347,12 +336,12 @@ func readSystemdTarget(ctx context.Context, scope serviceScope) (*installationTa
 		Type string   `json:"type"`
 		Data []string `json:"data"`
 	}
-	if json.Unmarshal(loaded, &object) != nil || object.Type != "o" || len(object.Data) != 1 || object.Data[0] != "/org/freedesktop/systemd1/unit/runner_2eservice" {
+	if json.Unmarshal(loaded, &object) != nil || object.Type != "o" || len(object.Data) != 1 || object.Data[0] != systemdUnitObject {
 		return nil, errors.New("unexpected installed service object")
 	}
 	properties := map[string]json.RawMessage{}
 	for _, name := range []string{"ExecStart", "ExecStartEx", "User", "Group", "Environment", "SupplementaryGroups", "WorkingDirectory", "EnvironmentFiles", "ReadWritePaths"} {
-		args := []string{"--system", "--json=short", "get-property", "org.freedesktop.systemd1", "/org/freedesktop/systemd1/unit/runner_2eservice", "org.freedesktop.systemd1.Service", name}
+		args := []string{"--system", "--json=short", "get-property", "org.freedesktop.systemd1", systemdUnitObject, "org.freedesktop.systemd1.Service", name}
 		if scope == scopeUser {
 			args[0] = "--user"
 		}

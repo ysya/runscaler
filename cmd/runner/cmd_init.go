@@ -133,8 +133,8 @@ func runInit(cmd *cobra.Command, args []string) error {
 				return err
 			}
 		}
-		if maxRunners > 2 {
-			return fmt.Errorf("max-runners must be <= 2 for the Tart provider")
+		if maxRunners > config.MaxTartVMsPerHost {
+			return fmt.Errorf("max-runners must be <= %d for the Tart provider", config.MaxTartVMsPerHost)
 		}
 		candidate := config.ScaleSetConfig{
 			RegistrationURL: url,

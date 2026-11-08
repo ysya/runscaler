@@ -11,7 +11,6 @@ import (
 
 	"github.com/actions/scaleset"
 	"github.com/actions/scaleset/listener"
-	"github.com/google/uuid"
 
 	"github.com/ysya/runscaler/internal/capacity"
 	"github.com/ysya/runscaler/internal/config"
@@ -27,7 +26,8 @@ type ScaleSetClient interface {
 	RemoveRunner(ctx context.Context, runnerID int64) error
 }
 
-// DiskChecker is the pre-job-start disk-pressure check startInstance consults
+// DiskChecker is the pre-job-start disk-pressure check startInstanceWithLease
+// consults
 // before generating a JIT config for a new runner. internal/diskguard.Guard
 // satisfies it: NeedsReclaim is a cheap per-filesystem statfs (no volume
 // walking, no Measure), Sweep does the actual reclaim work when needed.
@@ -91,9 +91,9 @@ var _ listener.Scaler = (*ScaleSetController)(nil)
 type Option func(*ScaleSetController)
 
 // WithDiskChecker wires a pre-job-start disk-pressure check into the
-// ScaleSetController: startInstance consults it before starting a new runner and
-// reclaims first if free space is low. Omitting this option (the default)
-// leaves diskChecker nil, so startInstance skips the check entirely.
+// ScaleSetController: startInstanceWithLease consults it before starting a
+// new runner and reclaims first if free space is low. Omitting this option
+// (the default) leaves diskChecker nil, so the check is skipped entirely.
 func WithDiskChecker(c DiskChecker) Option {
 	return func(s *ScaleSetController) {
 		s.diskChecker = c
@@ -196,7 +196,8 @@ func (s *ScaleSetController) HandleJobCompleted(ctx context.Context, jobInfo *sc
 	s.desiredMu.Unlock()
 	if !ready {
 		// The provider has started the runner but has not returned its instance
-		// ID yet. startInstance observes the removing phase and completes cleanup.
+		// ID yet. startInstanceWithLease observes the removing phase and
+		// completes cleanup.
 		return nil
 	}
 	// Provider cleanup belongs to the background reconciler. The scaleset
@@ -402,18 +403,9 @@ func (s *ScaleSetController) acquireCapacity() (*capacity.Lease, error) {
 	return s.capacity.Acquire(ctx)
 }
 
-// startInstance creates and starts a new ephemeral runner.
-func (s *ScaleSetController) startInstance(ctx context.Context) (string, error) {
-	lease, err := s.capacity.Acquire(ctx)
-	if err != nil {
-		return "", err
-	}
-	return s.startInstanceWithLease(ctx, lease)
-}
-
 func (s *ScaleSetController) startInstanceWithLease(ctx context.Context, lease *capacity.Lease) (string, error) {
 	started := time.Now()
-	name := fmt.Sprintf("runner-%s", uuid.NewString()[:8])
+	name := provider.NewRunnerName()
 	if !s.instances.reserve(name, lease) {
 		lease.Release()
 		return "", fmt.Errorf("runner name collision: %s", name)
@@ -523,9 +515,10 @@ func (s *ScaleSetController) startInstanceWithLease(ctx context.Context, lease *
 	return name, nil
 }
 
-// preJobReclaimTimeout bounds the synchronous reclaim startInstance performs
-// when free space is low. This is how long a job start may be delayed, so
-// it is chosen against both edges rather than picked for roundness:
+// preJobReclaimTimeout bounds the synchronous reclaim that
+// startInstanceWithLease performs when free space is low. This is how long a
+// job start may be delayed, so it is chosen against both edges rather than
+// picked for roundness:
 //
 //   - It must comfortably exceed the cheapest, highest-value tier's real
 //     cost, or the reclaim would time out before doing the one thing it is
@@ -681,11 +674,6 @@ func (s *ScaleSetController) Drain(ctx context.Context) error {
 				slog.Duration("waited", time.Since(started)))
 		}
 	}
-}
-
-// IsDraining reports whether this controller has stopped accepting new work.
-func (s *ScaleSetController) IsDraining() bool {
-	return s.draining.Load()
 }
 
 // Shutdown force-removes all managed runners in parallel.

@@ -7,8 +7,6 @@ import (
 	"time"
 
 	dockerclient "github.com/moby/moby/client"
-
-	"github.com/ysya/runscaler/internal/provider"
 )
 
 // dockerInfoTimeout bounds the one-time Info() call the Docker daemon
@@ -21,21 +19,20 @@ import (
 const dockerInfoTimeout = 10 * time.Second
 
 // dockerReclaimTimeout bounds every prune call dockerGarbageStore and
-// dockerBuildCacheStore make to the Docker daemon, mirroring the bound the
-// retired provider.PruneDockerRuntime used to carry
-// (context.WithTimeout(ctx, 10*time.Minute) around its own prune calls) —
-// see volumeHelperTimeout in volume.go for the equivalent bound on the
-// volume-backed stores. Without this, a wedged daemon blocks the sweeper
-// goroutine (or the disk guard's sweep) forever; this is the same class of
-// bug commit 6cc66b0 fixed for the since-removed exit-time cleanup path.
+// dockerBuildCacheStore make to the Docker daemon — see volumeHelperTimeout
+// in volume.go for the equivalent bound on the volume-backed stores.
+// Without it, a wedged daemon would block the sweeper goroutine (or the
+// disk guard's sweep) forever: the same class of bug commit 6cc66b0 fixed
+// for the exit-time cleanup path that has since been removed.
 const dockerReclaimTimeout = 10 * time.Minute
 
-// resolveDockerRootDir resolves the Docker daemon's data-root directory
-// once, bounded by dockerInfoTimeout so a wedged daemon cannot hang store
-// construction. A failed lookup returns "" rather than an error — the disk
+// ResolveDockerRootDir resolves the Docker daemon's data-root directory,
+// bounded by dockerInfoTimeout so a wedged daemon cannot hang startup. The
+// caller resolves it once per socket and passes it to every store on that
+// daemon through its config's RootDir. A failed lookup returns "" rather than an error — the disk
 // guard already treats an unresolvable Path() as "skip this store, warn"
 // (see StatFor errors), so degrading quietly here is consistent with that.
-func resolveDockerRootDir(client provider.DockerAPI) string {
+func ResolveDockerRootDir(client DockerAPI) string {
 	ctx, cancel := context.WithTimeout(context.Background(), dockerInfoTimeout)
 	defer cancel()
 	info, err := client.Info(ctx, dockerclient.InfoOptions{})
@@ -60,29 +57,26 @@ func resolveDockerRootDir(client provider.DockerAPI) string {
 type DockerGarbageConfig struct {
 	Enabled  bool
 	PruneTTL time.Duration
+	// RootDir is the daemon's data root, resolved once per socket by the
+	// caller (ResolveDockerRootDir) and shared by every store on it.
+	RootDir string
 }
 
 type dockerGarbageStore struct {
-	client  provider.DockerAPI
-	cfg     DockerGarbageConfig
-	rootDir string
+	client DockerAPI
+	cfg    DockerGarbageConfig
 }
 
 // NewDockerGarbageStore reclaims stopped containers and dangling images.
 // It is KindGarbage — everything it removes is already unreferenced — and
 // so participates only in Tier1 (see TiersFor).
-//
-// Path() is resolved once here via the daemon's Info() rather than on every
-// call, since the disk guard's cheap pre-job path calls Path() on every
-// store (to group them by filesystem) and must stay statfs-cheap — it must
-// not pay a daemon round trip per store on every check.
-func NewDockerGarbageStore(client provider.DockerAPI, cfg DockerGarbageConfig) CacheStore {
-	return serialize(&dockerGarbageStore{client: client, cfg: cfg, rootDir: resolveDockerRootDir(client)})
+func NewDockerGarbageStore(client DockerAPI, cfg DockerGarbageConfig) CacheStore {
+	return serialize(&dockerGarbageStore{client: client, cfg: cfg})
 }
 
 func (s *dockerGarbageStore) Name() string    { return "docker-garbage" }
 func (s *dockerGarbageStore) Kind() StoreKind { return KindGarbage }
-func (s *dockerGarbageStore) Path() string    { return s.rootDir }
+func (s *dockerGarbageStore) Path() string    { return s.cfg.RootDir }
 func (s *dockerGarbageStore) Enabled() bool   { return s.cfg.Enabled }
 
 // Measure reports the daemon's current image total. TotalSize is a signed
@@ -101,12 +95,12 @@ func (s *dockerGarbageStore) Measure(ctx context.Context) (uint64, error) {
 
 // Reclaim prunes stopped containers and dangling images older than
 // PruneTTL at Tier1; every other tier is a no-op. Enabled() is deliberately
-// NOT checked here (revised 2026-08-14 — see store.go's Enabled doc
-// comment): a disabled store still means the operator left the *periodic*
-// prune sweep off, not "never touch this" — cmd/runner's sweeper is what
-// consults Enabled() to decide whether to run at all, so by the time this
-// method is reached from that path Enabled() is already known true; the
-// disk guard reaches this method regardless, on purpose.
+// NOT checked here (see store.go's Enabled doc comment): a disabled store
+// means the operator left the *periodic* prune sweep off, not "never touch
+// this" — cmd/runner's sweeper is what consults Enabled() to decide whether
+// to run at all, so by the time this method is reached from that path
+// Enabled() is already known true; the disk guard reaches this method
+// regardless, on purpose.
 func (s *dockerGarbageStore) Reclaim(ctx context.Context, tier Tier) (uint64, error) {
 	if tier != Tier1 {
 		return 0, nil
@@ -121,11 +115,11 @@ func (s *dockerGarbageStore) Reclaim(ctx context.Context, tier Tier) (uint64, er
 	var freed uint64
 	var errs []error
 
-	// Mirrors PruneDockerRuntime's filter construction exactly — `until`
-	// parses as a Go duration string on the daemon side (see
-	// getUntilFromPruneFilters in moby's daemon/prune.go), verified against
-	// moby v28.5.2 — and continues past a container-prune failure to still
-	// attempt the image prune, matching that function's resilience.
+	// `until` parses as a Go duration string on the daemon side (see
+	// getUntilFromPruneFilters in moby's daemon/prune.go; verified against
+	// moby v28.5.2). Both prune calls run even if the first fails — a
+	// container-prune error must not skip the image prune — and the errors
+	// are joined below.
 	untilFilter := make(dockerclient.Filters).Add("until", s.cfg.PruneTTL.String())
 	if r, err := s.client.ContainerPrune(timeoutCtx, dockerclient.ContainerPruneOptions{Filters: untilFilter}); err != nil {
 		errs = append(errs, fmt.Errorf("prune stopped containers: %w", err))
@@ -154,25 +148,26 @@ type DockerBuildCacheConfig struct {
 	Enabled  bool
 	MaxAge   time.Duration
 	BudgetGB int
+	// RootDir is the daemon's data root; see DockerGarbageConfig.RootDir.
+	RootDir string
 }
 
 type dockerBuildCacheStore struct {
-	client  provider.DockerAPI
-	cfg     DockerBuildCacheConfig
-	rootDir string
+	client DockerAPI
+	cfg    DockerBuildCacheConfig
 }
 
 // NewDockerBuildCacheStore reclaims BuildKit's build cache. It is
 // KindCache — removing it only costs time on the next build — and
 // participates in Tier2 (age/budget trim) and Tier4 (unconditional wipe,
 // the guard's emergency tier; see TiersFor).
-func NewDockerBuildCacheStore(client provider.DockerAPI, cfg DockerBuildCacheConfig) CacheStore {
-	return serialize(&dockerBuildCacheStore{client: client, cfg: cfg, rootDir: resolveDockerRootDir(client)})
+func NewDockerBuildCacheStore(client DockerAPI, cfg DockerBuildCacheConfig) CacheStore {
+	return serialize(&dockerBuildCacheStore{client: client, cfg: cfg})
 }
 
 func (s *dockerBuildCacheStore) Name() string    { return "docker-build-cache" }
 func (s *dockerBuildCacheStore) Kind() StoreKind { return KindCache }
-func (s *dockerBuildCacheStore) Path() string    { return s.rootDir }
+func (s *dockerBuildCacheStore) Path() string    { return s.cfg.RootDir }
 func (s *dockerBuildCacheStore) Enabled() bool   { return s.cfg.Enabled }
 
 // Measure reports the daemon's current build-cache total (see
@@ -191,8 +186,8 @@ func (s *dockerBuildCacheStore) Measure(ctx context.Context) (uint64, error) {
 // Reclaim trims build cache by age and/or budget at Tier2, and performs an
 // unconditional full wipe at Tier4; every other tier is a no-op. Enabled()
 // is deliberately NOT checked here — see dockerGarbageStore.Reclaim's
-// identical note and store.go's Enabled doc comment (revised 2026-08-14):
-// the disk guard reaches this method regardless of Enabled(), by design.
+// identical note and store.go's Enabled doc comment: the disk guard reaches
+// this method regardless of Enabled(), by design.
 func (s *dockerBuildCacheStore) Reclaim(ctx context.Context, tier Tier) (uint64, error) {
 	timeoutCtx, cancel := context.WithTimeout(ctx, dockerReclaimTimeout)
 	defer cancel()
@@ -206,10 +201,10 @@ func (s *dockerBuildCacheStore) Reclaim(ctx context.Context, tier Tier) (uint64,
 	}
 }
 
-// reclaimByAgeAndBudget matches PruneDockerRuntime's two-call shape
-// exactly: age and budget are separate BuildCachePrune calls (a Filters
-// value and MaxUsedSpace are never combined into one call there), and a
-// failure in one does not skip the other.
+// reclaimByAgeAndBudget issues age and budget as two separate
+// BuildCachePrune calls — a Filters value and MaxUsedSpace are never
+// combined into one call — and a failure in one does not skip the other;
+// the errors are joined.
 func (s *dockerBuildCacheStore) reclaimByAgeAndBudget(ctx context.Context) (uint64, error) {
 	if s.cfg.MaxAge <= 0 && s.cfg.BudgetGB <= 0 {
 		return 0, nil

@@ -58,7 +58,35 @@ func TestReleaseBuildsOnlyTheCurrentBinary(t *testing.T) {
 }
 
 func TestDoctorDoesNotInspectRetiredVolumes(t *testing.T) {
-	if !slices.Equal(sharedVolumeNames, []string{"runner-shared"}) {
-		t.Fatalf("doctor still inspects retired volumes: %q", sharedVolumeNames)
+	got := doctorSharedVolumes(map[string]bool{"/var/run/docker.sock": true}, nil)
+	if !slices.Equal(got["/var/run/docker.sock"], []string{"runner-shared"}) {
+		t.Fatalf("doctor inspects %q, want only the current default volume", got)
+	}
+}
+
+func TestDoctorHasNoPreLockHealthProbe(t *testing.T) {
+	for _, name := range []string{"health-port", "health-address"} {
+		if doctorCmd.Flags().Lookup(name) != nil {
+			t.Errorf("doctor still registers --%s for the retired health probe", name)
+		}
+	}
+}
+
+func TestMakefileBuildsWithoutCgo(t *testing.T) {
+	data, err := os.ReadFile("../../Makefile")
+	if err != nil {
+		t.Fatal(err)
+	}
+	builds := 0
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.Contains(line, "go build") {
+			builds++
+			if !strings.Contains(line, "CGO_ENABLED=0") {
+				t.Errorf("Makefile build without CGO_ENABLED=0: %s", strings.TrimSpace(line))
+			}
+		}
+	}
+	if builds == 0 {
+		t.Fatal("no go build lines found in the Makefile")
 	}
 }

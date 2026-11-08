@@ -214,19 +214,22 @@ var prepareSystemInstallation = func(opts *installOpts) error {
 			return fmt.Errorf("environment file is not protected: %w", err)
 		}
 	}
-	var files = []string{opts.configPath}
-	for _, ss := range cfg.ResolveScaleSets() {
-		// Validation is offline. Unresolved env credentials are checked later
-		// by the transient probe, never imported from the installing shell.
-		if ss.Token == "" && ss.GitHubApp == nil {
-			ss.Token = "service-environment-preflight"
-		}
-		if err := ss.Validate(); err != nil {
-			return err
-		}
-		if ss.IsTart() {
+	sets := cfg.ResolveScaleSets()
+	for i := range sets {
+		if sets[i].IsTart() {
 			return errors.New("tart system installation is unsupported; use macOS user mode")
 		}
+		// Validation is offline. Unresolved env credentials are checked later
+		// by the transient probe, never imported from the installing shell.
+		if sets[i].Token == "" && sets[i].GitHubApp == nil {
+			sets[i].Token = "service-environment-preflight"
+		}
+	}
+	if err := checkScaleSets(cfg, sets); err != nil {
+		return err
+	}
+	var files = []string{opts.configPath}
+	for _, ss := range sets {
 		if ss.GitHubApp != nil && ss.GitHubApp.PrivateKeyFile != "" {
 			if err := checkRootOnlyChain(ss.GitHubApp.PrivateKeyFile, lstatFile); err != nil {
 				return fmt.Errorf("app key must be a protected system file: %w", err)

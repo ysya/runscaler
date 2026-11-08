@@ -157,7 +157,7 @@ func socketSupplementaryGroup(account serviceAccount, owner, gid uint32, mode os
 		return "", errors.New("service account cannot read/write its Docker socket")
 	}
 	if owner != 0 {
-		return "", errors.New("docker socket belongs to another user; use that user's --user installation or prepare a daemon for the service account")
+		return "", errors.New("docker socket belongs to another user; use that user's --scope user installation or prepare a daemon for the service account")
 	}
 	if gid == 0 {
 		return "", errors.New("refusing to grant the root group for Docker access")

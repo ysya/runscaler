@@ -2,8 +2,6 @@
 .env
 config.toml
 
-# Generated
-compose.yaml
 # GitHub Actions runner install dir (repo root only — must not match cmd/runner/)
 /runner/
 

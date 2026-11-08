@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/ysya/runscaler/internal/health"
+	"github.com/ysya/runscaler/internal/shell"
 	"github.com/ysya/runscaler/internal/versioncheck"
 )
 
@@ -102,7 +103,7 @@ func runUpdate(cmd *cobra.Command, _ []string) error {
 		fmt.Fprintln(cmd.OutOrStdout(), updateRestartNotice(release.TagName, "", nil))
 		return nil
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "Before restarting, validate the configuration with the new binary in the service's runtime environment (credentials, provider access and groups):\n  %s validate --config %s\n", shellQuotePath(execPath), shellQuotePath(target.ConfigPath))
+	fmt.Fprintf(cmd.OutOrStdout(), "Before restarting, validate the configuration with the new binary in the service's runtime environment (credentials, provider access and groups):\n  %s validate --config %s\n", shell.Quote(execPath), shell.Quote(target.ConfigPath))
 
 	// A replaced binary does not change an already-running process. Query the
 	// same local health endpoint as `runner status` and make that mismatch
@@ -138,13 +139,10 @@ func updateRestartNotice(installed, running string, target *installationTarget) 
 	if normalizeVersion(installed) == normalizeVersion(running) {
 		return ""
 	}
-	command := shellQuotePath(target.BinaryPath) + " service restart --scope " + string(target.Scope)
+	command := serviceCommand(target.BinaryPath, target.Scope, "restart")
 	prefix := fmt.Sprintf("The selected service still reports %s while the installed binary is %s. After preparing and validating the upgrade, restart it with:", running, installed)
 	if running == "" {
 		prefix = "The running service version could not be verified (health is disabled or unavailable). If the selected service is running, restart it only after preparing and validating the upgrade:"
-	}
-	if target.Scope == scopeSystem {
-		prefix += "\nUse an administrative shell for this system service."
 	}
 	return prefix + "\n  " + command + "\nReview drain-timeout and the service stop timeout first; jobs may be terminated if drain is disabled or a deadline expires."
 }

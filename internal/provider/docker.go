@@ -17,30 +17,22 @@ import (
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
 	"github.com/ysya/runscaler/internal/config"
+	"github.com/ysya/runscaler/internal/shell"
 )
 
-// DockerAPI abstracts the Docker client methods used by DockerProvider,
-// enabling dependency injection and testing.
+// DockerAPI is the slice of the Docker client DockerProvider itself uses to
+// run, watch and diagnose runner containers. internal/cachestore declares
+// its own interface for the daemon-maintenance calls it needs.
 type DockerAPI interface {
 	ContainerCreate(ctx context.Context, options dockerclient.ContainerCreateOptions) (dockerclient.ContainerCreateResult, error)
 	ContainerStart(ctx context.Context, containerID string, options dockerclient.ContainerStartOptions) (dockerclient.ContainerStartResult, error)
 	ContainerRemove(ctx context.Context, containerID string, options dockerclient.ContainerRemoveOptions) (dockerclient.ContainerRemoveResult, error)
 	ContainerWait(ctx context.Context, containerID string, options dockerclient.ContainerWaitOptions) dockerclient.ContainerWaitResult
-	ContainerPrune(ctx context.Context, options dockerclient.ContainerPruneOptions) (dockerclient.ContainerPruneResult, error)
-	ImagePrune(ctx context.Context, options dockerclient.ImagePruneOptions) (dockerclient.ImagePruneResult, error)
-	BuildCachePrune(ctx context.Context, options dockerclient.BuildCachePruneOptions) (dockerclient.BuildCachePruneResult, error)
-	VolumeRemove(ctx context.Context, volumeID string, options dockerclient.VolumeRemoveOptions) (dockerclient.VolumeRemoveResult, error)
-	ContainerList(ctx context.Context, options dockerclient.ContainerListOptions) (dockerclient.ContainerListResult, error)
-	VolumeList(ctx context.Context, options dockerclient.VolumeListOptions) (dockerclient.VolumeListResult, error)
-	// ContainerLogs backs internal/cachestore's volume-backed stores: it
-	// reads a finished helper container's stdout so Measure can parse
-	// `du -sb` output and Reclaim can report bytes freed.
+	// ContainerLogs feeds readiness detection and failure diagnostics.
 	ContainerLogs(ctx context.Context, containerID string, options dockerclient.ContainerLogsOptions) (dockerclient.ContainerLogsResult, error)
-	// Info and DiskUsage back internal/cachestore's Docker daemon store:
-	// Info resolves the daemon's data-root directory (for Path()), and
-	// DiskUsage reports image and build-cache size totals (for Measure()).
-	Info(ctx context.Context, options dockerclient.InfoOptions) (dockerclient.SystemInfoResult, error)
-	DiskUsage(ctx context.Context, options dockerclient.DiskUsageOptions) (dockerclient.DiskUsageResult, error)
+	// ContainerInspect reports whether a runner is still running and how it
+	// exited.
+	ContainerInspect(ctx context.Context, containerID string, options dockerclient.ContainerInspectOptions) (dockerclient.ContainerInspectResult, error)
 }
 
 // DockerProvider runs GitHub Actions runners as Docker containers.
@@ -81,7 +73,7 @@ func NewDockerProvider(ss config.ScaleSetConfig, client DockerAPI, logger *slog.
 		logger:           logger,
 		readiness:        ss.IsDockerReadinessEnabled(),
 		readyTimeout:     ss.DockerReadyTimeout(),
-		readySettle:      5 * time.Second,
+		readySettle:      defaultReadySettle,
 		readyPoll:        500 * time.Millisecond,
 	}
 	// Validate() already surfaced parse errors before startup; on error no
@@ -161,7 +153,7 @@ func (p *DockerProvider) StartInstance(ctx context.Context, name string, jitConf
 			User:   "runner",
 			Cmd:    runnerCmd(volumeTargets),
 			Env:    p.buildContainerEnv(jitConfig),
-			Labels: map[string]string{"managed-by": "runner"},
+			Labels: map[string]string{ManagedByLabel: ManagedByValue},
 		},
 		HostConfig: hostConfig,
 		Platform:   p.platform,
@@ -241,14 +233,10 @@ func runnerCmd(volumeTargets []string) []string {
 	var sb strings.Builder
 	sb.WriteString(`fix_own() { [ "$(stat -c %u "$1")" = "1001" ] || sudo chown -R 1001:123 "$1"; };`)
 	for _, target := range volumeTargets {
-		fmt.Fprintf(&sb, " fix_own %s;", shellQuote(target))
+		fmt.Fprintf(&sb, " fix_own %s;", shell.Quote(target))
 	}
 	sb.WriteString(" exec /home/runner/run.sh")
 	return []string{"sh", "-c", sb.String()}
-}
-
-func shellQuote(value string) string {
-	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }
 
 // buildContainerEnv returns the environment variables for a runner container.
@@ -260,101 +248,6 @@ func (p *DockerProvider) buildContainerEnv(jitConfig string) []string {
 		env = append(env, fmt.Sprintf("SHARED_DIR=%s", p.sharedVolume))
 	}
 	return env
-}
-
-// buildxBuilderPrefix is the name prefix Docker gives to BuildKit builder
-// containers and their state volumes (e.g. buildx_buildkit_builder-<uuid>0).
-const buildxBuilderPrefix = "buildx_buildkit_"
-
-// buildxContainerName returns the unprefixed name of a buildx BuildKit builder
-// container, or "" if the container is not one.
-func buildxContainerName(c container.Summary) string {
-	for _, n := range c.Names {
-		n = strings.TrimPrefix(n, "/")
-		if strings.HasPrefix(n, buildxBuilderPrefix) {
-			return n
-		}
-	}
-	return ""
-}
-
-// CleanupOrphanedBuildxBuilders removes buildx BuildKit builder containers
-// (named buildx_buildkit_*) older than maxAge, along with their named `_state`
-// volumes. Such builders are created by `docker buildx create` (e.g. via
-// docker/setup-buildx-action); on a persistent host sharing one Docker daemon
-// they accumulate when per-job cleanup never runs, each leaving behind a
-// multi-GB state volume. maxAge is kept well above any realistic build so a
-// sweep never disrupts an in-progress build. A no-op when maxAge <= 0.
-func CleanupOrphanedBuildxBuilders(ctx context.Context, client DockerAPI, maxAge time.Duration, logger *slog.Logger) error {
-	if maxAge <= 0 {
-		return nil
-	}
-
-	containerResult, err := client.ContainerList(ctx, dockerclient.ContainerListOptions{All: true})
-	if err != nil {
-		return fmt.Errorf("list containers: %w", err)
-	}
-
-	cutoff := time.Now().Add(-maxAge)
-	var removedContainers, removedVolumes int
-
-	for _, c := range containerResult.Items {
-		name := buildxContainerName(c)
-		if name == "" {
-			continue
-		}
-		// Created is unix seconds; skip young builders that may back an
-		// in-progress build.
-		if time.Unix(c.Created, 0).After(cutoff) {
-			continue
-		}
-
-		if _, err := client.ContainerRemove(ctx, c.ID, dockerclient.ContainerRemoveOptions{Force: true}); err != nil {
-			logger.Warn("Failed to remove orphaned buildx builder",
-				slog.String("container", name), slog.Any("error", err))
-			continue
-		}
-		removedContainers++
-
-		// `docker rm` leaves named volumes intact; the builder's state lives in
-		// "<container-name>_state", so remove it explicitly.
-		stateVol := name + "_state"
-		if _, err := client.VolumeRemove(ctx, stateVol, dockerclient.VolumeRemoveOptions{Force: true}); err != nil {
-			logger.Debug("Failed to remove buildx state volume",
-				slog.String("volume", stateVol), slog.Any("error", err))
-		} else {
-			removedVolumes++
-		}
-	}
-
-	// Also reap dangling buildx state volumes whose containers were already
-	// gone (e.g. from a partial manual cleanup). Dangling means unreferenced,
-	// so removal is safe regardless of age.
-	danglingFilter := make(dockerclient.Filters).Add("dangling", "true")
-	if volList, err := client.VolumeList(ctx, dockerclient.VolumeListOptions{Filters: danglingFilter}); err != nil {
-		logger.Debug("Failed to list volumes for buildx cleanup", slog.Any("error", err))
-	} else {
-		for _, v := range volList.Items {
-			if !strings.HasPrefix(v.Name, buildxBuilderPrefix) {
-				continue
-			}
-			if _, err := client.VolumeRemove(ctx, v.Name, dockerclient.VolumeRemoveOptions{Force: true}); err != nil {
-				logger.Debug("Failed to remove dangling buildx volume",
-					slog.String("volume", v.Name), slog.Any("error", err))
-			} else {
-				removedVolumes++
-			}
-		}
-	}
-
-	if removedContainers > 0 || removedVolumes > 0 {
-		logger.Info("Removed orphaned buildx builders",
-			slog.Int("containers", removedContainers),
-			slog.Int("volumes", removedVolumes),
-			slog.Duration("max_age", maxAge),
-		)
-	}
-	return nil
 }
 
 // containerResources builds the resource constraints for a runner container.
@@ -386,18 +279,4 @@ func socketGroupID(path string) (int, error) {
 		return 0, fmt.Errorf("unsupported platform")
 	}
 	return int(stat.Gid), nil
-}
-
-// FormatBytes formats a byte count into a human-readable string.
-func FormatBytes(b uint64) string {
-	const unit = 1024
-	if b < unit {
-		return fmt.Sprintf("%d B", b)
-	}
-	div, exp := uint64(unit), 0
-	for n := b / unit; n >= unit; n /= unit {
-		div *= unit
-		exp++
-	}
-	return fmt.Sprintf("%.1f %ciB", float64(b)/float64(div), "KMGTPE"[exp])
 }

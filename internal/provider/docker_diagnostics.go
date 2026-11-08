@@ -18,11 +18,7 @@ func (p *DockerProvider) EnableDiagnosticLogs(enabled bool) { p.captureLogs = en
 
 func (p *DockerProvider) CollectDiagnostics(ctx context.Context, id string) (ExitDiagnostics, error) {
 	var d ExitDiagnostics
-	inspector, ok := p.dockerClient.(dockerInspector)
-	if !ok {
-		return d, ErrReadinessUnavailable
-	}
-	result, err := inspector.ContainerInspect(ctx, id, dockerclient.ContainerInspectOptions{})
+	result, err := p.dockerClient.ContainerInspect(ctx, id, dockerclient.ContainerInspectOptions{})
 	if err != nil {
 		return d, err
 	}

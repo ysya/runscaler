@@ -103,7 +103,7 @@ func TestFetchRunningVersion_FailuresAreQuiet(t *testing.T) {
 func TestUpdateFailureSuggestsSudoOnPermissionErrors(t *testing.T) {
 	denied := fmt.Errorf("failed to create temp file in /usr/local/bin: %w",
 		&fs.PathError{Op: "open", Path: "/usr/local/bin/.runner-update-1", Err: syscall.EACCES})
-	if err := updateFailure(denied, "/usr/local/bin/runner", "/opt/new-runner"); !strings.Contains(err.Error(), "/opt/new-runner") || !strings.Contains(err.Error(), "--binary-path '/usr/local/bin/runner'") || !errors.Is(err, fs.ErrPermission) {
+	if err := updateFailure(denied, "/usr/local/bin/runner", "/opt/new-runner"); !strings.Contains(err.Error(), "/opt/new-runner") || !strings.Contains(err.Error(), "--binary-path /usr/local/bin/runner") || !errors.Is(err, fs.ErrPermission) {
 		t.Errorf("permission failure = %v", err)
 	}
 	if err := updateFailure(errors.New("checksum mismatch"), "/usr/local/bin/runner", "/opt/new-runner"); strings.Contains(err.Error(), "sudo") {

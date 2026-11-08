@@ -42,6 +42,11 @@ func parseLaunchdTarget(scope serviceScope, data []byte) (*installationTarget, e
 			if user, ok := props["UserName"].(string); ok {
 				target.RuntimeUser = user
 			}
+			// launchd runs a daemon without UserName as root, the same default
+			// the systemd reader applies to a unit without User=.
+			if target.RuntimeUser == "" && scope == scopeSystem {
+				target.RuntimeUser = "root"
+			}
 			if group, ok := props["GroupName"].(string); ok {
 				target.RuntimeGroup = group
 			}

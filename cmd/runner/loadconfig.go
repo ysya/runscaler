@@ -13,7 +13,7 @@ import (
 // loadConfig reads the configuration from the config file (if any) and
 // builds a Config from all sources (flag > config file > default) via
 // config.Load, which also collects non-fatal diagnostics into cfg.Warnings.
-// Both the root command and validate subcommand use this helper.
+// Every command that reads the config goes through this helper.
 func loadConfig(cmd *cobra.Command) (config.Config, error) {
 	explicit, _ := cmd.Flags().GetString("config")
 	configPath, err := managedConfigPath(cmd, explicit)

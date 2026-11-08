@@ -3,7 +3,6 @@ package main
 import (
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -33,7 +32,6 @@ func TestUserConfigOperations(t *testing.T) {
 			t.Cleanup(viper.Reset)
 			c := &cobra.Command{}
 			c.PersistentFlags().String("config", "", "")
-			c.Flags().Bool("user", true, "")
 			c.Flags().String("config-path", "", "")
 			cfg, err := loadConfig(c)
 			if err != nil {
@@ -42,7 +40,7 @@ func TestUserConfigOperations(t *testing.T) {
 			if cfg.ResolveScaleSets()[0].ScaleSetName != "user-config" {
 				t.Errorf("user config was not loaded: %s", viper.ConfigFileUsed())
 			}
-			got, err := resolveConfigPath(c)
+			got, err := resolveConfigPath(c, scopeUser)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -50,18 +48,6 @@ func TestUserConfigOperations(t *testing.T) {
 				t.Errorf("service config = %q, want %q", got, path)
 			}
 		})
-	}
-}
-
-func TestPlatformServiceScopeDefaults(t *testing.T) {
-	for _, c := range []*cobra.Command{serviceInstallCmd, serviceUninstallCmd, serviceStartCmd, serviceStopCmd, serviceRestartCmd, serviceStatusCmd, serviceLogsCmd} {
-		user, err := c.Flags().GetBool("user")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if user != (runtime.GOOS == "darwin") {
-			t.Errorf("%s user default = %v", c.Name(), user)
-		}
 	}
 }
 
@@ -75,7 +61,6 @@ func TestServiceConfigPrecedence(t *testing.T) {
 	c := &cobra.Command{}
 	c.PersistentFlags().String("config", "", "")
 	c.Flags().String("config-path", "", "")
-	c.Flags().Bool("user", true, "")
 	for _, tc := range []struct{ flag, value, want string }{
 		{"", "", "config.toml"},
 		{"config", "custom.toml", "custom.toml"},
@@ -90,7 +75,7 @@ func TestServiceConfigPrecedence(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		got, err := resolveConfigPath(c)
+		got, err := resolveConfigPath(c, scopeUser)
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -90,15 +90,17 @@ const (
 	DefaultBuildxCleanupInterval = 6 * time.Hour
 
 	// DefaultDiskGuard enables the disk guard by default. Safe to leave on
-	// because it only ever acts under real disk pressure (a filesystem below
-	// min-free) — it is not a routine sweeper running on a timer regardless
-	// of need. It deliberately does NOT respect a store's own Enabled()
-	// (revised 2026-08-14: see docs/superpowers/specs/
-	// 2026-08-13-cache-architecture-design.md, "各 store 的啟用開關只約束例行清理" —
-	// prune/buildx-cleanup default off and max-tier defaults to 3, so a
-	// guard that honored Enabled() would ship unable to reclaim anything). A
-	// host whose disk runner does not own opts out with `[disk] guard =
-	// false`, not by disabling individual stores.
+	// because its tier ladder only acts under real disk pressure (a
+	// filesystem below min-free) and its budget pass only touches stores the
+	// operator gave an explicit budget — it is not a routine sweeper running
+	// on a timer regardless of need. It deliberately does NOT respect a
+	// store's own Enabled()
+	// (see docs/superpowers/specs/2026-08-13-cache-architecture-design.md,
+	// "各 store 的啟用開關只約束例行清理" — prune/buildx-cleanup default off and
+	// max-tier defaults to 3, so a guard that honored Enabled() would ship
+	// unable to reclaim anything). A host whose disk runner does not own
+	// opts out with `[disk] guard = false`, not by disabling individual
+	// stores.
 	DefaultDiskGuard = true
 	// DefaultDiskMinFree is the free-space level that triggers reclamation.
 	DefaultDiskMinFree = "10%"
@@ -109,4 +111,21 @@ const (
 	// DefaultDiskMaxTier stops short of wiping cache volumes — that makes
 	// the next build cold, so it requires an explicit opt-in.
 	DefaultDiskMaxTier = 3
+
+	// Startup retries: the first failed start waits 2.5–5s, doubling up to
+	// DefaultRetryMax, and the fifth consecutive failure enters a
+	// five-minute cooldown. See RetryConfig.
+	DefaultRetryInitial       = 5 * time.Second
+	DefaultRetryMax           = time.Minute
+	DefaultRetryCooldownAfter = 5
+	DefaultRetryCooldown      = 5 * time.Minute
+
+	// DefaultReadyTimeout bounds how long a new runner may take to report
+	// "Listening for Jobs" before its start counts as failed.
+	DefaultReadyTimeout = 5 * time.Minute
 )
+
+// MaxTartVMsPerHost is Apple's limit on concurrently running macOS VMs per
+// host. It is a hard limit, not a default: Tart validation, the warm pool
+// and the host-wide VM slots all enforce it.
+const MaxTartVMsPerHost = 2

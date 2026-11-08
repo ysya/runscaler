@@ -1,74 +1,52 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
-	"fmt"
 	"log/slog"
-	"os"
-	"os/exec"
-	"regexp"
 	"sort"
-	"strings"
 
 	dockerclient "github.com/moby/moby/client"
 
 	"github.com/ysya/runscaler/internal/provider"
 )
 
-var poolNamePattern = regexp.MustCompile(`^pool-[0-9]+-[0-9]+$`)
-
-// keepVMNamePattern matches the throwaway clone a cache prune makes to mark a
-// runner image as used (provider.markTartImagesUsed); one survives only if
-// runner died between cloning and deleting it.
-var keepVMNamePattern = regexp.MustCompile(`^runner-keep-[0-9a-f]{8}$`)
-
-// findOrphanTartVMs lists local VMs created by runner. OCI entries and local
-// base images are deliberately excluded: only the exact ephemeral runner and
-// warm-pool naming schemes are safe to claim.
+// findOrphanTartVMs lists the local VMs runner created, by the ownership
+// rules in provider.OwnsTartVM: OCI entries and local base images are never
+// claimed, only the exact ephemeral-runner, warm-pool and prune-marker
+// naming schemes.
 //
 // SAFETY: every VM this returns is assumed to belong to a previous run of
 // this process. That holds only because internal/lock guarantees a single
 // runner per host. If that guarantee is ever relaxed, this function and its
 // callers must be revisited.
-func findOrphanTartVMs(ctx context.Context, runner provider.CommandRunner) ([]string, error) {
-	out, err := runner.Run(ctx, "tart", "list", "--format", "json")
+func findOrphanTartVMs(ctx context.Context, runner provider.CommandRunner) ([]provider.TartVM, error) {
+	vms, err := provider.ListTartVMs(ctx, runner)
 	if err != nil {
 		return nil, err
 	}
-
-	var vms []tartListEntry
-	if err := json.Unmarshal(out, &vms); err != nil {
-		return nil, fmt.Errorf("parse tart VM list: %w", err)
-	}
-
-	var orphans []string
+	var orphans []provider.TartVM
 	for _, vm := range vms {
-		if vm.Source != "local" {
-			continue
-		}
-		if runnerNamePattern.MatchString(vm.Name) || poolNamePattern.MatchString(vm.Name) || keepVMNamePattern.MatchString(vm.Name) {
-			orphans = append(orphans, vm.Name)
+		if provider.OwnsTartVM(vm) {
+			orphans = append(orphans, vm)
 		}
 	}
-	sort.Strings(orphans)
+	sort.Slice(orphans, func(i, j int) bool { return orphans[i].Name < orphans[j].Name })
 	return orphans, nil
 }
 
 // removeOrphanTartVMs stops and deletes each orphan. Stop errors are expected
 // for VMs that are already stopped; delete failures are logged and do not
 // prevent the remaining VMs from being reconciled.
-func removeOrphanTartVMs(ctx context.Context, runner provider.CommandRunner, orphans []string, logger *slog.Logger) (removed int) {
-	for _, name := range orphans {
-		if _, err := runner.Run(ctx, "tart", "stop", name); err != nil {
+func removeOrphanTartVMs(ctx context.Context, runner provider.CommandRunner, orphans []provider.TartVM, logger *slog.Logger) (removed int) {
+	for _, vm := range orphans {
+		if _, err := runner.Run(ctx, "tart", "stop", vm.Name); err != nil {
 			logger.Debug("Could not stop orphaned Tart VM; it may already be stopped",
-				slog.String("vm", name),
+				slog.String("vm", vm.Name),
 				slog.Any("error", err))
 		}
-		if _, err := runner.Run(ctx, "tart", "delete", name); err != nil {
+		if _, err := runner.Run(ctx, "tart", "delete", vm.Name); err != nil {
 			logger.Warn("Failed to delete orphaned Tart VM",
-				slog.String("vm", name),
+				slog.String("vm", vm.Name),
 				slog.Any("error", err))
 			continue
 		}
@@ -116,9 +94,8 @@ func reconcileOrphans(ctx context.Context, dockerClients map[string]*dockerclien
 			slog.Any("containers", names))
 	}
 
-	homes := uniqueSortedStrings(tartHomes)
-	for _, home := range homes {
-		runner := tartOrphanCommandRunner{home: home}
+	for _, home := range uniqueSortedStrings(tartHomes) {
+		runner := provider.TartCommandRunner(home)
 		orphans, err := findOrphanTartVMs(ctx, runner)
 		if err != nil {
 			logger.Warn("Failed to list orphaned Tart VMs; continuing startup",
@@ -130,12 +107,16 @@ func reconcileOrphans(ctx context.Context, dockerClients map[string]*dockerclien
 			logger.Debug("No orphaned Tart VMs found", slog.String("tartHome", home))
 			continue
 		}
+		names := make([]string, 0, len(orphans))
+		for _, vm := range orphans {
+			names = append(names, vm.Name)
+		}
 		removed := removeOrphanTartVMs(ctx, runner, orphans, logger)
 		logger.Info("Reconciled orphaned Tart VMs",
 			slog.String("tartHome", home),
 			slog.Int("found", len(orphans)),
 			slog.Int("removed", removed),
-			slog.Any("vms", orphans))
+			slog.Any("vms", names))
 	}
 }
 
@@ -150,41 +131,4 @@ func uniqueSortedStrings(values []string) []string {
 	}
 	sort.Strings(result)
 	return result
-}
-
-// tartOrphanCommandRunner runs Tart commands against one configured
-// TART_HOME. It lives in cmd/runner because startup reconciliation is a
-// process-level concern rather than part of one Tart provider instance.
-type tartOrphanCommandRunner struct {
-	home string
-}
-
-func (r tartOrphanCommandRunner) command(ctx context.Context, name string, args ...string) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, name, args...)
-	if r.home != "" {
-		cmd.Env = append(os.Environ(), "TART_HOME="+r.home)
-	}
-	return cmd
-}
-
-func (r tartOrphanCommandRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
-	cmd := r.command(ctx, name, args...)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
-	}
-	return stdout.Bytes(), nil
-}
-
-func (r tartOrphanCommandRunner) RunStreaming(ctx context.Context, name string, args ...string) error {
-	cmd := r.command(ctx, name, args...)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("%s %s: %w", name, strings.Join(args, " "), err)
-	}
-	return nil
 }

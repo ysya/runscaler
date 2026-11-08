@@ -15,7 +15,6 @@ func releaseNotesURL(tag string) string {
 
 func printUpgradeNotice(out io.Writer, tag string) {
 	fmt.Fprintf(out, "Release notes: %s\nUpgrade requirements: %s\n", releaseNotesURL(tag), upgradeRequirementsURL)
-	fmt.Fprintln(out, "Before installing, prepare older runscaler commands/service names, retired settings and RUNSCALER_TOKEN as described in the upgrade requirements.")
 	fmt.Fprintln(out, "This command verifies the download checksum; it does not validate configuration/provider compatibility, rewrite service definitions or restart services. Existing service scope and runtime user are retained.")
 }
 

@@ -138,8 +138,8 @@ curl -fsSL https://raw.githubusercontent.com/ysya/runscaler/main/install.sh | sh
 Linux 預設為系統安裝，需以 root 將 binary 安裝至 `/usr/local/bin`。macOS 預設安裝至 `~/.local/bin`；Linux 的 `--user` 也使用此使用者路徑。指令碼只下載 binary，不會建立帳號或服務。系統 binary 也可使用其他絕對路徑，但檔案與所有上層目錄都必須只有 root 能修改。可設定 `INSTALL_DIR` 自訂位置，或以 `RUNNER_VERSION` 指定版本：
 
 ```bash
-# Install to a custom location (e.g. system-wide)
-curl -fsSL https://raw.githubusercontent.com/ysya/runscaler/main/install.sh | sudo env INSTALL_DIR=/usr/local/bin sh
+# Install the system binary elsewhere (the directory and every ancestor must be root-only)
+curl -fsSL https://raw.githubusercontent.com/ysya/runscaler/main/install.sh | sudo env INSTALL_DIR=/opt/runner/bin sh
 
 # Pin a specific version
 curl -fsSL https://raw.githubusercontent.com/ysya/runscaler/main/install.sh | RUNNER_VERSION=v1.2.3 sh -s -- --user
@@ -314,9 +314,11 @@ Doctor 會使用各個已設定 runner 規模集的 App 或 PAT 憑證探測 Git
 不會輸出原始 SDK 回應本文。
 
 `--fix` 旗標會取得與 `runner run` 相同的全機鎖定，因此只要目前仍有 runner 執行個體
-正在執行，就會拒絕移除資源。健康探測仍會保留，作為舊版 runner 的相容性檢查。
+正在執行，就會拒絕移除資源。
 啟動時的資源清理或 `doctor --fix` 都不會移除共用磁碟區與快取磁碟區：
 這些磁碟區原本就會保留至程序結束之後，而且可能仍包含執行中工作流程的後續工作所需的資料。
+
+啟動時的資源清理與 `doctor` 採用相同的辨識規則：容器須帶有 `managed-by=runner` 標籤，或名稱正好是 `runner-<8 位十六進位>`；本機 Tart VM 的名稱須正好符合 runner 產生的 `runner-`、`pool-` 或 `runner-keep-` 格式。其餘資源無論叫什麼名字都不會被移除。
 
 <a id="logs"></a>
 
@@ -800,8 +802,8 @@ kill -TERM <pid>
 `runner service install` 會產生比所設定的排空時間額度多一分鐘的 systemd `TimeoutStopSec` 或 launchd `ExitTimeOut`，並記錄該值，讓 runner 在之後的 `drain-timeout` 超過此值時發出警告。更新二進位檔不會改寫已安裝的服務定義；請在原處重新產生：
 
 ```bash
-sudo runner service install --user=false --force --config-path /etc/runner/config.toml   # Linux system service
-runner service install --user --force --config-path ~/.config/runner/config.toml               # user service
+sudo runner service install --scope system --force --config-path /etc/runner/config.toml   # Linux system service
+runner service install --scope user --force --config-path ~/.config/runner/config.toml           # user service
 ```
 
 `--force` 會先驗證設定與二進位檔，並產生新的定義內容，之後才碰觸已安裝的定義。當定義過時，runner 會在日誌中記錄修正指令，使用它目前執行時的確切設定與二進位檔路徑。若是系統服務但二進位檔不屬於 root，則會先提示複製至 `/usr/local/bin`，再重新安裝。
@@ -819,7 +821,7 @@ runner service restart     # waits for active jobs automatically
 
 - **Linux 新系統安裝**由 root 安裝，以專用的 `runscaler` 非登入帳號執行。binary 保持 root 擁有；config／App key 為 `root:runscaler`、`0640`，`/etc/runner` 為 `0750`。HOME 與工作目錄為 `/var/lib/runner`；state 與 log 目錄由服務帳號擁有、權限為 `0750`。`ProtectSystem=strict` 讓設定維持唯讀，只開放 `/tmp`、state 與 `/var/log` 下的有效日誌目錄寫入。安裝會拒絕衝突帳號、連結或共用的憑證檔，以及已有其他擁有者資料的目錄。父目錄（包含日誌目錄的父層）必須由 root 擁有，且不可讓群組或其他使用者寫入；請由管理員先準備主機路徑，安裝器不會更改父目錄權限。
 - **Linux user 安裝**使用 `runner service install --scope user`（或 `--user`），沿用使用者的 XDG 路徑、憑證與 Docker socket，不需要 sudo。拒絕建立 root 的 user service。
-- **macOS** 僅支援已登入使用者的 LaunchAgent。它會在登入時啟動，因此無人值守的主機請啟用自動登入，並從本機 GUI 工作階段安裝，而非透過 SSH。runner 在 macOS 上會拒絕以 root 身分執行、初始化、安裝或遷移。launchd 啟動 agent 時使用精簡的 `PATH`；若 `/opt/homebrew/bin` 與 `/usr/local/bin` 存在，runner 會將其附加至路徑，以便找到透過 Homebrew 安裝的 `tart`。agent 會捨棄 stdout（runner 會自行寫入輪替日誌），並將 stderr 保留在 `~/Library/Logs/runner/stderr.log`；此檔案不會輪替。
+- **macOS** 僅支援已登入使用者的 LaunchAgent。它會在登入時啟動，因此無人值守的主機請啟用自動登入，並從本機 GUI 工作階段安裝，而非透過 SSH。runner 在 macOS 上會拒絕以 root 身分執行、初始化、安裝或啟動。launchd 啟動 agent 時使用精簡的 `PATH`；若 `/opt/homebrew/bin` 與 `/usr/local/bin` 存在，runner 會將其附加至路徑，以便找到透過 Homebrew 安裝的 `tart`。agent 會捨棄 stdout（runner 會自行寫入輪替日誌），並將 stderr 保留在 `~/Library/Logs/runner/stderr.log`；此檔案不會輪替。
 - `/tmp/runner.lock` 的執行鎖可避免意外啟動第二個 runner；它不是防範本機使用者的安全邊界。
 
 ```bash
@@ -832,9 +834,9 @@ runner init
 runner service install --scope user
 ```
 
-系統憑證必須在設定中明確指定。若使用 `token="env:NAME"` 或 App 的 `private-key-env`，請透過 `--environment-file /etc/runner/credentials.env` 指定受 root 保護的 systemd 環境檔；不會保存安裝 shell 的私人憑證。寫入 unit 前，會以服務身分探測 GitHub 與 provider；離線準備可用 `--no-start` 跳過即時探測。rootful Docker socket 僅透過 unit 的 supplementary groups 授權，仍具有等同 root 的能力，與 rootless daemon 不同；不會接管其他使用者的 rootless socket。
+系統憑證必須在設定中明確指定。若使用 `token="env:NAME"` 或 App 的 `private-key-env`，請透過 `--environment-file /etc/runner/credentials.env` 指定受 root 保護的 systemd 環境檔；不會保存安裝 shell 的私人憑證。寫入 unit 前，會以服務身分執行 `runner validate`，用服務實際使用的身分檢查 Docker socket、憑證與 GitHub 存取；離線準備可用 `--no-start` 跳過即時探測。rootful Docker socket 僅透過 unit 的 supplementary groups 授權，仍具有等同 root 的能力，與 rootless daemon 不同；不會接管其他使用者的 rootless socket。
 
-管理指令（`status`、`logs`、`doctor`、`service …`、`update`）會選擇唯一已安裝服務的 binary／config。可用 `--scope user|system` 明確選擇；`--user`、`--user=false` 保留為別名。auto 模式遇到兩份安裝或無法確認的服務資訊會停止；安裝也會拒絕建立第二個範圍。Linux 探索需要支援 JSON 的 systemd `busctl` 及對應的服務管理匯流排。明確 scope 不會退回其他安裝。完全沒有已安裝服務時，仍保留獨立執行的設定搜尋方式。
+管理指令（`status`、`logs`、`doctor`、`service …`、`update`）會選擇唯一已安裝服務的 binary／config。可用 `--scope user|system` 明確選擇；`--user`、`--user=false` 保留為別名。auto 模式遇到兩份安裝或無法確認的服務資訊會停止；安裝也會拒絕建立第二個範圍。Linux 探索需要支援 JSON 的 systemd `busctl` 及對應的服務管理匯流排。明確 scope 不會退回其他安裝。完全沒有已安裝服務時，仍保留獨立執行的設定搜尋方式。由套件安裝在 `/usr/lib/systemd/system` 或 `/lib/systemd/system` 的 system unit 會像 runner 自己的 unit 一樣被管理，但 `uninstall` 絕不刪除它，而是說明如何停用；`install --force` 會把 runner 的 unit 寫到優先載入的 `/etc/systemd/system`，並重啟服務讓新定義生效。
 
 `runner update` 更新選定服務的 binary，不會自動重啟。系統 binary 更新需要 root，且目前的 updater 必須位於受 root 保護的路徑；可寫入的 user binary 不需要 sudo。若只更新指定 binary（包括 macOS 的 root 擁有共用 binary），可用 `sudo /absolute/path/current-runner update --binary-path /absolute/path/target-runner`，不會選擇或操作 LaunchAgent。系統 `doctor`／`doctor --fix` 請使用錯誤訊息提供的 `sudo systemd-run …`，重現服務 UID、unit 群組與憑證來源；單純 `sudo -u` 可能缺少 Docker 群組。`--fix` 仍要求 manager 已停止並取得共用執行鎖。私人 inline 環境值不會放入命令列，需先移至受保護的 EnvironmentFile。
 
@@ -844,7 +846,7 @@ runner service install --scope user
 
 ### Systemd
 
-這是 `sudo runner service install --user=false` 為採用預設排空逾時的 Docker 設定所產生的 unit。建議使用該指令，讓 unit 與二進位檔保持同步。
+這是 `sudo runner service install --scope system` 為採用預設排空逾時的 Docker 設定所產生的 unit。建議使用該指令，讓 unit 與二進位檔保持同步。
 
 ```ini
 [Unit]
@@ -898,13 +900,22 @@ make all
 主要元件：
 
 ```
-cmd/runner/          CLI entry point, commands (run, init, validate, status, doctor, logs, version)
+cmd/runner/          CLI entry point and commands (run, init, validate, status, doctor, cache, logs, service, update, scaleset, version)
 internal/
-  config/            Configuration management with Viper (flags + TOML)
-  provider/          InstanceProvider + Docker/Tart implementations
-  controller/        ScaleSetController; adapts listener.Scaler to instance lifecycle
-  health/            Health check HTTP server
+  config/            Configuration management with Viper (flags + TOML) and logger setup
+  layout/            Default config/log/state paths per identity (FHS, XDG, Apple)
+  pathtrust/         "Only root can modify this path" checks
   lock/              Machine-wide process and destructive-maintenance lock
+  provider/          InstanceProvider + Docker/Tart implementations
+  controller/        ScaleSetController; adapts listener.Scaler to instance lifecycle, readiness and retries
+  capacity/          Host-wide concurrent-runner broker shared by all scale sets
+  backoff/           Exponential backoff with jitter for startup retries
+  cachestore/        CacheStore abstraction over reclaimable Docker/Tart storage
+  diskguard/         Disk-pressure guard reclaiming through cache stores by tier
+  bytesize/          Size and threshold parsing for disk settings
+  diagnostics/       Failure reports written beside the log file
+  metrics/           Per-scale-set job counters and runtime status snapshots
+  health/            Health check HTTP server (/healthz, /readyz)
   versioncheck/      GitHub releases API client for update notifications and in-place binary updates
 ```
 

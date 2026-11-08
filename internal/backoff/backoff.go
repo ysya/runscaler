@@ -1,14 +1,19 @@
-// Package backoff contains delay arithmetic shared by independent retry owners.
+// Package backoff holds the retry-delay arithmetic and the cancellable wait
+// that runner's retry loops share: startup and warm-pool retries, listener
+// reconnects, runner-removal retries and guest-agent polling.
 package backoff
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
-func Delay(failures int, initial, maximum, cooldown time.Duration, cooldownAfter int, sample float64) time.Duration {
+// Exponential is the wait after the given number of consecutive failures:
+// initial for the first, doubling with each further failure, capped at
+// maximum. No failures means no wait.
+func Exponential(failures int, initial, maximum time.Duration) time.Duration {
 	if failures <= 0 {
 		return 0
-	}
-	if failures >= cooldownAfter {
-		return cooldown
 	}
 	delay := initial
 	for n := 1; n < failures && delay < maximum; n++ {
@@ -18,14 +23,37 @@ func Delay(failures int, initial, maximum, cooldown time.Duration, cooldownAfter
 		}
 		delay *= 2
 	}
-	if delay > maximum {
-		delay = maximum
+	return min(delay, maximum)
+}
+
+// Jitter picks a point in [d/2, d] by sample, clamped to [0, 1], so owners
+// retrying at the same moment spread out instead of retrying in lockstep.
+func Jitter(d time.Duration, sample float64) time.Duration {
+	sample = min(max(sample, 0), 1)
+	return d/2 + time.Duration(float64(d-d/2)*sample)
+}
+
+// Delay is the startup-retry wait: Exponential with Jitter, replaced by a
+// flat cooldown once failures reach cooldownAfter.
+func Delay(failures int, initial, maximum, cooldown time.Duration, cooldownAfter int, sample float64) time.Duration {
+	if failures <= 0 {
+		return 0
 	}
-	if sample < 0 {
-		sample = 0
+	if failures >= cooldownAfter {
+		return cooldown
 	}
-	if sample > 1 {
-		sample = 1
+	return Jitter(Exponential(failures, initial, maximum), sample)
+}
+
+// Sleep waits d, or until ctx ends, whichever comes first; in the latter case
+// it returns ctx's error.
+func Sleep(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
 	}
-	return delay/2 + time.Duration(float64(delay-delay/2)*sample)
 }

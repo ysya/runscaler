@@ -18,11 +18,6 @@ func TestPoolRetryCooldownCancellationAndReset(t *testing.T) {
 	if got := r.failure(); got != 5*time.Minute {
 		t.Fatalf("cooldown=%v", got)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if waitPoolRetry(ctx, time.Hour) {
-		t.Fatal("cancelled wait succeeded")
-	}
 	r.reset()
 	if d := r.failure(); d < 2500*time.Millisecond || d > 5*time.Second {
 		t.Fatalf("reset delay=%v", d)

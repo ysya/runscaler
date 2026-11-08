@@ -12,10 +12,10 @@ import (
 	dockerclient "github.com/moby/moby/client"
 	"github.com/spf13/cobra"
 
+	"github.com/ysya/runscaler/internal/bytesize"
 	"github.com/ysya/runscaler/internal/cachestore"
 	"github.com/ysya/runscaler/internal/config"
 	"github.com/ysya/runscaler/internal/diskguard"
-	"github.com/ysya/runscaler/internal/provider"
 )
 
 var cacheCmd = &cobra.Command{
@@ -122,7 +122,7 @@ func policyString(budgetBytes uint64, onExceed string) string {
 	if onExceed == "" {
 		onExceed = "warn"
 	}
-	return fmt.Sprintf("budget=%s on-exceed=%s", provider.FormatBytes(budgetBytes), onExceed)
+	return fmt.Sprintf("budget=%s on-exceed=%s", bytesize.Format(budgetBytes), onExceed)
 }
 
 // buildCacheRows measures every store and stats the filesystem it lives on,
@@ -182,7 +182,7 @@ func formatCacheTable(rows []cacheRow) string {
 	w := tabwriter.NewWriter(&buf, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(w, "STORE\tFILESYSTEM\tSIZE\tFS FREE\tPOLICY\tERROR")
 	for _, r := range rows {
-		size := provider.FormatBytes(r.SizeBytes)
+		size := bytesize.Format(r.SizeBytes)
 		if r.SizeUnknown {
 			size = "unknown"
 		}

@@ -14,11 +14,12 @@ import (
 )
 
 const readyMarker = "Listening for Jobs"
-const maxDockerLogFrame = 1024 * 1024
 
-type dockerInspector interface {
-	ContainerInspect(context.Context, string, dockerclient.ContainerInspectOptions) (dockerclient.ContainerInspectResult, error)
-}
+// defaultReadySettle is how long a runner must stay alive after printing
+// readyMarker. A runner whose version GitHub has retired connects, prints
+// the marker, then is refused on its first poll for messages and exits.
+const defaultReadySettle = 5 * time.Second
+const maxDockerLogFrame = 1024 * 1024
 
 var _ InstanceReadiness = (*DockerProvider)(nil)
 
@@ -31,11 +32,7 @@ func (p *DockerProvider) WaitReady(parent context.Context, id string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	inspector, ok := p.dockerClient.(dockerInspector)
-	if !ok {
-		return ErrReadinessUnavailable
-	}
-	initial, err := inspector.ContainerInspect(ctx, id, dockerclient.ContainerInspectOptions{})
+	initial, err := p.dockerClient.ContainerInspect(ctx, id, dockerclient.ContainerInspectOptions{})
 	if err == nil && initial.Container.State != nil && !initial.Container.State.Running {
 		return ErrExitedBeforeReady
 	}
@@ -85,7 +82,7 @@ func (p *DockerProvider) WaitReady(parent context.Context, id string) error {
 			unavailable = true
 			finished = nil
 		case <-ticker.C:
-			result, inspectErr := inspector.ContainerInspect(ctx, id, dockerclient.ContainerInspectOptions{})
+			result, inspectErr := p.dockerClient.ContainerInspect(ctx, id, dockerclient.ContainerInspectOptions{})
 			if inspectErr != nil || result.Container.State == nil {
 				unavailable = true
 				continue

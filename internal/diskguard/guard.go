@@ -30,17 +30,17 @@ type Config struct {
 
 // Guard decides when to reclaim disk space, from which cachestore.CacheStore
 // stores, in what order, and when to stop. It runs two independent
-// mechanisms on every Sweep: a per-store budget check (Steps 5-9 of this
-// package's design — runs regardless of disk pressure, unbounded by
-// MaxTier), and a disk-pressure tier ladder (Steps 1-4 — runs only when a
+// mechanisms on every Sweep: a per-store budget check (enforceBudgets —
+// runs regardless of disk pressure, unbounded by MaxTier), and a
+// disk-pressure tier ladder (sweepFilesystem — runs only when a
 // filesystem's free space has dropped below MinFree, and never reclaims
 // past MaxTier).
 //
-// Neither mechanism consults a store's Enabled() (revised 2026-08-14 —
-// see docs/superpowers/specs/2026-08-13-cache-architecture-design.md,
+// Neither mechanism consults a store's Enabled() (see
+// docs/superpowers/specs/2026-08-13-cache-architecture-design.md,
 // "各 store 的啟用開關只約束例行清理"). Enabled() means "run this store's own
 // routine periodic cleanup", not "never touch this even under disk
-// pressure" — the periodic sweepers in cmd/runner still gate on it, but the
+// pressure" — the periodic sweepers in cmd/runner gate on it, but the
 // guard reclaims from every configured store regardless, because refusing
 // to touch a store the operator merely left off its routine schedule would
 // leave the guard unable to reclaim anything on a stock config (prune and
@@ -56,8 +56,8 @@ type Guard struct {
 	// sweepMu serializes Sweep against itself. It does not — and cannot —
 	// protect the stores themselves, which are shared with cmd/runner's
 	// periodic sweepers and guard their own Measure/Reclaim. See Sweep's doc
-	// comment for why concurrent calls are possible now, and why TryLock
-	// rather than Lock.
+	// comment for why concurrent calls are possible, and why TryLock rather
+	// than Lock.
 	sweepMu sync.Mutex
 }
 
@@ -80,11 +80,9 @@ type filesystemGroup struct {
 }
 
 // statByFilesystem groups g.stores by the filesystem their Path() resolves
-// to, statting each store's path exactly once. Unlike the package-level
-// GroupByFilesystem (which aborts entirely on the first statfs failure —
-// see its doc comment), a single store's statfs failure here only warns
-// and excludes that one store; every other store is still grouped and
-// swept normally.
+// to, statting each store's path exactly once. A single store's statfs
+// failure only warns and excludes that one store; every other store is
+// still grouped and swept normally.
 func (g *Guard) statByFilesystem() map[string]filesystemGroup {
 	groups := make(map[string]filesystemGroup)
 	for _, s := range g.stores {
@@ -112,11 +110,11 @@ func (g *Guard) statByFilesystem() map[string]filesystemGroup {
 // logged and skipped rather than propagated, so one misbehaving store or
 // filesystem never stops the sweep from doing what it can for the rest.
 //
-// Safe for concurrent callers, which is no longer hypothetical since Task
-// 9: the periodic ticker in cmd/runner and every scale set's pre-job-start
-// check (controller.WithDiskChecker) now share one Guard instance and can each
-// call Sweep from their own goroutine (see startDiskGuard/runScaleSetController in
-// cmd/runner/main.go). The store-level work Sweep drives — daemon prunes,
+// Safe for concurrent callers, which is not hypothetical: the periodic
+// ticker in cmd/runner and every scale set's pre-job-start check
+// (controller.WithDiskChecker) share one Guard instance and can each call
+// Sweep from their own goroutine (see startDiskGuard/runScaleSetController
+// in cmd/runner/main.go). The store-level work Sweep drives — daemon prunes,
 // helper containers walking and deleting volume contents — is not safe to
 // run twice at once: two `du; find -delete; du` passes over one volume each
 // measure the other's deletions, and Docker's daemon-side prune lock rejects
@@ -135,10 +133,11 @@ func (g *Guard) statByFilesystem() map[string]filesystemGroup {
 // sweepMu.TryLock, not Lock: a sweep already in flight is already
 // addressing whatever pressure triggered this call, so a second caller has
 // nothing to gain by waiting for it — only latency stacked onto the
-// job-start path this guard exists to keep unblocked (see
-// controller.startInstance's own "never blocks a job" comment). A concurrent
-// caller that finds a sweep already in progress logs that and returns nil
-// immediately instead of queuing behind it.
+// job-start path this guard exists to keep unblocked (the controller's
+// pre-job-start check, controller.WithDiskChecker, logs a reclaim failure
+// or timeout and starts the runner anyway, never refusing service). A
+// concurrent caller that finds a sweep already in progress logs that and
+// returns nil immediately instead of queuing behind it.
 func (g *Guard) Sweep(ctx context.Context) error {
 	if !g.cfg.Enabled {
 		return nil

@@ -24,7 +24,10 @@ func TestGeneratedSystemdDefinitionsVerify(t *testing.T) {
 	for _, mode := range []string{"system-root", "system-nonroot", "user"} {
 		t.Run(mode, func(t *testing.T) {
 			dir := t.TempDir()
-			opts := installOpts{binaryPath: binary, configPath: "/etc/runner/config $literal file.toml", provider: "tart", user: mode == "user"}
+			opts := installOpts{binaryPath: binary, configPath: "/etc/runner/config $literal file.toml", provider: "tart"}
+			if mode == "user" {
+				opts.scope = scopeUser
+			}
 			if mode == "system-nonroot" {
 				opts.runtimeUser, opts.runtimeGroup = "nobody", "65534"
 			}

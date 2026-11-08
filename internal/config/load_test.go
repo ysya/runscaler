@@ -427,14 +427,10 @@ token = "token-b"
 	}
 }
 
-// TestLoad_ScalesetLevelBothFormsWarns pins that a [[scaleset]] entry
-// setting both forms of an aliased key itself — not just at the top level —
-// is caught too, and the warning is scoped to that scaleset like every
-// other per-entry diagnostic in this package.
-
-// TestLoad_DockerCacheLongForm covers the other half of this task: the
-// [[docker.cache]] long form decodes through the same map-merge pipeline as
-// every other [docker] key (inherited by a [[scaleset]] that does not
+// TestLoad_DockerCacheLongForm pins the [[docker.cache]] long form
+// (TestLoad_DockerContainerKeysInheritanceAndOverride covers the
+// cache-volumes short form): it decodes through the same map-merge pipeline
+// as every other [docker] key (inherited by a [[scaleset]] that does not
 // override it), and ParseCacheVolumes resolves its budget/on-exceed
 // end-to-end from TOML.
 func TestLoad_DockerCacheLongForm(t *testing.T) {

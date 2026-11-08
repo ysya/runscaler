@@ -31,7 +31,7 @@ func TestSystemUnitDedicatedAccountDoesNotRecursivelyChangeDirectories(t *testin
 }
 
 func TestSystemUnitUserModeKeepsCurrentUser(t *testing.T) {
-	unit, err := renderSystemdUnit(installOpts{user: true, binaryPath: "/home/ci/.local/bin/runner", configPath: "/home/ci/.config/runner/config.toml"})
+	unit, err := renderSystemdUnit(installOpts{scope: scopeUser, binaryPath: "/home/ci/.local/bin/runner", configPath: "/home/ci/.config/runner/config.toml"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,7 +160,7 @@ func TestLegacyRootRegenerationAlsoProtectsEnvironmentFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	m := &identityInstallManager{}
-	err := installService(m, installOpts{binaryPath: "/usr/local/bin/runner", configPath: "/etc/runner/config.toml", environmentFiles: []string{path}}, func(_ bool, path string) (string, error) { return path, nil })
+	err := installService(m, installOpts{binaryPath: "/usr/local/bin/runner", configPath: "/etc/runner/config.toml", environmentFiles: []string{path}}, func(_ serviceScope, path string) (string, error) { return path, nil })
 	if err == nil || m.installed != nil {
 		t.Fatalf("unprotected environment installed in root unit: err=%v installed=%v", err, m.installed != nil)
 	}
@@ -221,12 +221,12 @@ func TestSystemInstallationRunsPreflightBeforeAnyServiceWrite(t *testing.T) {
 	t.Cleanup(func() { prepareSystemInstallation = saved })
 	prepareSystemInstallation = func(*installOpts) error { return errors.New("account conflicts") }
 	m := &identityInstallManager{}
-	err := installService(m, installOpts{runtimeUser: "runscaler", runtimeGroup: "runscaler", binaryPath: "/usr/local/bin/runner", configPath: "/etc/runner/config.toml"}, func(_ bool, p string) (string, error) { return p, nil })
+	err := installService(m, installOpts{runtimeUser: "runscaler", runtimeGroup: "runscaler", binaryPath: "/usr/local/bin/runner", configPath: "/etc/runner/config.toml"}, func(_ serviceScope, p string) (string, error) { return p, nil })
 	if err == nil || m.installed != nil {
 		t.Fatalf("service written despite failed identity preparation: %v", err)
 	}
 	prepareSystemInstallation = func(opts *installOpts) error { opts.supplementaryGroups = []string{"998"}; return nil }
-	if err := installService(m, installOpts{runtimeUser: "runscaler", runtimeGroup: "runscaler", binaryPath: "/usr/local/bin/runner", configPath: "/etc/runner/config.toml"}, func(_ bool, p string) (string, error) { return p, nil }); err != nil {
+	if err := installService(m, installOpts{runtimeUser: "runscaler", runtimeGroup: "runscaler", binaryPath: "/usr/local/bin/runner", configPath: "/etc/runner/config.toml"}, func(_ serviceScope, p string) (string, error) { return p, nil }); err != nil {
 		t.Fatal(err)
 	}
 	if m.installed == nil || !reflect.DeepEqual(m.installed.supplementaryGroups, []string{"998"}) {

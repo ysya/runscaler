@@ -36,15 +36,15 @@ func (b *synchronizedBuffer) String() string {
 
 // These tests cover the pure, Docker/Tart-connection-independent selection
 // logic behind buildCacheStores: which scaleset's settings win when several
-// share a socket or TART_HOME. This is exactly the logic that used to live
-// duplicated inside each of the four sweepers before Task 7; a regression
-// here would silently change what gets reclaimed without any cachestore or
-// diskguard test catching it, since those packages only see the resulting
-// config structs, not how sets selects them.
+// share a socket or TART_HOME. Every sweeper and the disk guard select
+// through this one path, so a regression here would silently change what
+// gets reclaimed without any cachestore or diskguard test catching it:
+// those packages only see the resulting config structs, not how sets
+// selects them.
 
 func TestDockerPruneSettingsFor(t *testing.T) {
-	// 2026-08-14 revision: Enabled tracks only whether cmd/runner's own
-	// periodic sweeper should run — PruneTTL/MaxAge/interval are still
+	// Enabled tracks only whether cmd/runner's own periodic sweeper should
+	// run — PruneTTL/MaxAge/interval are still
 	// populated with real (defaulted) values regardless, because the disk
 	// guard reclaims through these stores whether or not any scaleset
 	// enabled the periodic sweep (see
@@ -125,8 +125,8 @@ func TestDockerPruneSettingsFor(t *testing.T) {
 }
 
 func TestBuildxConfigFor(t *testing.T) {
-	// See dockerPruneSettingsFor's identical 2026-08-14 revision note: the
-	// periodic sweeper stays off (Enabled=false), but MaxAge/interval still
+	// Same rule as dockerPruneSettingsFor: the periodic sweeper stays off
+	// (Enabled=false), but MaxAge/interval still
 	// get real defaults so the disk guard has something to reclaim by.
 	t.Run("disabled by default but real defaulted settings", func(t *testing.T) {
 		cfg, interval := buildxConfigFor([]config.ScaleSetConfig{{}}, "/var/lib/docker")
@@ -183,7 +183,7 @@ func TestSharedVolumeSweepTargetsFor(t *testing.T) {
 		if got.store == nil {
 			t.Fatal("target carries no store — the disk guard and `runner cache` both address the store, not the target")
 		}
-		if got.enabled {
+		if got.store.Enabled() {
 			t.Error("enabled = true, want false — there is no retention policy for a periodic sweeper to apply")
 		}
 		if got.ttl != 0 {
@@ -211,8 +211,8 @@ func TestSharedVolumeSweepTargetsFor(t *testing.T) {
 		if len(targets) != 1 {
 			t.Fatalf("targets = %+v, want 1 (same volume name)", targets)
 		}
-		if got := targets[0]; got.ttl != 72*time.Hour || !got.enabled {
-			t.Errorf("target = {ttl:%v enabled:%v}, want {72h true} — a real retention policy must win over none", got.ttl, got.enabled)
+		if got := targets[0]; got.ttl != 72*time.Hour || !got.store.Enabled() {
+			t.Errorf("target = {ttl:%v enabled:%v}, want {72h true} — a real retention policy must win over none", got.ttl, got.store.Enabled())
 		}
 	})
 
@@ -251,10 +251,10 @@ func TestSharedVolumeSweepTargetsFor(t *testing.T) {
 }
 
 func TestTartCacheStores(t *testing.T) {
-	// 2026-08-14 revision: every configured TART_HOME gets a target now —
-	// even one where cache-cleanup is disabled everywhere it's shared —
+	// Every configured TART_HOME gets a target — even one where
+	// cache-cleanup is disabled everywhere it's shared —
 	// because the disk guard reclaims through it regardless of enabled;
-	// only the periodic sweeper (via target.enabled) skips it. See
+	// only the periodic sweeper (via the store's Enabled()) skips it. See
 	// tartCacheStores' doc comment.
 	t.Run("disabled scaleset still yields a target, marked not enabled, with defaulted settings", func(t *testing.T) {
 		no := false
@@ -264,7 +264,7 @@ func TestTartCacheStores(t *testing.T) {
 			t.Fatalf("targets = %+v, want 1 (the disk guard must still see this home)", targets)
 		}
 		tg := targets["/Volumes/A"]
-		if tg.enabled {
+		if tg.store.Enabled() {
 			t.Error("enabled = true, want false — cache-cleanup is disabled, the periodic sweeper must stay off")
 		}
 		if tg.maxAge != config.DefaultTartCacheMaxAge {
@@ -287,10 +287,10 @@ func TestTartCacheStores(t *testing.T) {
 		if len(targets) != 2 {
 			t.Fatalf("targets = %+v, want 2 (one per unique home)", targets)
 		}
-		if got := targets["/Volumes/A"]; got.maxAge != 3*24*time.Hour || !got.enabled {
+		if got := targets["/Volumes/A"]; got.maxAge != 3*24*time.Hour || !got.store.Enabled() {
 			t.Errorf("/Volumes/A = %+v, want maxAge=3days enabled=true (first enabled scaleset)", got)
 		}
-		if got := targets["/Volumes/B"]; got.spaceBudgetGB != 50 || !got.enabled {
+		if got := targets["/Volumes/B"]; got.spaceBudgetGB != 50 || !got.store.Enabled() {
 			t.Errorf("/Volumes/B = %+v, want spaceBudgetGB=50 enabled=true", got)
 		}
 		if targets["/Volumes/A"].store == nil || targets["/Volumes/B"].store == nil {
@@ -442,7 +442,7 @@ func TestStartSharedVolumeCleanup_WarnsWhenNoMaxAgeConfigured(t *testing.T) {
 	store := &fakeCacheStore{name: "shared-volume:runner-shared", kind: cachestore.KindScratch, reclaimed: make(chan cachestore.Tier, 4)}
 	targets := []sharedVolumeSweepTarget{{
 		store: store, volumeName: "runner-shared", mountPath: "/shared",
-		ttl: 0, interval: time.Hour, enabled: false,
+		ttl: 0, interval: time.Hour,
 	}}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -479,10 +479,10 @@ func TestStartSharedVolumeCleanup_SweepsWhenMaxAgeConfigured(t *testing.T) {
 	var logs synchronizedBuffer
 	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
-	store := &fakeCacheStore{name: "shared-volume:runner-shared", kind: cachestore.KindScratch, reclaimed: make(chan cachestore.Tier, 4)}
+	store := &fakeCacheStore{name: "shared-volume:runner-shared", kind: cachestore.KindScratch, enabled: true, reclaimed: make(chan cachestore.Tier, 4)}
 	targets := []sharedVolumeSweepTarget{{
 		store: store, volumeName: "runner-shared", mountPath: "/shared",
-		ttl: 72 * time.Hour, interval: time.Hour, enabled: true,
+		ttl: 72 * time.Hour, interval: time.Hour,
 	}}
 
 	ctx, cancel := context.WithCancel(context.Background())

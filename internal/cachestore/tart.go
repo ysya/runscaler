@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/ysya/runscaler/internal/provider"
@@ -43,7 +44,7 @@ func (s *tartStore) Kind() StoreKind { return KindCache }
 // setVMMAC: cfg.Home, then the TART_HOME environment variable, then tart's
 // own default ($HOME/.tart). This must keep tracking setVMMAC's resolution
 // exactly: an operator can set TART_HOME via the environment instead of
-// [tart].home (execCommandRunner only injects TART_HOME into child
+// [tart].home (provider.TartCommandRunner only injects TART_HOME into child
 // processes when cfg.Home is non-empty, otherwise the ambient environment —
 // including an operator-exported TART_HOME — passes through untouched), so
 // dropping the middle level would make this store report a path tart
@@ -64,7 +65,7 @@ func (s *tartStore) Path() string {
 	}
 	// A failed lookup degrades to "" rather than an error — Path() has no
 	// error return, and the disk guard already treats an unresolvable
-	// Path() as "skip this store, warn" (see resolveDockerRootDir in
+	// Path() as "skip this store, warn" (see ResolveDockerRootDir in
 	// docker.go for the same precedent), so degrading quietly here is
 	// consistent with the rest of this package.
 	home, err := os.UserHomeDir()
@@ -94,19 +95,19 @@ func (s *tartStore) Measure(ctx context.Context) (uint64, error) {
 	return sizes[0], nil
 }
 
-// Reclaim trims the Tart cache by age and/or budget at Tier2 via the
-// existing provider.PruneTartCache; Tier4 is deliberately never a wholesale
-// wipe, and every other tier is a no-op. Enabled() is deliberately NOT
-// checked here — see dockerGarbageStore.Reclaim's identical note and
-// store.go's Enabled doc comment (revised 2026-08-14): the disk guard
+// Reclaim trims the Tart cache by age and/or budget at Tier2 through
+// pruneTartCache on the store's own runner; Tier4 is deliberately never a
+// wholesale wipe, and every other tier is a no-op. Enabled() is
+// deliberately NOT checked here — see dockerGarbageStore.Reclaim's
+// identical note and store.go's Enabled doc comment: the disk guard
 // reaches this method regardless of Enabled(), by design.
 func (s *tartStore) Reclaim(ctx context.Context, tier Tier) (uint64, error) {
 	switch tier {
 	case Tier2:
-		if err := provider.PruneTartCache(ctx, s.cfg.Home, s.cfg.MaxAge, s.cfg.BudgetGB, s.cfg.KeepImages, slog.Default()); err != nil {
+		if err := pruneTartCache(ctx, s.runner, s.cfg.Home, s.cfg.MaxAge, s.cfg.BudgetGB, s.cfg.KeepImages, slog.Default()); err != nil {
 			return 0, fmt.Errorf("prune tart cache: %w", err)
 		}
-		// PruneTartCache reports no reclaimed-space total either — 0 here
+		// pruneTartCache reports no reclaimed-space total either — 0 here
 		// for the same reason buildxStore.Reclaim gives (see its comment):
 		// the guard re-verifies via statfs, not a summed self-reported total.
 		return 0, nil
@@ -134,3 +135,79 @@ func (s *tartStore) Reclaim(ctx context.Context, tier Tier) (uint64, error) {
 // also break the explicit "never wholesale-wipe Tart's cache" decision in
 // the Tier4 case above.
 func (s *tartStore) Budget() (uint64, string) { return 0, "" }
+
+// pruneTartCache runs `tart prune --entries caches` through runner against
+// home, trimming OCI/IPSW caches. Local VMs are never touched. Two criteria
+// can apply: age (maxAge, via --older-than) reclaims layers left behind by
+// image updates, and an optional size cap (spaceBudgetGB, via
+// --space-budget) bounds the total. A no-op when both are off.
+func pruneTartCache(ctx context.Context, runner provider.CommandRunner, home string, maxAge time.Duration, spaceBudgetGB int, keepImages []string, logger *slog.Logger) error {
+	args := []string{"prune", "--entries", "caches"}
+	attrs := []any{slog.String("home", home)}
+
+	if maxAge > 0 {
+		// tart --older-than granularity is whole days. Floor sub-day windows to
+		// 1 day: --older-than=0 would mean "older than 0 days" and wipe the
+		// entire cache, which is never the intent.
+		days := int(maxAge.Hours() / 24)
+		if days < 1 {
+			days = 1
+		}
+		args = append(args, "--older-than", strconv.Itoa(days))
+		attrs = append(attrs, slog.Int("older_than_days", days))
+	}
+	if spaceBudgetGB > 0 {
+		args = append(args, "--space-budget", strconv.Itoa(spaceBudgetGB))
+		attrs = append(attrs, slog.Int("space_budget_gb", spaceBudgetGB))
+	}
+	if len(args) == 3 {
+		// No pruning criterion — `tart prune` requires at least one and would
+		// error. Treat as a disabled sweep rather than failing.
+		return nil
+	}
+
+	markTartImagesUsed(ctx, runner, keepImages, logger)
+
+	logger.Debug("Pruning Tart cache", attrs...)
+	if _, err := runner.Run(ctx, "tart", args...); err != nil {
+		return fmt.Errorf("tart prune: %w", err)
+	}
+	return nil
+}
+
+// markTartImagesUsed protects images from the prune that follows. tart prune
+// evicts by last access, and cloning an image is what records an access, so
+// each image still in the OCI cache is cloned into a throwaway VM that is
+// deleted right away. An image missing from the cache is skipped, since
+// cloning it would pull it. Best-effort: failures are logged.
+func markTartImagesUsed(ctx context.Context, runner provider.CommandRunner, images []string, logger *slog.Logger) {
+	if len(images) == 0 {
+		return
+	}
+	cached, err := provider.ListTartVMs(ctx, runner, "--source", "oci")
+	if err != nil {
+		logger.Warn("Failed to list the Tart cache; runner images are not protected from this prune",
+			slog.Any("error", err))
+		return
+	}
+	present := make(map[string]bool, len(cached))
+	for _, entry := range cached {
+		present[entry.Name] = true
+	}
+
+	for _, image := range images {
+		if !present[image] {
+			continue
+		}
+		vm := provider.KeepVMName()
+		if _, err := runner.Run(ctx, "tart", "clone", image, vm); err != nil {
+			logger.Warn("Failed to mark a runner image as used; this prune may evict it",
+				slog.String("image", image), slog.Any("error", err))
+			continue
+		}
+		if _, err := runner.Run(ctx, "tart", "delete", vm); err != nil {
+			logger.Warn("Failed to delete a throwaway VM; startup reconciliation will remove it",
+				slog.String("vm", vm), slog.Any("error", err))
+		}
+	}
+}

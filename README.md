@@ -124,8 +124,8 @@ curl -fsSL https://raw.githubusercontent.com/ysya/runscaler/main/install.sh | sh
 Linux defaults to system installation at `/usr/local/bin` and requires root. macOS defaults to `~/.local/bin`; Linux `--user` uses the same user-owned location. The script downloads a binary only; it does not create an account or service. System binaries may use another absolute location if the file and every ancestor are protected from non-root writes. Set `INSTALL_DIR` to customize, or `RUNNER_VERSION` to pin a version:
 
 ```bash
-# Install to a custom location (e.g. system-wide)
-curl -fsSL https://raw.githubusercontent.com/ysya/runscaler/main/install.sh | sudo env INSTALL_DIR=/usr/local/bin sh
+# Install the system binary elsewhere (the directory and every ancestor must be root-only)
+curl -fsSL https://raw.githubusercontent.com/ysya/runscaler/main/install.sh | sudo env INSTALL_DIR=/opt/runner/bin sh
 
 # Pin a specific version
 curl -fsSL https://raw.githubusercontent.com/ysya/runscaler/main/install.sh | RUNNER_VERSION=v1.2.3 sh -s -- --user
@@ -308,11 +308,16 @@ orphaned resources. Reports contain safe cancellation, timeout, DNS, TLS, or
 numeric HTTP-status categories; raw SDK response bodies are not printed.
 
 The `--fix` flag takes the same machine-wide lock as `runner run`, so it refuses
-to remove resources while any current runner instance is active. The health
-probe remains as a compatibility check for older runner versions. Shared and
+to remove resources while any current runner instance is active. Shared and
 cache volumes are never removed by startup reconciliation or `doctor --fix`:
 they intentionally outlive the process and may still contain data needed by a
 later job in an in-flight workflow.
+
+Startup reconciliation and `doctor` recognise runner's resources by the same
+rules: a container carries the `managed-by=runner` label or an exact
+`runner-<8 hex>` name, and a local Tart VM carries an exact `runner-`, `pool-`
+or `runner-keep-` name of the form runner generates. Nothing else is ever
+removed, however it is named.
 
 ### Logs
 
@@ -926,8 +931,8 @@ it, so runner warns when a later `drain-timeout` outgrows it. A binary update
 does not rewrite an installed service definition; regenerate it in place:
 
 ```bash
-sudo runner service install --user=false --force --config-path /etc/runner/config.toml   # Linux system service
-runner service install --user --force --config-path ~/.config/runner/config.toml               # user service
+sudo runner service install --scope system --force --config-path /etc/runner/config.toml   # Linux system service
+runner service install --scope user --force --config-path ~/.config/runner/config.toml           # user service
 ```
 
 `--force` validates the config and binary and renders the new definition before
@@ -983,9 +988,10 @@ runner service install --scope user
 System credentials must be explicit in config. For `token="env:NAME"` or an
 App `private-key-env`, pass a root-protected systemd environment file with
 `--environment-file /etc/runner/credentials.env`; the installing shell's
-credentials are never persisted. Installation probes GitHub/provider access
-using the service identity before writing its unit. `--no-start` skips that
-live probe for offline preparation. Rootful Docker socket access is granted
+credentials are never persisted. Before writing its unit, installation runs
+`runner validate` as the service identity, so the Docker socket, credentials
+and GitHub access are checked exactly as the service will use them.
+`--no-start` skips that live probe for offline preparation. Rootful Docker socket access is granted
 only through unit supplementary groups and remains root-equivalent; it is
 distinct from a rootless daemon. Another user's rootless socket is refused.
 
@@ -996,6 +1002,11 @@ installations or unverifiable metadata. Installation refuses a second scope.
 Linux discovery requires systemd's `busctl` JSON support and the relevant
 service-manager bus. Explicit scopes never fall back to another installation.
 Without any installed service, normal standalone config discovery still works.
+A system unit a package installed under `/usr/lib/systemd/system` or
+`/lib/systemd/system` is managed like runner's own, but `uninstall` never
+deletes it and instead says how to disable it; `install --force` writes
+runner's unit to `/etc/systemd/system`, which takes precedence, and restarts
+the service so it applies.
 
 `runner update` replaces the selected service's binary and never restarts it.
 A system update requires root and a root-protected current updater; a writable user binary does not. To update a
@@ -1017,7 +1028,7 @@ moved or deleted by an upgrade.
 
 ### Systemd
 
-This is the unit `sudo runner service install --user=false` generates for a
+This is the unit `sudo runner service install --scope system` generates for a
 Docker configuration with the default drain timeout. Prefer the command, so
 the unit stays in sync with the binary.
 
@@ -1069,13 +1080,22 @@ Built on top of [actions/scaleset](https://github.com/actions/scaleset), the off
 Key components:
 
 ```
-cmd/runner/          CLI entry point, commands (run, init, validate, status, doctor, logs, version)
+cmd/runner/          CLI entry point and commands (run, init, validate, status, doctor, cache, logs, service, update, scaleset, version)
 internal/
-  config/            Configuration management with Viper (flags + TOML)
-  provider/          InstanceProvider + Docker/Tart implementations
-  controller/        ScaleSetController; adapts listener.Scaler to instance lifecycle
-  health/            Health check HTTP server
+  config/            Configuration management with Viper (flags + TOML) and logger setup
+  layout/            Default config/log/state paths per identity (FHS, XDG, Apple)
+  pathtrust/         "Only root can modify this path" checks
   lock/              Machine-wide process and destructive-maintenance lock
+  provider/          InstanceProvider + Docker/Tart implementations
+  controller/        ScaleSetController; adapts listener.Scaler to instance lifecycle, readiness and retries
+  capacity/          Host-wide concurrent-runner broker shared by all scale sets
+  backoff/           Exponential backoff with jitter for startup retries
+  cachestore/        CacheStore abstraction over reclaimable Docker/Tart storage
+  diskguard/         Disk-pressure guard reclaiming through cache stores by tier
+  bytesize/          Size and threshold parsing for disk settings
+  diagnostics/       Failure reports written beside the log file
+  metrics/           Per-scale-set job counters and runtime status snapshots
+  health/            Health check HTTP server (/healthz, /readyz)
   versioncheck/      GitHub releases API client for update notifications and in-place binary updates
 ```
 

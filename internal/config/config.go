@@ -590,8 +590,8 @@ func (ss *ScaleSetConfig) Validate() error {
 			}
 		}
 	case "tart":
-		if ss.MaxRunners > 2 {
-			return fmt.Errorf("max-runners must be <= 2 for the Tart provider (Apple host limit)")
+		if ss.MaxRunners > MaxTartVMsPerHost {
+			return fmt.Errorf("max-runners must be <= %d for the Tart provider (Apple host limit)", MaxTartVMsPerHost)
 		}
 		if ss.Tart.PoolSize < 0 || ss.Tart.PoolSize > ss.MaxRunners {
 			return fmt.Errorf("tart pool-size must be between 0 and max-runners")
@@ -672,11 +672,16 @@ func (c *Config) ValidateConcurrent(scaleSets []ScaleSetConfig) error {
 }
 
 // EffectiveDrainTimeout returns the configured process-wide drain budget.
-// Nil inherits DefaultDrainTimeout; zero or a negative duration explicitly
-// disables draining and preserves immediate-shutdown behavior.
 func (c *Config) EffectiveDrainTimeout() time.Duration {
-	if c.DrainTimeout != nil {
-		return *c.DrainTimeout
+	return DrainTimeoutOrDefault(c.DrainTimeout)
+}
+
+// DrainTimeoutOrDefault applies the drain-timeout default to a configured
+// value: nil inherits DefaultDrainTimeout; zero or a negative duration is
+// kept, since it explicitly disables draining.
+func DrainTimeoutOrDefault(configured *time.Duration) time.Duration {
+	if configured != nil {
+		return *configured
 	}
 	return DefaultDrainTimeout
 }
@@ -699,7 +704,7 @@ type DiskConfig struct {
 	// Defaults to DefaultDiskTargetFree when unset.
 	TargetFree string `mapstructure:"target-free"`
 	// Interval is the period between guard sweeps. <= 0 (unset) resolves to
-	// DefaultDiskGuardInterval at the call site, matching every other sweep
+	// DefaultDiskGuardInterval (see Resolve), matching every other sweep
 	// interval in this package (e.g. PruneInterval).
 	Interval time.Duration `mapstructure:"interval"`
 	// MaxTier is the highest cachestore.Tier the guard may reclaim at while
@@ -717,66 +722,10 @@ func (c *Config) IsDiskGuardEnabled() bool {
 	return DefaultDiskGuard
 }
 
-// Validate checks that the disk guard's thresholds are parseable and that
-// MinFree is strictly less than TargetFree, and that MaxTier is a real tier
-// (1-4). Both matter more than they look: MinFree >= TargetFree makes every
-// sweep both trigger immediately and never satisfy its own target, and
-// MaxTier outside 1-4 (in particular the zero value) silently disables the
-// tier ladder — see diskguard.Guard.sweepFilesystem's target/free
-// subtraction, which assumes the ladder ran at least one tier.
-//
-// A zero-value DiskConfig (the operator never touched [disk]) must pass:
-// defaults are substituted before parsing, not compared as raw zero values.
+// Validate reports whether Resolve accepts these settings.
 func (dc DiskConfig) Validate() error {
-	minFree := dc.MinFree
-	if minFree == "" {
-		minFree = DefaultDiskMinFree
-	}
-	targetFree := dc.TargetFree
-	if targetFree == "" {
-		targetFree = DefaultDiskTargetFree
-	}
-
-	min, err := bytesize.ParseThreshold(minFree)
-	if err != nil {
-		return fmt.Errorf("min-free: %w", err)
-	}
-	target, err := bytesize.ParseThreshold(targetFree)
-	if err != nil {
-		return fmt.Errorf("target-free: %w", err)
-	}
-
-	// bytesize.Threshold doesn't itself record whether it came from a
-	// percentage or an absolute size (ParseThreshold sets exactly one of
-	// Percent/Bytes — see its doc comment), and BytesOf's own "Bytes != 0
-	// means absolute" heuristic isn't precise enough here: it would treat a
-	// literal "0%" as indistinguishable from an absolute zero-byte
-	// threshold, a distinction BytesOf's caller (the guard, which always
-	// has a real totalBytes to scale a percentage against) never needs to
-	// make but this comparison does. Reading the "%" suffix off the
-	// original strings instead is exact.
-	minIsPercent := strings.HasSuffix(minFree, "%")
-	targetIsPercent := strings.HasSuffix(targetFree, "%")
-	if minIsPercent != targetIsPercent {
-		return fmt.Errorf("min-free and target-free must both be percentages or both be sizes to compare")
-	}
-	if minIsPercent {
-		if min.Percent >= target.Percent {
-			return fmt.Errorf("min-free must be less than target-free")
-		}
-	} else if min.Bytes >= target.Bytes {
-		return fmt.Errorf("min-free must be less than target-free")
-	}
-
-	maxTier := dc.MaxTier
-	if maxTier == 0 {
-		maxTier = DefaultDiskMaxTier
-	}
-	if maxTier < 1 || maxTier > 4 {
-		return fmt.Errorf("max-tier must be between 1 and 4")
-	}
-
-	return nil
+	_, err := dc.Resolve()
+	return err
 }
 
 // --- Standalone utility functions (not struct methods) ---
@@ -832,15 +781,10 @@ var scaleSetColors = []color.Color{
 	lipgloss.Color("4"), // blue
 }
 
-// NewScaleSetLogger creates a logger with a colored prefix for the given scale set.
-// The color is determined by the index, cycling through the palette.
-func NewScaleSetLogger(level, format string, name string, index int) *slog.Logger {
-	return NewScaleSetLoggerWithWriter(level, format, name, index, os.Stdout, nil)
-}
-
 // NewScaleSetLoggerWithWriter creates a scale-set logger writing to console
 // and, when file is non-nil, teeing to it. The writer may be shared with the
-// process logger.
+// process logger. The prefix color comes from index, cycling through
+// scaleSetColors.
 func NewScaleSetLoggerWithWriter(level, format string, name string, index int, console *os.File, file io.Writer) *slog.Logger {
 	opts := charmlog.Options{
 		ReportTimestamp: true,

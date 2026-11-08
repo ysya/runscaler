@@ -3,6 +3,8 @@ package config
 import (
 	"fmt"
 	"time"
+
+	"github.com/ysya/runscaler/internal/backoff"
 )
 
 type RetryConfig struct {
@@ -13,8 +15,18 @@ type RetryConfig struct {
 }
 
 func DefaultRetry() RetryConfig {
-	return RetryConfig{Initial: 5 * time.Second, Max: time.Minute, CooldownAfter: 5, Cooldown: 5 * time.Minute}
+	return RetryConfig{Initial: DefaultRetryInitial, Max: DefaultRetryMax, CooldownAfter: DefaultRetryCooldownAfter, Cooldown: DefaultRetryCooldown}
 }
+
+// Delay is the jittered wait after the given number of consecutive failed
+// starts; sample in [0, 1] picks the point within the jitter window.
+func (r RetryConfig) Delay(failures int, sample float64) time.Duration {
+	return backoff.Delay(failures, r.Initial, r.Max, r.Cooldown, r.CooldownAfter, sample)
+}
+
+// CoolingDown reports whether that many consecutive failures have moved
+// from the exponential ramp to the flat cooldown.
+func (r RetryConfig) CoolingDown(failures int) bool { return failures >= r.CooldownAfter }
 
 func defaultRetrySettings() map[string]any {
 	r := DefaultRetry()
@@ -43,7 +55,7 @@ func (ss *ScaleSetConfig) DockerReadyTimeout() time.Duration {
 	if ss.Docker.ReadyTimeout != nil {
 		return *ss.Docker.ReadyTimeout
 	}
-	return 5 * time.Minute
+	return DefaultReadyTimeout
 }
 
 type DiagnosticsConfig struct {

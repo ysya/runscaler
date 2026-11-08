@@ -8,6 +8,7 @@ log-format = "text"
 concurrent = 0                          # host-wide limit; 0 = sum of all max-runners
 health-address = "127.0.0.1"              # set 0.0.0.0 explicitly for remote monitoring
 health-port = 8080
+# dry-run = false                         # validate configuration and connectivity, then exit without listening
 # drain-timeout = "2h"                    # SIGTERM/SIGQUIT wait for busy jobs; "0s" disables drain
 # log-file = "/var/log/runner/runner.log" # default: /var/log/runner/runner.log (root), ~/.local/state/runner/runner.log (Linux), ~/Library/Logs/runner/runner.log (macOS); "" disables
 
@@ -87,6 +88,7 @@ dind = true
 # shared-volume-name = "runner-shared"     # named volume backing shared-volume; distinct names isolate scalesets (or two runner processes)
 # memory = 0     # MB, 0 = unlimited (e.g. 8192 for 8GB)
 # cpu = 0        # cores, 0 = unlimited (e.g. 4)
+# platform = ""  # force the container platform, e.g. "linux/amd64" on an arm64 host; "" = daemon default
 # pids-limit = 0 # max pids (processes + threads) per container; 0 = unlimited (e.g. 4096 to stop fork bombs)
 # network = ""   # pre-existing docker network to attach runners to; "" = default bridge (e.g. one created with icc disabled)
 # cache-volumes = [                        # named volumes mounted at tool cache paths; persistent, never TTL-swept
@@ -123,6 +125,8 @@ dind = true
 # memory = 0     # MB, 0 = use image default
 # pool-size = 0  # pre-warmed VMs, 0 = disabled
 # home = "/Users/admin/.tart"             # TART_HOME for tart CLI ("" = ~/.tart)
+# cache-cleanup = true                    # periodic `tart prune` of the OCI/IPSW cache (default on)
+# cache-max-age = "168h"                  # prune cache entries not accessed within this window
 # cache-budget = 0                        # cap OCI/IPSW cache size in GB; 0 = disabled
 # cache-cleanup-interval = "24h"          # how often to run `tart prune --space-budget`
 # mtu = 0                                 # guest MTU: 0 = match the host's route to GitHub when it is a VPN tunnel, -1 = off, 1280-1500 = fixed

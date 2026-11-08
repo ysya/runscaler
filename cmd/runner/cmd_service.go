@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"text/template"
@@ -22,6 +23,7 @@ import (
 	"github.com/ysya/runscaler/internal/config"
 	"github.com/ysya/runscaler/internal/layout"
 	runnerlock "github.com/ysya/runscaler/internal/lock"
+	"github.com/ysya/runscaler/internal/shell"
 )
 
 // Service file paths and identifiers.
@@ -48,12 +50,14 @@ const (
 // serviceManager abstracts platform-specific service management.
 type serviceManager interface {
 	install(opts installOpts) error
-	uninstall(user bool) error
-	start(user bool) error
-	stop(user bool) error
-	restart(user bool) error
-	status(user bool) error
-	logs(user bool, follow bool, lines int) error
+	// uninstall removes the definition discovery found at definition ("" if
+	// unknown), but only when it is the file runner itself writes.
+	uninstall(scope serviceScope, definition string) error
+	start(scope serviceScope) error
+	stop(scope serviceScope) error
+	restart(scope serviceScope) error
+	status(scope serviceScope) error
+	logs(scope serviceScope, follow bool, lines int) error
 }
 
 type installOpts struct {
@@ -61,12 +65,14 @@ type installOpts struct {
 	runtimeGroup        string
 	supplementaryGroups []string
 	environmentFiles    []string
-	user                bool
-	configPath          string
-	binaryPath          string
-	noStart             bool
-	force               bool
-	provider            string
+	// scope is scopeUser for the current user's service manager; anything
+	// else, including the zero value, is a system installation.
+	scope      serviceScope
+	configPath string
+	binaryPath string
+	noStart    bool
+	force      bool
+	provider   string
 	// nil means the config omitted drain-timeout and therefore inherits the
 	// compiled-in default; a non-nil zero explicitly disables draining.
 	drainTimeout *time.Duration
@@ -98,15 +104,16 @@ var serviceCmd = &cobra.Command{
 	Long: `Install, start, stop, and manage runner as a system service.
 
 On Linux, this uses systemd. On macOS, this uses launchd.
-macOS defaults to user-level LaunchAgents (no root required).
-Linux defaults to a system installation with a dedicated non-root runtime.
-Use --scope user (or --user) for a user installation. Management commands
-automatically select a unique installed service; use --scope to disambiguate.`,
-	Example: `  sudo runner service install             # Linux: install a non-root system service
-  runner service install --scope user        # Install as user service
-  runner service status                     # Show service status
-  runner service logs -f                    # Follow service logs
-  sudo runner service uninstall --user=false # Remove system service`,
+macOS supports only a LaunchAgent for the logged-in user (no root required).
+Linux defaults to a system installation with a dedicated non-root runtime;
+use --scope user for a user installation. Management commands select the
+unique installed service automatically; pass --scope user|system to
+disambiguate. --user and --user=false remain aliases for the two scopes.`,
+	Example: `  sudo runner service install                   # Linux: install a non-root system service
+  runner service install --scope user           # Install as user service
+  runner service status                         # Show service status
+  runner service logs -f                        # Follow service logs
+  sudo runner service uninstall --scope system  # Remove the system service`,
 }
 
 var serviceInstallCmd = &cobra.Command{
@@ -162,27 +169,18 @@ func init() {
 		serviceLogsCmd,
 	)
 
-	// install flags
+	// install flags; --scope and --user are added for every installation-aware
+	// command in installation.go.
 	f := serviceInstallCmd.Flags()
-	f.Bool("user", defaultUserService(), "Install as user-level service (no root required)")
 	f.String("config-path", "", "Config file path for the service (default: auto-detect)")
 	f.String("binary-path", "", "Path to runner binary (default: auto-detect)")
 	f.Bool("no-start", false, "Install and enable without starting")
 	f.Bool("force", false, "Regenerate an existing service definition after validating the new one")
 	f.String("environment-file", "", "Protected systemd environment file for service credential references")
 
-	// uninstall / start / stop / restart share --user
-	for _, c := range []*cobra.Command{serviceUninstallCmd, serviceStartCmd, serviceStopCmd, serviceRestartCmd} {
-		c.Flags().Bool("user", defaultUserService(), "Manage user-level service")
-	}
-
 	// logs flags
 	serviceLogsCmd.Flags().BoolP("follow", "f", false, "Follow log output")
 	serviceLogsCmd.Flags().IntP("lines", "n", 100, "Number of lines to show")
-	serviceLogsCmd.Flags().Bool("user", defaultUserService(), "Show user-level service logs")
-
-	// status --user
-	serviceStatusCmd.Flags().Bool("user", defaultUserService(), "Show user-level service status")
 }
 
 // ── Handler functions ───────────────────────────────────────────────────
@@ -237,7 +235,7 @@ func readServiceConfig(configPath string, required bool) (serviceConfigFacts, er
 // buildInstallOpts gathers everything a service definition depends on from
 // one read of the config. A missing config is only a warning for a fresh
 // install; --force requires one.
-func buildInstallOpts(user bool, configPath, binaryPath string, requireConfig bool, getenv func(string) string) (installOpts, []string, error) {
+func buildInstallOpts(scope serviceScope, configPath, binaryPath string, requireConfig bool, getenv func(string) string) (installOpts, []string, error) {
 	facts, err := readServiceConfig(configPath, requireConfig)
 	if err != nil {
 		return installOpts{}, nil, err
@@ -246,13 +244,13 @@ func buildInstallOpts(user bool, configPath, binaryPath string, requireConfig bo
 	if !facts.found {
 		warnings = append(warnings, fmt.Sprintf("Config file not found at %s; run 'runner init' to generate one first", configPath))
 	}
-	if !user && runtime.GOOS == "linux" {
+	if scope != scopeUser && runtime.GOOS == "linux" {
 		if _, warning := systemdLogsDirectory(facts.logFile); warning != "" {
 			warnings = append(warnings, warning)
 		}
 	}
 	return installOpts{
-		user:          user,
+		scope:         scope,
 		configPath:    configPath,
 		binaryPath:    binaryPath,
 		provider:      facts.provider,
@@ -264,7 +262,7 @@ func buildInstallOpts(user bool, configPath, binaryPath string, requireConfig bo
 }
 
 func runServiceInstall(cmd *cobra.Command, _ []string) error {
-	user, target, err := serviceCommandInstallation(cmd, true)
+	scope, target, err := serviceCommandInstallation(cmd, true)
 	if err != nil {
 		return err
 	}
@@ -277,10 +275,13 @@ func runServiceInstall(cmd *cobra.Command, _ []string) error {
 	if err := refuseDarwinRoot(runtime.GOOS, os.Geteuid(), "install the runner service", pathExists); err != nil {
 		return err
 	}
-	if user && os.Geteuid() == 0 {
+	if err := refuseDarwinSystemScope(runtime.GOOS, scope, "install the runner service"); err != nil {
+		return err
+	}
+	if scope == scopeUser && os.Geteuid() == 0 {
 		return errors.New("refusing to install a root user's service; run as the actual user without sudo, or select --scope system on Linux")
 	}
-	if err := checkCommandPrivileges(cmd, user); err != nil {
+	if err := checkCommandPrivileges(cmd, scope); err != nil {
 		return err
 	}
 	mgr, err := newServiceManager()
@@ -294,20 +295,20 @@ func runServiceInstall(cmd *cobra.Command, _ []string) error {
 	if target != nil && !cmd.Flags().Changed("binary-path") {
 		binaryPath = target.BinaryPath
 	}
-	configPath, err := resolveConfigPath(cmd)
+	configPath, err := resolveConfigPath(cmd, scope)
 	if err != nil {
 		return err
 	}
 	if target != nil {
 		if cmd.Flags().Changed("config-path") || cmd.Flags().Changed("config") {
-			if !sameFilePath(configPath, target.ConfigPath) {
-				return errors.New("explicit config conflicts with the installed service; use its installed config path")
+			if err := explicitConfigConflict(configPath, target); err != nil {
+				return err
 			}
 		} else {
 			configPath = target.ConfigPath
 		}
 	}
-	opts, warnings, err := buildInstallOpts(user, configPath, binaryPath, force || (!user && runtime.GOOS == "linux" && target == nil), os.Getenv)
+	opts, warnings, err := buildInstallOpts(scope, configPath, binaryPath, force || (scope != scopeUser && runtime.GOOS == "linux" && target == nil), os.Getenv)
 	if err != nil {
 		return err
 	}
@@ -316,7 +317,7 @@ func runServiceInstall(cmd *cobra.Command, _ []string) error {
 	}
 	opts.noStart = noStart
 	opts.force = force
-	if runtime.GOOS == "linux" && !user {
+	if runtime.GOOS == "linux" && scope != scopeUser {
 		if target == nil {
 			opts.runtimeUser = serviceAccountName
 			opts.runtimeGroup = serviceAccountName
@@ -327,12 +328,12 @@ func runServiceInstall(cmd *cobra.Command, _ []string) error {
 			}
 		}
 	}
-	if target != nil && user {
+	if target != nil && scope == scopeUser {
 		opts.xdgConfigHome = target.Environment["XDG_CONFIG_HOME"]
 		opts.xdgStateHome = target.Environment["XDG_STATE_HOME"]
 	}
 	if envFile, _ := cmd.Flags().GetString("environment-file"); envFile != "" {
-		if user || runtime.GOOS != "linux" {
+		if scope == scopeUser || runtime.GOOS != "linux" {
 			return errors.New("--environment-file is supported only for Linux system services")
 		}
 		path, err := filepath.Abs(envFile)
@@ -341,11 +342,9 @@ func runServiceInstall(cmd *cobra.Command, _ []string) error {
 		}
 		opts.environmentFiles = []string{path}
 	}
-	if target != nil && !user && !cmd.Flags().Changed("environment-file") {
+	if target != nil && scope != scopeUser && !cmd.Flags().Changed("environment-file") {
 		for key := range target.Environment {
-			switch key {
-			case "HOME", "RUNNER_SERVICE_SCOPE", "RUNNER_SERVICE_VERSION", "RUNNER_SERVICE_STOP_TIMEOUT", "XDG_CONFIG_HOME", "XDG_STATE_HOME":
-			default:
+			if !slices.Contains(serviceManagedEnvKeys, key) {
 				return errors.New("existing unit has custom inline environment; move it to a protected --environment-file before regeneration")
 			}
 		}
@@ -360,23 +359,13 @@ func runServiceInstall(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
-// installRetryCommand repeats a service install with the root-only copy of
-// the binary, keeping the scope, config and flags of the failed attempt.
+// installRetryCommand repeats a system service install with the root-only
+// copy of the binary, keeping the config and flags of the failed attempt.
+// Only a system install can fail the binary trust check: a user service
+// installed without root is never checked, and installing one as root is
+// refused before the check runs.
 func installRetryCommand(opts installOpts) string {
-	parts := []string{"sudo", rootBinaryPath, "service", "install"}
-	if opts.user {
-		parts = append(parts, "--user")
-	} else {
-		parts = append(parts, "--user=false")
-	}
-	if opts.force {
-		parts = append(parts, "--force")
-	}
-	if opts.noStart {
-		parts = append(parts, "--no-start")
-	}
-	parts = append(parts, "--config-path", shellQuotePath(opts.configPath), "--binary-path", rootBinaryPath)
-	return strings.Join(parts, " ")
+	return serviceInstallCommand(rootBinaryPath, scopeSystem, opts.configPath, opts.force, opts.noStart, opts.environmentFiles)
 }
 
 // renderServiceDefinition renders what install would write, so every render
@@ -391,13 +380,13 @@ var renderServiceDefinition = func(opts installOpts) (string, error) {
 // installService validates the binary and renders the definition before the
 // manager writes anything, so a failed --force leaves the installed service
 // as it was. Every entry point that installs a service goes through here.
-func installService(mgr serviceManager, opts installOpts, validateBinary func(user bool, path string) (string, error)) error {
-	binaryPath, err := validateBinary(opts.user, opts.binaryPath)
+func installService(mgr serviceManager, opts installOpts, validateBinary func(scope serviceScope, path string) (string, error)) error {
+	binaryPath, err := validateBinary(opts.scope, opts.binaryPath)
 	if err != nil {
 		return err
 	}
 	opts.binaryPath = binaryPath
-	if !opts.user {
+	if opts.scope != scopeUser {
 		for _, path := range opts.environmentFiles {
 			if err := validateServiceFile(path); err != nil {
 				return err
@@ -442,20 +431,22 @@ func untrustedBinaryHint(binary, retry string) string {
 		return "\n\n  Make the path reported above changeable only by root, then retry:\n    " + retry
 	}
 	return "\n\n  Install a copy only root can modify, then retry:\n" +
-		"    sudo install -m 0755 " + shellQuotePath(binary) + " " + rootBinaryPath + "\n" +
+		"    sudo install -m 0755 " + shell.Word(binary) + " " + rootBinaryPath + "\n" +
 		"    " + retry
 }
 
 // validateServiceBinary resolves the binary a service will run. On Linux, a
-// service that runs as root (system scope, or a user service installed by
-// root) must run a binary only root can modify: a root service executing a
-// user-writable file hands that user root.
-func validateServiceBinary(goos string, user bool, euid int, path string, evalSymlinks func(string) (string, error), stat statFunc) (string, error) {
+// system service must run a binary only root can modify: systemd starts it
+// from a root-managed unit, so a user-writable file would let that user run
+// code under the service's identity (root, for existing root services). A
+// user service is exempt unless root is installing it, which is refused
+// earlier anyway.
+func validateServiceBinary(goos string, scope serviceScope, euid int, path string, evalSymlinks func(string) (string, error), stat statFunc) (string, error) {
 	resolved, err := evalSymlinks(path)
 	if err != nil {
 		return "", fmt.Errorf("resolve binary %s: %w", path, err)
 	}
-	if goos != "linux" || (user && euid != 0) {
+	if goos != "linux" || (scope == scopeUser && euid != 0) {
 		return resolved, nil
 	}
 	st, err := stat(resolved)
@@ -471,111 +462,120 @@ func validateServiceBinary(goos string, user bool, euid int, path string, evalSy
 	return resolved, nil
 }
 
-func validateServiceBinaryFor(user bool, path string) (string, error) {
-	return validateServiceBinary(runtime.GOOS, user, os.Geteuid(), path, filepath.EvalSymlinks, lstatFile)
+func validateServiceBinaryFor(scope serviceScope, path string) (string, error) {
+	return validateServiceBinary(runtime.GOOS, scope, os.Geteuid(), path, filepath.EvalSymlinks, lstatFile)
 }
 
 func runServiceUninstall(cmd *cobra.Command, _ []string) error {
-	user, _, err := serviceCommandInstallation(cmd, false)
+	scope, target, err := serviceCommandInstallation(cmd, false)
 	if err != nil {
 		return err
 	}
-	if err := checkCommandPrivileges(cmd, user); err != nil {
+	if err := checkCommandPrivileges(cmd, scope); err != nil {
 		return err
 	}
 	mgr, err := newServiceManager()
 	if err != nil {
 		return err
 	}
-	return mgr.uninstall(user)
+	definition := ""
+	if target != nil {
+		definition = target.DefinitionPath
+	}
+	return mgr.uninstall(scope, definition)
 }
 
 func runServiceStart(cmd *cobra.Command, _ []string) error {
-	user, _, err := serviceCommandInstallation(cmd, false)
+	scope, _, err := serviceCommandInstallation(cmd, false)
 	if err != nil {
 		return err
 	}
 	if err := refuseDarwinRoot(runtime.GOOS, os.Geteuid(), "start the runner service", pathExists); err != nil {
 		return err
 	}
-	if err := checkCommandPrivileges(cmd, user); err != nil {
+	if err := refuseDarwinSystemScope(runtime.GOOS, scope, "start the runner service"); err != nil {
+		return err
+	}
+	if err := checkCommandPrivileges(cmd, scope); err != nil {
 		return err
 	}
 	mgr, err := newServiceManager()
 	if err != nil {
 		return err
 	}
-	return mgr.start(user)
+	return mgr.start(scope)
 }
 
 func runServiceStop(cmd *cobra.Command, _ []string) error {
-	user, _, err := serviceCommandInstallation(cmd, false)
+	scope, _, err := serviceCommandInstallation(cmd, false)
 	if err != nil {
 		return err
 	}
-	if err := checkCommandPrivileges(cmd, user); err != nil {
+	if err := checkCommandPrivileges(cmd, scope); err != nil {
 		return err
 	}
 	mgr, err := newServiceManager()
 	if err != nil {
 		return err
 	}
-	return mgr.stop(user)
+	return mgr.stop(scope)
 }
 
 func runServiceRestart(cmd *cobra.Command, _ []string) error {
-	user, _, err := serviceCommandInstallation(cmd, false)
+	scope, _, err := serviceCommandInstallation(cmd, false)
 	if err != nil {
 		return err
 	}
 	if err := refuseDarwinRoot(runtime.GOOS, os.Geteuid(), "restart the runner service", pathExists); err != nil {
 		return err
 	}
-	if err := checkCommandPrivileges(cmd, user); err != nil {
+	if err := refuseDarwinSystemScope(runtime.GOOS, scope, "restart the runner service"); err != nil {
+		return err
+	}
+	if err := checkCommandPrivileges(cmd, scope); err != nil {
 		return err
 	}
 	mgr, err := newServiceManager()
 	if err != nil {
 		return err
 	}
-	return mgr.restart(user)
+	return mgr.restart(scope)
 }
 
 func runServiceStatus(cmd *cobra.Command, _ []string) error {
-	user, _, err := serviceCommandInstallation(cmd, false)
+	scope, _, err := serviceCommandInstallation(cmd, false)
 	if err != nil {
 		return err
 	}
-	if err := statusPrivilegeError(runtime.GOOS, user, os.Geteuid()); err != nil {
+	if err := statusPrivilegeError(runtime.GOOS, scope, os.Geteuid(), hintBinary(cmd)); err != nil {
 		return err
 	}
 	mgr, err := newServiceManager()
 	if err != nil {
 		return err
 	}
-	return mgr.status(user)
+	return mgr.status(scope)
 }
 
-// statusPrivilegeError explains that launchctl list only shows
-// system services to root.
-func statusPrivilegeError(goos string, user bool, euid int) error {
-	if goos == "darwin" && !user && euid != 0 {
-		return errors.New("launchctl lists system services only to root; run: sudo runner service status --user=false")
+// statusPrivilegeError explains that launchctl lists system services only
+// to root.
+func statusPrivilegeError(goos string, scope serviceScope, euid int, binary string) error {
+	if goos == "darwin" && scope == scopeSystem && euid != 0 {
+		return errors.New("launchctl lists system services only to root; run: " + serviceCommand(binary, scopeSystem, "status"))
 	}
 	return nil
 }
 
-// launchdServiceLogFile prefers the current stderr log and falls back to the
-// combined log of plists generated by older releases.
-func launchdServiceLogFile(user bool, exists func(string) bool) (path, note string) {
-	if current := launchdStderrPath(user); exists(current) {
-		return current, ""
+// launchdServiceLogFile returns the service's stderr log when it exists.
+func launchdServiceLogFile(scope serviceScope, exists func(string) bool) string {
+	if current := launchdStderrPath(scope); exists(current) {
+		return current
 	}
-	return "", ""
+	return ""
 }
 
 func runServiceLogs(cmd *cobra.Command, _ []string) error {
-	user, _, err := serviceCommandInstallation(cmd, false)
+	scope, _, err := serviceCommandInstallation(cmd, false)
 	if err != nil {
 		return err
 	}
@@ -585,7 +585,7 @@ func runServiceLogs(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	return mgr.logs(user, follow, lines)
+	return mgr.logs(scope, follow, lines)
 }
 
 // ── systemd implementation (Linux) ──────────────────────────────────────
@@ -656,7 +656,7 @@ type systemdManager struct{}
 // rendering separate from filesystem writes makes the sandbox directly testable.
 func renderSystemdUnit(opts installOpts) (string, error) {
 	if opts.runtimeUser != "" {
-		if opts.user || !validServicePrincipal(opts.runtimeUser) || !validServicePrincipal(opts.runtimeGroup) || opts.runtimeUser == "root" || opts.runtimeUser == "0" || opts.runtimeGroup == "root" || opts.runtimeGroup == "0" {
+		if opts.scope == scopeUser || !validServicePrincipal(opts.runtimeUser) || !validServicePrincipal(opts.runtimeGroup) || opts.runtimeUser == "root" || opts.runtimeUser == "0" || opts.runtimeGroup == "root" || opts.runtimeGroup == "0" {
 			return "", errors.New("invalid non-root system service identity")
 		}
 		for _, group := range opts.supplementaryGroups {
@@ -681,7 +681,7 @@ func renderSystemdUnit(opts installOpts) (string, error) {
 		Description:         serviceDescription,
 		ExecStart:           binary + " run --config " + configPath,
 		AfterDocker:         opts.provider == "docker",
-		User:                opts.user,
+		User:                opts.scope == scopeUser,
 		LogsDirectory:       logsDir,
 		// ProtectSystem=strict leaves /tmp read-only, where runner run creates
 		// its machine-wide lock. PrivateTmp would not help: a private /tmp
@@ -727,15 +727,15 @@ func serviceEnvironment(opts installOpts) []envVar {
 		{Key: serviceVersionEnv, Value: strconv.Itoa(currentServiceVersion)},
 		{Key: serviceStopTimeoutEnv, Value: strconv.Itoa(int(serviceStopTimeout(opts.drainTimeout).Seconds()))},
 	}
-	scope := "system"
-	if opts.user {
-		scope = "user"
+	scope := scopeSystem
+	if opts.scope == scopeUser {
+		scope = scopeUser
 	}
-	env = append(env, envVar{Key: "RUNNER_SERVICE_SCOPE", Value: scope})
+	env = append(env, envVar{Key: serviceScopeEnv, Value: string(scope)})
 	if opts.runtimeUser != "" {
 		env = append(env, envVar{Key: "HOME", Value: "/var/lib/runner"})
 	}
-	if opts.user {
+	if scope == scopeUser {
 		if filepath.IsAbs(opts.xdgConfigHome) {
 			env = append(env, envVar{Key: "XDG_CONFIG_HOME", Value: opts.xdgConfigHome})
 		}
@@ -813,23 +813,72 @@ func rejectControlChars(s string) error {
 	return nil
 }
 
-func (m *systemdManager) install(opts installOpts) error {
-	unitDir := systemdSystemDir
-	if opts.user {
+// systemdVendorUnitPaths are where a distribution package installs
+// runner.service, in the order systemd loads them. Discovery manages a unit
+// found there, but runner never writes or deletes these files: they belong
+// to the package manager.
+var systemdVendorUnitPaths = []string{"/usr/lib/systemd/system/" + systemdUnitFile, "/lib/systemd/system/" + systemdUnitFile}
+
+// systemdDefinitionPaths lists where scope's unit may be defined, in the
+// order systemd loads them: the unit runner writes, then, for a system
+// service, package units.
+func systemdDefinitionPaths(scope serviceScope) []string {
+	if scope == scopeUser {
+		return []string{systemdUnitPath(scopeUser)}
+	}
+	return append([]string{systemdUnitPath(scopeSystem)}, systemdVendorUnitPaths...)
+}
+
+// packageUnit returns the package-provided unit systemd would load for
+// scope, or "" when there is none. Package units are system units only.
+func packageUnit(scope serviceScope, exists func(string) bool) string {
+	if scope == scopeUser {
+		return ""
+	}
+	for _, path := range systemdVendorUnitPaths {
+		if exists(path) {
+			return path
+		}
+	}
+	return ""
+}
+
+// ownedDefinition refuses to act on a definition runner did not write. A
+// unit a package or an administrator installed is managed like any other,
+// but deleting it is the job of whatever installed it. An unknown
+// definition ("") is taken to be runner's own.
+func ownedDefinition(definition, owned string) error {
+	if definition == "" || definition == owned {
+		return nil
+	}
+	return fmt.Errorf("the runner service is defined by %s, which runner did not write; disable it with 'sudo systemctl disable --now %s' or remove the package that provides it", definition, serviceName)
+}
+
+// systemdUnitPath is where runner writes the unit file for the given scope.
+func systemdUnitPath(scope serviceScope) string {
+	if scope == scopeUser {
 		home, _ := os.UserHomeDir()
-		unitDir = filepath.Join(home, ".config", "systemd", "user")
-		if err := os.MkdirAll(unitDir, 0755); err != nil {
+		return filepath.Join(home, ".config", "systemd", "user", systemdUnitFile)
+	}
+	return filepath.Join(systemdSystemDir, systemdUnitFile)
+}
+
+func (m *systemdManager) install(opts installOpts) error {
+	unitPath := systemdUnitPath(opts.scope)
+	if opts.scope == scopeUser {
+		if err := os.MkdirAll(filepath.Dir(unitPath), 0755); err != nil {
 			return fmt.Errorf("failed to create systemd user directory: %w", err)
 		}
 	}
-
-	unitPath := filepath.Join(unitDir, systemdUnitFile)
 
 	_, statErr := os.Stat(unitPath)
 	existed := statErr == nil
 	if existed && !opts.force {
 		return fmt.Errorf("service already installed at %s\n\n  Regenerate it in place with --force", unitPath)
 	}
+	// A package unit may already be running the service. Runner's own unit
+	// takes precedence over it, and only a restart applies the new one.
+	packaged := packageUnit(opts.scope, pathExists)
 
 	unit, err := renderSystemdUnit(opts)
 	if err != nil {
@@ -839,8 +888,11 @@ func (m *systemdManager) install(opts installOpts) error {
 		return fmt.Errorf("failed to write unit file: %w", err)
 	}
 	fmt.Printf("  ✓ Service file installed at %s\n", unitPath)
+	if packaged != "" {
+		fmt.Printf("    It takes precedence over the package unit at %s\n", packaged)
+	}
 
-	userFlag := systemdUserFlag(opts.user)
+	userFlag := systemdUserFlag(opts.scope)
 	if err := runCmd("systemctl", append(userFlag, "daemon-reload")...); err != nil {
 		return fmt.Errorf("systemctl daemon-reload failed: %w", err)
 	}
@@ -851,7 +903,7 @@ func (m *systemdManager) install(opts installOpts) error {
 
 	if !opts.noStart {
 		action := "start"
-		if existed {
+		if existed || packaged != "" {
 			action = "restart"
 		}
 		if err := runCmd("systemctl", append(userFlag, action, serviceName)...); err != nil {
@@ -866,53 +918,46 @@ func (m *systemdManager) install(opts installOpts) error {
 	return nil
 }
 
-// removeSystemdUnit stops, disables, and removes a systemd unit by name.
-func removeSystemdUnit(user bool, unitFile, svcName string) error {
-	unitDir := systemdSystemDir
-	if user {
-		home, _ := os.UserHomeDir()
-		unitDir = filepath.Join(home, ".config", "systemd", "user")
+func (m *systemdManager) uninstall(scope serviceScope, definition string) error {
+	unitPath := systemdUnitPath(scope)
+	if err := ownedDefinition(definition, unitPath); err != nil {
+		return err
 	}
-	unitPath := filepath.Join(unitDir, unitFile)
 	if _, err := os.Stat(unitPath); os.IsNotExist(err) {
 		return fmt.Errorf("%w (no unit file at %s)", errServiceNotInstalled, unitPath)
 	}
-	userFlag := systemdUserFlag(user)
-	_ = runCmd("systemctl", append(userFlag, "stop", svcName)...)
-	_ = runCmd("systemctl", append(userFlag, "disable", svcName)...)
+	userFlag := systemdUserFlag(scope)
+	_ = runCmd("systemctl", append(userFlag, "stop", serviceName)...)
+	_ = runCmd("systemctl", append(userFlag, "disable", serviceName)...)
 	if err := os.Remove(unitPath); err != nil {
 		return fmt.Errorf("failed to remove unit file: %w", err)
 	}
 	_ = runCmd("systemctl", append(userFlag, "daemon-reload")...)
-	return nil
-}
-
-func (m *systemdManager) uninstall(user bool) error {
-	if err := removeSystemdUnit(user, systemdUnitFile, serviceName); err != nil {
-		return err
-	}
 	fmt.Printf("  ✓ Service stopped, disabled, and removed\n")
+	if packaged := packageUnit(scope, pathExists); packaged != "" {
+		fmt.Printf("  ⚠ systemd now loads the package unit at %s instead; it is disabled and stopped\n", packaged)
+	}
 	return nil
 }
 
-func (m *systemdManager) start(user bool) error {
-	return runCmdPassthrough("systemctl", append(systemdUserFlag(user), "start", serviceName)...)
+func (m *systemdManager) start(scope serviceScope) error {
+	return runCmdPassthrough("systemctl", append(systemdUserFlag(scope), "start", serviceName)...)
 }
 
-func (m *systemdManager) stop(user bool) error {
-	return runCmdPassthrough("systemctl", append(systemdUserFlag(user), "stop", serviceName)...)
+func (m *systemdManager) stop(scope serviceScope) error {
+	return runCmdPassthrough("systemctl", append(systemdUserFlag(scope), "stop", serviceName)...)
 }
 
-func (m *systemdManager) restart(user bool) error {
-	return runCmdPassthrough("systemctl", append(systemdUserFlag(user), "restart", serviceName)...)
+func (m *systemdManager) restart(scope serviceScope) error {
+	return runCmdPassthrough("systemctl", append(systemdUserFlag(scope), "restart", serviceName)...)
 }
 
-func (m *systemdManager) status(user bool) error {
-	return runCmdPassthrough("systemctl", append(systemdUserFlag(user), "status", serviceName)...)
+func (m *systemdManager) status(scope serviceScope) error {
+	return runCmdPassthrough("systemctl", append(systemdUserFlag(scope), "status", serviceName)...)
 }
 
-func (m *systemdManager) logs(user bool, follow bool, lines int) error {
-	args := systemdUserFlag(user)
+func (m *systemdManager) logs(scope serviceScope, follow bool, lines int) error {
+	args := systemdUserFlag(scope)
 	args = append(args, "-u", serviceName, "-n", fmt.Sprintf("%d", lines))
 	if follow {
 		args = append(args, "-f")
@@ -920,8 +965,8 @@ func (m *systemdManager) logs(user bool, follow bool, lines int) error {
 	return runCmdPassthrough("journalctl", args...)
 }
 
-func systemdUserFlag(user bool) []string {
-	if user {
+func systemdUserFlag(scope serviceScope) []string {
+	if scope == scopeUser {
 		return []string{"--user"}
 	}
 	return nil
@@ -987,7 +1032,7 @@ func renderLaunchdPlist(opts installOpts) (string, error) {
 		Label:              launchdLabel,
 		BinaryPath:         opts.binaryPath,
 		ConfigPath:         opts.configPath,
-		StderrPath:         launchdStderrPath(opts.user),
+		StderrPath:         launchdStderrPath(opts.scope),
 		StopTimeoutSeconds: int(serviceStopTimeout(opts.drainTimeout).Seconds()),
 		Environment:        serviceEnvironment(opts),
 	}
@@ -1006,16 +1051,18 @@ func xmlEscape(s string) string {
 
 // launchdStderrPath keeps what runner cannot log itself: startup failures,
 // panics and child process stderr. It is not rotated.
-func launchdStderrPath(user bool) string {
-	if user {
+func launchdStderrPath(scope serviceScope) string {
+	if scope == scopeUser {
 		home, _ := os.UserHomeDir()
 		return filepath.Join(home, "Library", "Logs", "runner", "stderr.log")
 	}
 	return "/var/log/runner/stderr.log"
 }
 
-func (m *launchdManager) plistPath(user bool) string {
-	if user {
+// launchdPlistPath is where runner writes, and discovery looks for, scope's
+// launchd definition.
+func launchdPlistPath(scope serviceScope) string {
+	if scope == scopeUser {
 		home, _ := os.UserHomeDir()
 		return filepath.Join(home, "Library", "LaunchAgents", launchdPlistFile)
 	}
@@ -1023,16 +1070,16 @@ func (m *launchdManager) plistPath(user bool) string {
 }
 
 func (m *launchdManager) install(opts installOpts) error {
-	plist := m.plistPath(opts.user)
+	plist := launchdPlistPath(opts.scope)
 
 	// Ensure parent directory exists (for user LaunchAgents)
-	if opts.user {
+	if opts.scope == scopeUser {
 		if err := os.MkdirAll(filepath.Dir(plist), 0755); err != nil {
 			return fmt.Errorf("failed to create LaunchAgents directory: %w", err)
 		}
 	}
 
-	if err := os.MkdirAll(filepath.Dir(launchdStderrPath(opts.user)), 0o700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(launchdStderrPath(opts.scope)), 0o700); err != nil {
 		return fmt.Errorf("failed to create log directory: %w", err)
 	}
 
@@ -1067,53 +1114,46 @@ func (m *launchdManager) install(opts installOpts) error {
 	return nil
 }
 
-// removeLaunchdPlist unloads and removes a launchd plist at the given path.
-func removeLaunchdPlist(plistPath string) error {
-	if _, err := os.Stat(plistPath); os.IsNotExist(err) {
-		return fmt.Errorf("%w (no plist at %s)", errServiceNotInstalled, plistPath)
-	}
-	_ = runCmd("launchctl", "unload", plistPath)
-	if err := os.Remove(plistPath); err != nil {
-		return fmt.Errorf("failed to remove plist: %w", err)
-	}
-	return nil
-}
-
-func (m *launchdManager) uninstall(user bool) error {
-	if err := removeLaunchdPlist(m.plistPath(user)); err != nil {
+func (m *launchdManager) uninstall(scope serviceScope, definition string) error {
+	plist := launchdPlistPath(scope)
+	if err := ownedDefinition(definition, plist); err != nil {
 		return err
+	}
+	if _, err := os.Stat(plist); os.IsNotExist(err) {
+		return fmt.Errorf("%w (no plist at %s)", errServiceNotInstalled, plist)
+	}
+	_ = runCmd("launchctl", "unload", plist)
+	if err := os.Remove(plist); err != nil {
+		return fmt.Errorf("failed to remove plist: %w", err)
 	}
 	fmt.Printf("  ✓ Service unloaded and removed\n")
 	return nil
 }
 
-func (m *launchdManager) start(user bool) error {
-	plist := m.plistPath(user)
+func (m *launchdManager) start(scope serviceScope) error {
+	plist := launchdPlistPath(scope)
 	return runCmdPassthrough("launchctl", "load", "-w", plist)
 }
 
-func (m *launchdManager) stop(user bool) error {
-	plist := m.plistPath(user)
+func (m *launchdManager) stop(scope serviceScope) error {
+	plist := launchdPlistPath(scope)
 	return runCmdPassthrough("launchctl", "unload", plist)
 }
 
-func (m *launchdManager) restart(user bool) error {
-	plist := m.plistPath(user)
+func (m *launchdManager) restart(scope serviceScope) error {
+	plist := launchdPlistPath(scope)
 	_ = runCmd("launchctl", "unload", plist)
 	return runCmdPassthrough("launchctl", "load", "-w", plist)
 }
 
-func (m *launchdManager) status(_ bool) error {
+func (m *launchdManager) status(_ serviceScope) error {
 	return runCmdPassthrough("launchctl", "list", launchdLabel)
 }
 
-func (m *launchdManager) logs(user bool, follow bool, lines int) error {
-	logFile, note := launchdServiceLogFile(user, pathExists)
+func (m *launchdManager) logs(scope serviceScope, follow bool, lines int) error {
+	logFile := launchdServiceLogFile(scope, pathExists)
 	if logFile == "" {
-		return fmt.Errorf("service log not found at %s", launchdStderrPath(user))
-	}
-	if note != "" {
-		fmt.Fprintln(os.Stderr, note)
+		return fmt.Errorf("service log not found at %s", launchdStderrPath(scope))
 	}
 	args := []string{"-n", fmt.Sprintf("%d", lines)}
 	if follow {
@@ -1125,40 +1165,41 @@ func (m *launchdManager) logs(user bool, follow bool, lines int) error {
 
 // ── Helper functions ────────────────────────────────────────────────────
 
-func checkPrivileges(user bool) error {
-	if user {
+// checkCommandPrivileges enforces who may manage each scope: a user service
+// belongs to the invoking user, never root, and a system service needs root.
+// Without root it prints the exact command to rerun, forwarding the flags
+// that were given, and for an install the user-scope alternative.
+func checkCommandPrivileges(cmd *cobra.Command, scope serviceScope) error {
+	if scope == scopeUser {
 		if os.Geteuid() == 0 {
 			return errors.New("user service operations must run as the actual user without sudo")
 		}
 		return nil
 	}
-	if os.Geteuid() != 0 {
-		return fmt.Errorf("system-level service management requires root privileges\n\n" +
-			"  Run with sudo:  sudo runner service install --user=false\n" +
-			"  Or use --user:  runner service install --user")
+	if os.Geteuid() == 0 {
+		return nil
 	}
-	return nil
-}
-
-func checkCommandPrivileges(cmd *cobra.Command, user bool) error {
-	err := checkPrivileges(user)
-	if err == nil || user {
-		return err
-	}
-	binary, exeErr := os.Executable()
-	if exeErr != nil {
-		return err
-	}
-	if target := targetInContext(cmd); target != nil && target.BinaryPath != "" {
-		binary = target.BinaryPath
-	}
-	parts := []string{"sudo", shellQuotePath(binary), "service", cmd.Name(), "--scope", "system"}
+	var args []string
 	for _, name := range []string{"config", "config-path", "binary-path", "environment-file", "force", "no-start"} {
-		if f := cmd.Flags().Lookup(name); f != nil && f.Changed {
-			parts = append(parts, "--"+name+"="+shellQuotePath(f.Value.String()))
+		f := cmd.Flags().Lookup(name)
+		if f == nil || !f.Changed {
+			continue
+		}
+		switch {
+		case f.Value.Type() != "bool":
+			args = append(args, "--"+name, f.Value.String())
+		case f.Value.String() == "true":
+			args = append(args, "--"+name)
+		default:
+			args = append(args, "--"+name+"=false")
 		}
 	}
-	return fmt.Errorf("system service management requires root; run:\n\n  %s", strings.Join(parts, " "))
+	binary := hintBinary(cmd)
+	msg := "system service management requires root; run:\n\n  " + serviceCommand(binary, scopeSystem, cmd.Name(), args...)
+	if cmd.Name() == "install" {
+		msg += "\n\n  Or install a user service instead:\n\n  " + serviceCommand(binary, scopeUser, "install")
+	}
+	return errors.New(msg)
 }
 
 // resolveBinaryPath returns the real file the service will execute; the
@@ -1183,7 +1224,10 @@ func resolveBinaryPath(cmd *cobra.Command) (string, error) {
 	return resolved, nil
 }
 
-func resolveConfigPath(cmd *cobra.Command) (string, error) {
+// resolveConfigPath picks the config a new service definition records: an
+// explicit flag, else the scope's standard location, with a local
+// config.toml taking precedence for a user service as it does for the CLI.
+func resolveConfigPath(cmd *cobra.Command, scope serviceScope) (string, error) {
 	if p, _ := cmd.Flags().GetString("config-path"); p != "" {
 		return filepath.Abs(p)
 	}
@@ -1193,11 +1237,10 @@ func resolveConfigPath(cmd *cobra.Command) (string, error) {
 	if p := cmd.Root().PersistentFlags().Lookup("config"); p != nil && p.Value.String() != "" {
 		return filepath.Abs(p.Value.String())
 	}
-	user, _ := cmd.Flags().GetBool("user")
-	if !user {
+	if scope != scopeUser {
 		return defaultConfigPath, nil
 	}
-	path, err := userConfigPath("runner")
+	path, err := userConfigPath()
 	if err != nil {
 		return "", err
 	}
@@ -1213,14 +1256,7 @@ func resolveConfigPath(cmd *cobra.Command) (string, error) {
 // own drain deadline. When drain is disabled, that minute still covers the
 // normal 30-second forced cleanup and scale-set deletion.
 func serviceStopTimeout(configured *time.Duration) time.Duration {
-	drainTimeout := config.DefaultDrainTimeout
-	if configured != nil {
-		drainTimeout = *configured
-	}
-	if drainTimeout < 0 {
-		drainTimeout = 0
-	}
-	return drainTimeout + time.Minute
+	return max(config.DrainTimeoutOrDefault(configured), 0) + time.Minute
 }
 
 func platformDefaultProvider() string {

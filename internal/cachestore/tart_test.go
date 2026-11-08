@@ -8,15 +8,9 @@ import (
 	"time"
 )
 
-// fakeCommandRunner implements provider.CommandRunner for tartStore's tests.
-// Kept to what tartStore.Measure actually needs — one canned Run() result
-// plus its last invocation — rather than mirroring
-// internal/provider/tart_test.go's fuller mockCommandRunner (multi-call
-// history, prefix matching): PruneTartCache's own command construction is
-// already covered by that package's tests, and tartStore.Reclaim(Tier2)
-// delegates to the exported provider.PruneTartCache wrapper directly (it
-// builds its own execCommandRunner internally), so this double is never
-// consulted for Reclaim at all — only for Measure's direct `du` call.
+// fakeCommandRunner implements provider.CommandRunner for tartStore's
+// Measure tests: one canned Run() result plus its last invocation. The
+// prune tests in tart_prune_test.go use scriptedRunner instead.
 type fakeCommandRunner struct {
 	output []byte
 	err    error
@@ -50,7 +44,7 @@ func TestTartStore_PathFollowsTartHome(t *testing.T) {
 // then tart's own default ($HOME/.tart). Dropping or reordering any level
 // makes this store report a path tart itself never reads or writes from,
 // which breaks the disk guard's per-filesystem grouping (see Path()'s doc
-// comment) — this is the correctness point specific to this task.
+// comment).
 func TestTartStore_PathResolutionOrder(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
@@ -105,10 +99,11 @@ func TestTartStore_NameKindEnabled(t *testing.T) {
 	}
 }
 
-// TestTartStore_Tier4NeverWipesWholesale pins the second deliberate-zero
-// decision the brief calls out: re-pulling a 140 GB macOS image is far more
-// expensive than any disk pressure a wholesale wipe would relieve, and
-// tart prune (Tier2) already applies its own LRU.
+// TestTartStore_Tier4NeverWipesWholesale pins that Tier4 is a deliberate
+// no-op for this store (see the Tier4 case in tartStore.Reclaim):
+// re-pulling a 140 GB macOS image is far more expensive than any disk
+// pressure a wholesale wipe would relieve, and tart prune (Tier2) already
+// applies its own LRU.
 func TestTartStore_Tier4NeverWipesWholesale(t *testing.T) {
 	s := NewTartStore(nil, TartConfig{
 		Enabled: true, Home: "/Volumes/FrankData/tart", MaxAge: 24 * time.Hour, BudgetGB: 50,
@@ -133,12 +128,13 @@ func TestTartStore_Tier1AndTier3AreNoOps(t *testing.T) {
 	}
 }
 
-// TestTartStore_Tier2ReclaimsRegardlessOfEnabled pins the 2026-08-14 spec
-// revision (see store.go's Enabled doc comment): the disk guard calls
-// Reclaim on a disabled store exactly like an enabled one, so Tier2 must
-// not gate on cfg.Enabled — only cmd/runner's periodic sweeper still
-// respects Enabled(), by never launching the goroutine that would call
-// this method in the first place. Tier4 stays a no-op regardless (see
+// TestTartStore_Tier2ReclaimsRegardlessOfEnabled pins that the disk guard
+// reclaims through this store even when its periodic sweep is disabled
+// (see store.go's Enabled doc comment): the guard calls Reclaim on a
+// disabled store exactly like an enabled one, so Tier2 must not gate on
+// cfg.Enabled — only cmd/runner's periodic sweeper respects Enabled(), by
+// never launching the goroutine that would call this method in the first
+// place. Tier4 stays a no-op regardless (see
 // TestTartStore_Tier4NeverWipesWholesale) — that decision is about the
 // tier itself, not Enabled().
 func TestTartStore_Tier2ReclaimsRegardlessOfEnabled(t *testing.T) {
@@ -146,12 +142,9 @@ func TestTartStore_Tier2ReclaimsRegardlessOfEnabled(t *testing.T) {
 		Enabled: false, Home: "/Volumes/FrankData/tart", // MaxAge/BudgetGB both 0
 	})
 
-	// MaxAge/BudgetGB both 0 is the one Tier2 scenario safely exercisable
-	// without shelling out to `tart` (see
-	// TestTartStore_Tier2DelegatesToPruneTartCacheWithoutShellingOut) — it
-	// exercises PruneTartCache's own no-op path, proving Reclaim reached
-	// the Tier2 branch (not skipped for being disabled) without needing a
-	// real `tart` binary.
+	// With MaxAge/BudgetGB both 0 the prune has no criterion and runs no
+	// command, so a nil runner proves Reclaim reached the Tier2 branch (not
+	// skipped for being disabled) without touching `tart`.
 	freed, err := s.Reclaim(context.Background(), Tier2)
 	if err != nil {
 		t.Fatalf("Reclaim(Tier2) error: %v", err)
@@ -161,17 +154,11 @@ func TestTartStore_Tier2ReclaimsRegardlessOfEnabled(t *testing.T) {
 	}
 }
 
-// TestTartStore_Tier2DelegatesToPruneTartCacheWithoutShellingOut proves
-// Reclaim(Tier2) is wired to provider.PruneTartCache without actually
-// invoking the `tart` binary: PruneTartCache itself no-ops (returns nil
-// before running any command) when both MaxAge and BudgetGB are <= 0 — the
-// one Tier2 scenario safely exercisable from a unit test. This machine (and
-// any other with tart installed) must never have `go test` trigger a real
-// `tart prune`; PruneTartCache's actual command construction is already
-// covered by internal/provider/tart_test.go against an injected
-// CommandRunner, which this package has no access to (pruneTartCacheWith is
-// unexported).
-func TestTartStore_Tier2DelegatesToPruneTartCacheWithoutShellingOut(t *testing.T) {
+// TestTartStore_Tier2WithoutCriteriaRunsNothing pins that a Tier2 reclaim
+// with neither max-age nor budget issues no command at all: `tart prune`
+// requires a criterion, so an unconfigured store is a quiet no-op rather
+// than an error (the command itself is covered in tart_prune_test.go).
+func TestTartStore_Tier2WithoutCriteriaRunsNothing(t *testing.T) {
 	s := NewTartStore(nil, TartConfig{Enabled: true, Home: "/Volumes/FrankData/tart"}) // MaxAge/BudgetGB both 0
 
 	freed, err := s.Reclaim(context.Background(), Tier2)

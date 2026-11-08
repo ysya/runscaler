@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ysya/runscaler/internal/shell"
 )
 
 // --- sharedVolumeStore ---
@@ -105,10 +107,10 @@ func TestSharedVolumeStore_DisabledReclaimsNothing(t *testing.T) {
 }
 
 // TestSharedVolumeStore_Tier3RunsTwoPhaseDeleteAndReportsFreedBytes checks
-// the full happy path: one helper container, the same two-phase delete
-// script as provider.CleanupSharedVolumeStale (mtime days rounded, mount
-// path shell-quoted), and freed bytes computed from the before/after `du`
-// lines the fake plays back.
+// the full happy path: one helper container, the two-phase delete script
+// (files older than MaxAge first, then empty directories; MaxAge converted
+// to whole mtime days, mount path shell-quoted), and freed bytes computed
+// from the before/after `du` lines the fake plays back.
 func TestSharedVolumeStore_Tier3RunsTwoPhaseDeleteAndReportsFreedBytes(t *testing.T) {
 	fake := &fakeDockerAPI{containerLogsStdout: "5000000\t/shared data\n1200000\t/shared data\n"}
 	s := NewSharedVolumeStore(fake, SharedVolumeConfig{
@@ -128,7 +130,7 @@ func TestSharedVolumeStore_Tier3RunsTwoPhaseDeleteAndReportsFreedBytes(t *testin
 	}
 
 	script := fake.helperScripts[0]
-	quoted := shellQuote("/shared data")
+	quoted := shell.Quote("/shared data")
 	if !strings.Contains(script, "-mtime +3") {
 		t.Errorf("script should use -mtime +3, got: %q", script)
 	}
@@ -398,7 +400,7 @@ func TestReclaimDeletesEvenWhenDuFails(t *testing.T) {
 	// Witness: under the pre-fix `set -e; <bare du>; …` shape, this same du
 	// stub must stop whatever follows from running at all.
 	marker := filepath.Join(mount, "delete-would-have-run")
-	runScript(fmt.Sprintf("set -e; %s; touch %s", duCommand(mount), shellQuote(marker)))
+	runScript(fmt.Sprintf("set -e; %s; touch %s", duCommand(mount), shell.Quote(marker)))
 	if _, err := os.Stat(marker); err == nil {
 		t.Errorf("witness failed: `set -e` did not abort after the du stub exited non-zero, "+
 			"so the assertion above cannot distinguish the fixed script from the broken one "+

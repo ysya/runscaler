@@ -7,20 +7,26 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/spf13/viper"
 	"github.com/ysya/runscaler/internal/layout"
+	"github.com/ysya/runscaler/internal/shell"
 )
 
 const (
 	serviceVersionEnv     = "RUNNER_SERVICE_VERSION"
 	serviceStopTimeoutEnv = "RUNNER_SERVICE_STOP_TIMEOUT"
-	// currentServiceVersion is the template generation that records the two
+	serviceScopeEnv       = layout.ServiceScopeEnv
+	// currentServiceVersion is the template generation that records the
 	// variables above; bump it whenever generated definitions change.
 	currentServiceVersion = 3
 )
+
+// serviceManagedEnvKeys are the only inline Environment= entries runner
+// writes into a definition. Anything else in an installed unit is operator
+// data that regeneration and maintenance must not copy around.
+var serviceManagedEnvKeys = []string{"HOME", serviceScopeEnv, serviceVersionEnv, serviceStopTimeoutEnv, "XDG_CONFIG_HOME", "XDG_STATE_HOME"}
 
 // startedByServiceManager reports whether systemd, or launchd under runner's
 // current label, started this process. A macOS terminal sets
@@ -29,11 +35,7 @@ func startedByServiceManager(getenv func(string) string) bool {
 	if getenv("INVOCATION_ID") != "" {
 		return true
 	}
-	switch getenv("XPC_SERVICE_NAME") {
-	case launchdLabel:
-		return true
-	}
-	return false
+	return getenv("XPC_SERVICE_NAME") == launchdLabel
 }
 
 // outdatedServiceWarnings reads the template generation and stop timeout that
@@ -60,27 +62,6 @@ func outdatedServiceWarnings(getenv func(string) string, drainTimeout time.Durat
 	return warnings
 }
 
-// serviceReinstallCommand regenerates the service in place with the config
-// and binary this process actually uses.
-func serviceReinstallCommand(root bool, configPath, binaryPath string) string {
-	var parts []string
-	if root {
-		parts = append(parts, "sudo")
-	}
-	parts = append(parts, shellQuotePath(binaryPath), "service", "install")
-	if root {
-		parts = append(parts, "--user=false")
-	} else {
-		parts = append(parts, "--user")
-	}
-	parts = append(parts, "--force")
-	if configPath != "" {
-		parts = append(parts, "--config-path", shellQuotePath(configPath))
-	}
-	parts = append(parts, "--binary-path", shellQuotePath(binaryPath))
-	return strings.Join(parts, " ")
-}
-
 // currentBinaryPath is the resolved executable, or "runner" when unknown.
 func currentBinaryPath() string {
 	exe, err := os.Executable()
@@ -104,21 +85,30 @@ func absConfigPath(path string) string {
 	return path
 }
 
-// serviceFixCommand regenerates a current service with its exact config and binary.
-func serviceFixCommand(goos string, root bool, configPath, binaryPath string, stat statFunc) string {
-	switch {
-	case goos == "linux" && root && binaryPath != rootBinaryPath && checkRootOnlyChain(binaryPath, stat) != nil:
+// serviceFixCommand regenerates a current service with its exact config and
+// binary. On Linux a system service may only run a root-protected binary, so
+// an untrusted one is first copied to rootBinaryPath.
+func serviceFixCommand(goos string, scope serviceScope, configPath, binaryPath string, stat statFunc) string {
+	if goos == "linux" && scope == scopeSystem && binaryPath != rootBinaryPath && checkRootOnlyChain(binaryPath, stat) != nil {
 		// One line, so it works in a log attribute and a terminal alike.
-		return "sudo install -m 0755 " + shellQuotePath(binaryPath) + " " + rootBinaryPath + " && " +
-			serviceReinstallCommand(true, configPath, rootBinaryPath)
-	default:
-		return serviceReinstallCommand(root, configPath, binaryPath)
+		return "sudo install -m 0755 " + shell.Word(binaryPath) + " " + rootBinaryPath + " && " +
+			serviceInstallCommand(rootBinaryPath, scopeSystem, configPath, true, false, nil)
 	}
+	return serviceInstallCommand(binaryPath, scope, configPath, true, false, nil)
 }
 
 // currentServiceFixCommand is serviceFixCommand for this process.
 func currentServiceFixCommand() string {
-	return serviceFixCommand(runtime.GOOS, layout.CurrentIdentity().System(), absConfigPath(viper.ConfigFileUsed()), currentBinaryPath(), lstatFile)
+	return serviceFixCommand(runtime.GOOS, scopeFromIdentity(layout.CurrentIdentity()), absConfigPath(viper.ConfigFileUsed()), currentBinaryPath(), lstatFile)
+}
+
+// scopeFromIdentity maps the running identity onto an installation scope: a
+// system layout regenerates the system service, anything else the user's.
+func scopeFromIdentity(id layout.Identity) serviceScope {
+	if id.System() {
+		return scopeSystem
+	}
+	return scopeUser
 }
 
 // warnOutdatedService logs each reason to regenerate the service together

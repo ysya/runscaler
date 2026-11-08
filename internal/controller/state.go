@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ysya/runscaler/internal/backoff"
 	"github.com/ysya/runscaler/internal/capacity"
 )
 
@@ -257,16 +258,6 @@ func (r *instanceState) lifecycleCounts() (provisioning, idle, busy, removing in
 	return provisioning, idle, busy, removing
 }
 
-func (r *instanceState) phase(name string) (instancePhase, bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	instance, ok := r.instances[name]
-	if !ok {
-		return 0, false
-	}
-	return instance.phase, true
-}
-
 func (r *instanceState) contains(name, instanceID string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -422,6 +413,17 @@ func (r *instanceState) claimRemoval(now time.Time) (name, instanceID string, ok
 	return "", "", false
 }
 
+// Retries of a runner whose removal failed: 5s doubling to 80s, four
+// doublings. No jitter: each runner retries on its own schedule.
+const (
+	removalRetryInitial = 5 * time.Second
+	removalRetryMax     = 80 * time.Second
+)
+
+func removalRetryDelay(attempts int) time.Duration {
+	return backoff.Exponential(attempts, removalRetryInitial, removalRetryMax)
+}
+
 func (r *instanceState) retryRemoval(name, instanceID string, now time.Time) (time.Duration, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -431,10 +433,7 @@ func (r *instanceState) retryRemoval(name, instanceID string, now time.Time) (ti
 	}
 	instance.cleanupInFlight = false
 	instance.cleanupAttempts++
-	delay := 5 * time.Second
-	for range min(instance.cleanupAttempts-1, 4) {
-		delay *= 2
-	}
+	delay := removalRetryDelay(instance.cleanupAttempts)
 	instance.cleanupRetryAt = now.Add(delay)
 	return delay, true
 }

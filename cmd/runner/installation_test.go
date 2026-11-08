@@ -170,23 +170,6 @@ func TestManagedConfigUsesInstalledConfigInsteadOfCurrentDirectory(t *testing.T)
 	}
 }
 
-func TestManagedConfigRejectsMutationAgainstDifferentConfig(t *testing.T) {
-	saved := discoverInstallations
-	t.Cleanup(func() { discoverInstallations = saved; viper.Reset() })
-	discoverInstallations = func(context.Context) []installationCandidate {
-		return []installationCandidate{{Scope: scopeUser, Target: &installationTarget{Scope: scopeUser, BinaryPath: "/home/ci/.local/bin/runner", ConfigPath: "/installed/config.toml"}}}
-	}
-	c := &cobra.Command{Use: "update"}
-	c.Flags().String("config", "", "")
-	addInstallationFlags(c)
-	if err := c.Flags().Set("config", "/different/config.toml"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := loadConfig(c); err == nil || !strings.Contains(err.Error(), "conflicts") {
-		t.Fatalf("config conflict not reported: %v", err)
-	}
-}
-
 func TestServiceScopeSelectionRejectsOppositeInstallation(t *testing.T) {
 	saved := discoverInstallations
 	t.Cleanup(func() { discoverInstallations = saved })
@@ -203,9 +186,9 @@ func TestServiceScopeSelectionRejectsOppositeInstallation(t *testing.T) {
 	}
 	c = &cobra.Command{Use: "restart"}
 	addInstallationFlags(c)
-	user, target, err := serviceCommandInstallation(c, false)
-	if err != nil || user || target.RuntimeUser != "runscaler" {
-		t.Fatalf("system/non-root target misclassified: user=%v target=%+v err=%v", user, target, err)
+	scope, target, err := serviceCommandInstallation(c, false)
+	if err != nil || scope != scopeSystem || target.RuntimeUser != "runscaler" {
+		t.Fatalf("system/non-root target misclassified: scope=%v target=%+v err=%v", scope, target, err)
 	}
 }
 
@@ -220,33 +203,5 @@ func TestExplicitMissingInstallationDoesNotFallBackToStandalone(t *testing.T) {
 	}
 	if _, err := commandInstallation(c); err == nil {
 		t.Fatal("explicit missing system target fell back to local configuration")
-	}
-}
-
-func TestFreshSystemPreparationDoctorDoesNotRequireAnInstalledUnit(t *testing.T) {
-	t.Setenv("RUNNER_SERVICE_PREPARATION", "1")
-	t.Setenv("RUNNER_MAINTENANCE_CONTEXT", "1")
-	t.Setenv("RUNNER_SERVICE_SCOPE", "system")
-	saved := discoverInstallations
-	t.Cleanup(func() { discoverInstallations = saved })
-	discoverInstallations = func(context.Context) []installationCandidate {
-		t.Error("pre-unit probe attempted installed-unit discovery")
-		return nil
-	}
-	c := &cobra.Command{Use: "doctor"}
-	c.Flags().Bool("fix", false, "")
-	addInstallationFlags(c)
-	if err := c.Flags().Set("scope", "system"); err != nil {
-		t.Fatal(err)
-	}
-	got, err := managedConfigPath(c, "/etc/runner/config.toml")
-	if err != nil || got != "/etc/runner/config.toml" {
-		t.Fatalf("fresh preparation config=%q, err=%v", got, err)
-	}
-	if err := c.Flags().Set("fix", "true"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := managedConfigPath(c, "/etc/runner/config.toml"); err == nil {
-		t.Fatal("preparation context allowed cleanup")
 	}
 }

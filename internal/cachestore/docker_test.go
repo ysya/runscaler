@@ -43,14 +43,15 @@ func TestDockerGarbageStore_OnlyTier1(t *testing.T) {
 	}
 }
 
-// TestDockerGarbageStore_ReclaimsRegardlessOfEnabled pins the 2026-08-14
-// spec revision (see store.go's Enabled doc comment): Enabled()==false
-// means the operator left the periodic prune sweep off, not "never touch
-// this even under disk pressure" — the disk guard calls Reclaim on a
-// disabled store exactly like an enabled one, so this method must not gate
-// on cfg.Enabled. cmd/runner's sweeper is what still respects Enabled(): it
-// never launches the goroutine that would call this method when disabled,
-// a different code path from this one.
+// TestDockerGarbageStore_ReclaimsRegardlessOfEnabled pins that the disk
+// guard reclaims through this store even when its periodic sweep is
+// disabled (see store.go's Enabled doc comment): Enabled()==false means
+// the operator left the periodic prune sweep off, not "never touch this
+// even under disk pressure" — the guard calls Reclaim on a disabled store
+// exactly like an enabled one, so Reclaim must not gate on cfg.Enabled.
+// cmd/runner's sweeper is what respects Enabled(): it never launches the
+// goroutine that would call this method when disabled, a different code
+// path from this one.
 func TestDockerGarbageStore_ReclaimsRegardlessOfEnabled(t *testing.T) {
 	fake := &fakeDockerAPI{rootDir: "/var/lib/docker"}
 	s := NewDockerGarbageStore(fake, DockerGarbageConfig{Enabled: false, PruneTTL: 24 * time.Hour})
@@ -68,8 +69,7 @@ func TestDockerGarbageStore_ReclaimsRegardlessOfEnabled(t *testing.T) {
 
 // TestDockerGarbageStore_ContinuesAfterContainerPruneError pins that a
 // ContainerPrune failure does not stop the ImagePrune attempt, and that the
-// failure surfaces in the returned error — coverage that moved here from
-// internal/provider's now-deleted TestPruneDockerRuntime_ContinuesAfterPruneErrors.
+// failure surfaces in the returned error.
 func TestDockerGarbageStore_ContinuesAfterContainerPruneError(t *testing.T) {
 	fake := &fakeDockerAPI{rootDir: "/var/lib/docker", containerPruneErr: errors.New("containers boom")}
 	s := NewDockerGarbageStore(fake, DockerGarbageConfig{Enabled: true, PruneTTL: 24 * time.Hour})
@@ -115,8 +115,8 @@ func TestDockerGarbageStore_ZeroPruneTTLSkipsReclaim(t *testing.T) {
 }
 
 func TestDockerGarbageStore_NameKindPath(t *testing.T) {
-	fake := &fakeDockerAPI{rootDir: "/mnt/docker-data"}
-	s := NewDockerGarbageStore(fake, DockerGarbageConfig{Enabled: true})
+	fake := &fakeDockerAPI{}
+	s := NewDockerGarbageStore(fake, DockerGarbageConfig{Enabled: true, RootDir: "/mnt/docker-data"})
 
 	if s.Name() != "docker-garbage" {
 		t.Errorf("Name() = %q, want %q", s.Name(), "docker-garbage")
@@ -125,7 +125,7 @@ func TestDockerGarbageStore_NameKindPath(t *testing.T) {
 		t.Errorf("Kind() = %v, want KindGarbage — everything it removes is already unreferenced", s.Kind())
 	}
 	if got := s.Path(); got != "/mnt/docker-data" {
-		t.Errorf("Path() = %q, want %q (from client.Info().DockerRootDir)", got, "/mnt/docker-data")
+		t.Errorf("Path() = %q, want %q (the configured daemon root)", got, "/mnt/docker-data")
 	}
 }
 
@@ -178,9 +178,8 @@ func TestDockerBuildCacheStore_Kind(t *testing.T) {
 }
 
 // TestDockerBuildCacheStore_Tier2PrunesByAgeAndBudget pins that age and
-// budget are two separate BuildCachePrune calls, mirroring
-// PruneDockerRuntime's shape exactly rather than combining both into one
-// call's options.
+// budget are two separate BuildCachePrune calls — an `until` Filters value
+// and MaxUsedSpace are never combined into one call's options.
 func TestDockerBuildCacheStore_Tier2PrunesByAgeAndBudget(t *testing.T) {
 	fake := &fakeDockerAPI{rootDir: "/var/lib/docker"}
 	s := NewDockerBuildCacheStore(fake, DockerBuildCacheConfig{
@@ -203,13 +202,12 @@ func TestDockerBuildCacheStore_Tier2PrunesByAgeAndBudget(t *testing.T) {
 
 // TestDockerBuildCacheStore_ContinuesAfterAgePruneError pins that Tier2's
 // age-based BuildCachePrune call failing does not stop the budget-based one
-// from still running, and that the failure surfaces in the returned error
-// — coverage that moved here from internal/provider's now-deleted
-// TestPruneDockerRuntime_ContinuesAfterPruneErrors. Both calls share one
-// injected error (fakeDockerAPI has no per-call error injection), but each
-// is wrapped with a distinct prefix in production code ("prune build cache
-// by age" vs "...to budget"), so the joined error's content still proves
-// both were attempted and both failures are visible, not just the first.
+// from still running, and that the failure surfaces in the returned error.
+// Both calls share one injected error (fakeDockerAPI has no per-call error
+// injection), but each is wrapped with a distinct prefix in production code
+// ("prune build cache by age" vs "...to budget"), so the joined error's
+// content still proves both were attempted and both failures are visible,
+// not just the first.
 func TestDockerBuildCacheStore_ContinuesAfterAgePruneError(t *testing.T) {
 	fake := &fakeDockerAPI{rootDir: "/var/lib/docker", buildCachePruneErr: errors.New("build cache boom")}
 	s := NewDockerBuildCacheStore(fake, DockerBuildCacheConfig{
@@ -273,8 +271,9 @@ func TestDockerBuildCacheStore_Tier1AndTier3AreNoOps(t *testing.T) {
 	}
 }
 
-// TestDockerBuildCacheStore_ReclaimsRegardlessOfEnabled pins the 2026-08-14
-// spec revision — see TestDockerGarbageStore_ReclaimsRegardlessOfEnabled's
+// TestDockerBuildCacheStore_ReclaimsRegardlessOfEnabled pins that the disk
+// guard reclaims through this store even when its periodic sweep is
+// disabled — see TestDockerGarbageStore_ReclaimsRegardlessOfEnabled's
 // identical rationale, which applies here too (both stores are gated by the
 // same [docker] prune switch).
 func TestDockerBuildCacheStore_ReclaimsRegardlessOfEnabled(t *testing.T) {
@@ -326,11 +325,11 @@ func TestDockerBuildCacheStore_Measure(t *testing.T) {
 	}
 }
 
-func TestDockerBuildCacheStore_PathResolvesDockerRootDir(t *testing.T) {
-	fake := &fakeDockerAPI{rootDir: "/mnt/docker-data"}
-	s := NewDockerBuildCacheStore(fake, DockerBuildCacheConfig{})
+func TestDockerBuildCacheStore_PathIsTheConfiguredRootDir(t *testing.T) {
+	fake := &fakeDockerAPI{}
+	s := NewDockerBuildCacheStore(fake, DockerBuildCacheConfig{RootDir: "/mnt/docker-data"})
 
 	if got := s.Path(); got != "/mnt/docker-data" {
-		t.Errorf("Path() = %q, want %q (from client.Info().DockerRootDir)", got, "/mnt/docker-data")
+		t.Errorf("Path() = %q, want %q (the configured daemon root)", got, "/mnt/docker-data")
 	}
 }

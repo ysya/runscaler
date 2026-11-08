@@ -15,9 +15,9 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
+	"github.com/ysya/runscaler/internal/bytesize"
 	"github.com/ysya/runscaler/internal/config"
 	"github.com/ysya/runscaler/internal/health"
-	"github.com/ysya/runscaler/internal/provider"
 )
 
 var statusCmd = &cobra.Command{
@@ -313,7 +313,7 @@ func formatStatus(h health.HealthResponse, endpoint string, now time.Time, color
 			fmt.Fprintf(&b, "  %s\n", disk.Filesystem)
 			fmt.Fprintf(&b, "    %s  %.1f%% free · %s available / %s total\n",
 				diskBar(disk.FreePercent, 16), disk.FreePercent,
-				provider.FormatBytes(disk.FreeBytes), provider.FormatBytes(disk.TotalBytes))
+				bytesize.Format(disk.FreeBytes), bytesize.Format(disk.TotalBytes))
 		}
 	}
 

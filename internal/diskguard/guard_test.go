@@ -38,7 +38,8 @@ func TestGuard_StopsAsSoonAsTargetMet(t *testing.T) {
 	}
 }
 
-// TestGuard_ReclaimsFromDisabledStore pins the 2026-08-14 spec revision
+// TestGuard_ReclaimsFromDisabledStore pins that the guard reclaims through
+// a store even when its periodic sweep is disabled
 // (docs/superpowers/specs/2026-08-13-cache-architecture-design.md,
 // "各 store 的啟用開關只約束例行清理"): Enabled()==false means the operator left
 // this store off its own periodic sweep schedule ("don't run routine
@@ -67,11 +68,11 @@ func TestGuard_ReclaimsFromDisabledStore(t *testing.T) {
 	}
 }
 
-// TestGuard_TiersForGateStillAppliesRegardlessOfEnabled pins that the
-// Enabled() change above did not loosen TiersFor — a KindScratch store
-// (live inter-job handoff data) must still be unreachable at Tier4 whether
-// or not it is enabled. This is a data-safety rule, not an operator
-// preference, so it is orthogonal to Enabled() entirely.
+// TestGuard_TiersForGateStillAppliesRegardlessOfEnabled pins that ignoring
+// Enabled() does not loosen TiersFor — a KindScratch store (live inter-job
+// handoff data) must still be unreachable at Tier4 whether or not it is
+// enabled. This is a data-safety rule, not an operator preference, so it
+// is orthogonal to Enabled() entirely.
 func TestGuard_TiersForGateStillAppliesRegardlessOfEnabled(t *testing.T) {
 	statFn := func(string) (FSStat, error) {
 		return FSStat{ID: "fs1", TotalBytes: 100, FreeBytes: 1}, nil // never healthy
@@ -86,7 +87,7 @@ func TestGuard_TiersForGateStillAppliesRegardlessOfEnabled(t *testing.T) {
 	}
 	// TiersFor(KindScratch) == {Tier3}; Tier4 must never be attempted even
 	// though MaxTier permits it and the store is disabled (irrelevant either
-	// way now — this proves TiersFor, not Enabled(), is what still gates it).
+	// way — this proves TiersFor, not Enabled(), is what gates it).
 	want := []cachestore.Tier{cachestore.Tier3}
 	if !slices.Equal(s.reclaimedTiers, want) {
 		t.Errorf("reclaimedTiers = %v, want %v — TiersFor(KindScratch) must still exclude Tier4 regardless of Enabled()",
@@ -133,10 +134,9 @@ func TestGuard_NeedsReclaimDoesNotMeasure(t *testing.T) {
 	}
 }
 
-// TestGuard_NeedsReclaimErrorsWhenAllStatfsFail is a fix-round addition
-// (not one of the brief's given tests): when statfs fails for every
-// configured store, NeedsReclaim must return an error rather than the
-// silent (false, nil) it used to — this is the pre-job gate whose entire
+// TestGuard_NeedsReclaimErrorsWhenAllStatfsFail pins that when statfs
+// fails for every configured store, NeedsReclaim returns an error rather
+// than a silent (false, nil) — this is the pre-job gate whose entire
 // purpose is stopping a host from filling up mid-build, so reporting
 // "healthy" while actually having no idea is the worst available failure
 // mode.
@@ -155,8 +155,8 @@ func TestGuard_NeedsReclaimErrorsWhenAllStatfsFail(t *testing.T) {
 	}
 }
 
-// TestGuard_NeedsReclaimUsesReadableFilesystemWhenOneFails pins the other
-// half of the same fix: a partial failure (at least one filesystem still
+// TestGuard_NeedsReclaimUsesReadableFilesystemWhenOneFails pins the
+// complementary case: a partial failure (at least one filesystem still
 // readable) must still produce a real verdict from what it could read,
 // not degrade to an error just because some other store's path failed.
 func TestGuard_NeedsReclaimUsesReadableFilesystemWhenOneFails(t *testing.T) {
@@ -183,20 +183,19 @@ func TestGuard_NeedsReclaimUsesReadableFilesystemWhenOneFails(t *testing.T) {
 
 // TestGuard_ShortfallWarningReportsShortfall checks the shortfall warning's
 // actual log content (slog.DiscardHandler, used by every other test here,
-// discards it) rather than just that Sweep didn't error. Since the
-// 2026-08-14 revision (see TestGuard_ReclaimsFromDisabledStore), the
-// warning no longer names disabled stores — that mechanism is gone — but it
-// must still fire and report the shortfall once every allowed tier has run
-// and the target is still unmet.
+// discards it) rather than just that Sweep didn't error. The guard ignores
+// Enabled() (see TestGuard_ReclaimsFromDisabledStore), so the warning has
+// no disabled stores to name; it must still fire and report the shortfall
+// once every allowed tier has run and the target is still unmet.
 func TestGuard_ShortfallWarningReportsShortfall(t *testing.T) {
 	statFn := func(string) (FSStat, error) {
 		return FSStat{ID: "fs1", TotalBytes: 100, FreeBytes: 1}, nil // never healthy
 	}
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, nil))
-	// Enabled() irrelevant to reaching this warning post-revision — set
-	// disabled anyway to confirm reclaim (and therefore the eventual
-	// shortfall) still happens for it as it would for any other store.
+	// Enabled() is irrelevant to reaching this warning — set disabled
+	// anyway to confirm reclaim (and therefore the eventual shortfall)
+	// still happens for it as it would for any other store.
 	s := &fakeStore{name: "docker-garbage", kind: cachestore.KindGarbage, path: "/", disabled: true}
 	g := New(Config{Enabled: true, MinFree: mustThreshold("10%"),
 		TargetFree: mustThreshold("20%"), MaxTier: cachestore.Tier1},
@@ -264,11 +263,10 @@ func TestGuard_BudgetWarnDoesNotTouchData(t *testing.T) {
 	}
 }
 
-// TestGuard_BudgetWipeRespectsTiersForGate is a fix-round addition (not
-// one of the brief's given tests): the budget wipe must still be gated by
-// TiersFor, the same kind-based rule every tier-ladder Reclaim call goes
-// through. TiersFor(KindScratch) excludes Tier4 specifically to protect an
-// in-flight workflow's un-expired handoff data (see
+// TestGuard_BudgetWipeRespectsTiersForGate pins that the budget wipe is
+// gated by TiersFor, the same kind-based rule every tier-ladder Reclaim
+// call goes through. TiersFor(KindScratch) excludes Tier4 specifically to
+// protect an in-flight workflow's un-expired handoff data (see
 // TestScratchNeverReclaimedWholesale in cachestore) — a KindScratch store
 // that grows a budget must not have that guarantee bypassed just because
 // it went over budget.
@@ -297,16 +295,16 @@ func TestGuard_BudgetWipeRespectsTiersForGate(t *testing.T) {
 	}
 }
 
-// TestGuard_SweepDoesNotRunConcurrently is a fix-round addition (Task 9
-// review): since controller.WithDiskChecker landed, this Guard's Sweep can be
-// called from several goroutines at once (every scale set's
-// pre-job-start check, plus the periodic ticker, all sharing one
-// instance) — see Sweep's own doc comment. This test drives Sweep from
-// several goroutines concurrently against a store that deliberately blocks
-// inside Reclaim until released, and asserts both halves of the
-// TryLock/return-immediately design: no two Reclaim calls ever overlap,
-// and none of the concurrent callers queues behind the in-progress one —
-// they all return right away instead.
+// TestGuard_SweepDoesNotRunConcurrently pins Sweep's behavior under
+// concurrent callers: every scale set's pre-job-start check
+// (controller.WithDiskChecker) and the periodic ticker share one Guard
+// instance and can call Sweep from several goroutines at once — see
+// Sweep's own doc comment. This test drives Sweep from several goroutines
+// concurrently against a store that deliberately blocks inside Reclaim
+// until released, and asserts both halves of the TryLock/return-immediately
+// design: no two Reclaim calls ever overlap, and none of the concurrent
+// callers queues behind the in-progress one — they all return right away
+// instead.
 func TestGuard_SweepDoesNotRunConcurrently(t *testing.T) {
 	statFn := func(string) (FSStat, error) {
 		return FSStat{ID: "fs1", TotalBytes: 100, FreeBytes: 1}, nil // always below MinFree

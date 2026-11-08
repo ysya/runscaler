@@ -8,11 +8,13 @@ import (
 	"net/http"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"charm.land/lipgloss/v2"
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 	"golang.org/x/term"
 
 	"github.com/ysya/runscaler/internal/bytesize"
@@ -42,6 +44,29 @@ func init() {
 	flags.Bool("no-color", false, "Disable color output")
 }
 
+// statusUnreachable explains why status could not reach runner: the
+// endpoint it tried and where that port came from, then how to check the
+// selected service, or how to start runner when no service is installed.
+func statusUnreachable(c *cobra.Command, address string, port int) error {
+	used := viper.ConfigFileUsed()
+	source := "default port; no config file was found"
+	switch {
+	case c.Flags().Changed("health-port"):
+		source = "port from --health-port"
+	case used != "":
+		source = "port from " + used
+	}
+	msg := fmt.Sprintf("cannot reach runner's health endpoint at %s (%s)", net.JoinHostPort(address, strconv.Itoa(port)), source)
+	if target := targetInContext(c); target != nil {
+		return fmt.Errorf("%s\n\n  The %s service may be stopped or still starting. Check it with:\n    %s\n    %s", msg, target.Scope,
+			serviceCommand(target.BinaryPath, target.Scope, "status"), serviceCommand(target.BinaryPath, target.Scope, "logs"))
+	}
+	if used == "" {
+		used = "config.toml"
+	}
+	return fmt.Errorf("%s\n\n  Is runner running? Start it with:\n    %s", msg, runnerCommand{binary: hintBinary(c), args: []string{"run", "--config", used}})
+}
+
 func runStatus(cmd *cobra.Command, _ []string) error {
 	port, _ := cmd.Flags().GetInt("health-port")
 	address, _ := cmd.Flags().GetString("health-address")
@@ -68,10 +93,7 @@ func runStatus(cmd *cobra.Command, _ []string) error {
 	}
 	resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
 	if err != nil {
-		return fmt.Errorf("cannot connect to runner at port %d — is it running?\n\n"+
-			"  Start runner first: runner run --config config.toml\n"+
-			"  Or check the health port: runner run --health-port %d --config config.toml",
-			port, port)
+		return statusUnreachable(cmd, address, port)
 	}
 	defer resp.Body.Close()
 

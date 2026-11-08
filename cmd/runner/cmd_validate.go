@@ -29,6 +29,9 @@ func runValidate(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	if configMissing(cfg) {
+		return missingConfigError()
+	}
 
 	// Strict mode: what `runner run` merely warns about (unknown keys,
 	// mixed single/multi mode) fails validation.

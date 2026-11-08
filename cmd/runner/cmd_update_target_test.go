@@ -16,7 +16,6 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
-	"github.com/ysya/runscaler/internal/shell"
 	"github.com/ysya/runscaler/internal/versioncheck"
 )
 
@@ -65,7 +64,7 @@ func TestUpdateUsesInstalledBinaryAndItsVersion(t *testing.T) {
 	installedCalls := 0
 	installUpdateRelease = func(_ context.Context, tag, path string) error {
 		installedCalls++
-		if !strings.Contains(out.String(), "does not validate") || !strings.Contains(out.String(), "#upgrade-requirements") {
+		if !strings.Contains(out.String(), "does not check the config") || !strings.Contains(out.String(), "#upgrade-requirements") {
 			t.Fatal("compatibility notice was not printed before replacement")
 		}
 		if tag != "v2.0.0" || path != installed {
@@ -97,7 +96,8 @@ func TestUpdateUsesInstalledBinaryAndItsVersion(t *testing.T) {
 	if string(a) != "old" || string(b) != "new" {
 		t.Fatalf("wrong binary updated: invoking=%s installed=%s", a, b)
 	}
-	for _, want := range []string{"Binary installed", "compatibility has not been validated", shell.Quote(installed) + " validate --config " + shell.Quote(configPath), "--scope user"} {
+	validate := runnerCommand{binary: installed, args: []string{"validate", "--config", configPath}}.String()
+	for _, want := range []string{"Installed 2.0.0 at " + installed, "checksum verified", "1. Validate", validate, "2. Restart", "--scope user"} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("missing target-aware guidance %q: %s", want, out.String())
 		}

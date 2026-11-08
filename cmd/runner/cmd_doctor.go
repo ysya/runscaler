@@ -74,27 +74,16 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("refusing destructive cleanup with config warnings; run 'runner validate' and fix them first")
 	}
 
-	// Safety check: take the same machine-wide lock as `runner run`. Unlike a
-	// health probe this remains reliable when health is disabled, moved to a
-	// different port, or the process is still starting.
-	if fix {
-		releaseLock, err := runnerlock.Acquire(runnerlock.DefaultPath, runnerlock.Info{
-			PID:       os.Getpid(),
-			StartedAt: time.Now(),
-		})
-		if err != nil {
-			if errors.Is(err, runnerlock.ErrAlreadyRunning) {
-				fmt.Println("  ✗ runner is currently running (machine lock is held)")
-				fmt.Println("    Stop runner first before using --fix")
-				return fmt.Errorf("cannot fix while runner is running")
-			}
-			return fmt.Errorf("cannot verify runner lock before cleanup: %w", err)
-		}
+	mode, releaseLock, err := doctorResourceCheck(fix)
+	if err != nil {
+		return err
+	}
+	if releaseLock != nil {
 		defer releaseLock()
 	}
 
 	// Scaleset API connectivity check (if config is available)
-	apiErr := checkScalesetAPI(cmd.Context(), &cfg)
+	apiErr := doctorGitHubCheck(cmd.Context(), &cfg)
 
 	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
 	defer cancel()
@@ -104,7 +93,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	// Docker checks
 	sharedVolumes := doctorSharedVolumes(dockerSockets, scaleSets)
 	for socket := range dockerSockets {
-		orphans, err := checkDocker(ctx, socket, sharedVolumes[socket], fix)
+		orphans, err := checkDocker(ctx, socket, sharedVolumes[socket], mode)
 		if err != nil {
 			return errors.Join(apiErr, err)
 		}
@@ -112,13 +101,72 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	}
 
 	// Tart checks
-	orphans, err := checkTart(ctx, fix, tartHomes)
+	orphans, err := checkTart(ctx, mode, tartHomes)
 	if err != nil {
 		return errors.Join(apiErr, err)
 	}
 	totalOrphans += orphans
 
 	return reportDoctorSummary(cmd.OutOrStdout(), totalOrphans, fix, apiErr)
+}
+
+// doctorGitHubCheck probes GitHub for every configured scale set or, when no
+// config file was found and nothing configured a scale set, says so and
+// skips the probe rather than report an empty scale set as a failure.
+func doctorGitHubCheck(ctx context.Context, cfg *config.Config) error {
+	if !configMissing(*cfg) {
+		return checkScalesetAPI(ctx, cfg)
+	}
+	fmt.Println("  - GitHub API: no config file found (skipping)")
+	if files := searchedConfigFiles(); len(files) > 0 {
+		fmt.Printf("    Searched %s\n", strings.Join(files, ", "))
+	}
+	fmt.Println("    Create one with 'runner init', or pass --config PATH")
+	return nil
+}
+
+// resourceCheck is how doctor treats the containers and VMs runner owns.
+type resourceCheck int
+
+const (
+	// reportOrphans lists them as left behind: no runner is running.
+	reportOrphans resourceCheck = iota
+	// removeOrphans removes them under the run lock (--fix).
+	removeOrphans
+	// reportInUse lists them as the running runner's own.
+	reportInUse
+)
+
+// doctorResourceCheck decides how doctor treats runner's containers and VMs
+// from the machine-wide lock `runner run` holds. Unlike a health probe, the
+// lock stays reliable when health is disabled, moved to another port, or the
+// process is still starting. --fix holds the lock for the whole cleanup and
+// returns its release. A diagnosis only probes it: while a runner holds it,
+// runner's containers and VMs are that runner's, not leftovers.
+func doctorResourceCheck(fix bool) (resourceCheck, func(), error) {
+	if fix {
+		release, err := runnerlock.Acquire(runnerLockPath, runnerlock.Info{PID: os.Getpid(), StartedAt: time.Now()})
+		if err != nil {
+			if errors.Is(err, runnerlock.ErrAlreadyRunning) {
+				fmt.Println("  ✗ runner is currently running (machine lock is held)")
+				fmt.Println("    Stop runner first before using --fix")
+				return reportOrphans, nil, fmt.Errorf("cannot fix while runner is running")
+			}
+			return reportOrphans, nil, fmt.Errorf("cannot verify runner lock before cleanup: %w", err)
+		}
+		return removeOrphans, release, nil
+	}
+	running, err := probeRunningRunner()
+	switch {
+	case err != nil:
+		fmt.Printf("  ⚠ Cannot tell whether runner is running: %s\n", err)
+		fmt.Println("    Containers and VMs runner owns are listed as orphans even if a runner is using them")
+	case running != nil:
+		fmt.Printf("  ℹ runner is running (%s)\n", running.Detail())
+		fmt.Println("    The containers and VMs it owns are in use, so they are not reported as orphans")
+		return reportInUse, nil, nil
+	}
+	return reportOrphans, nil, nil
 }
 
 func reportDoctorSummary(out io.Writer, totalOrphans int, fix bool, apiErr error) error {
@@ -251,7 +299,7 @@ func configuredScaleSet(scaleSets []config.ScaleSetConfig, registrationURL, name
 
 // checkDocker checks for Docker daemon reachability, orphaned containers, and
 // the shared volumes configured on socket.
-func checkDocker(ctx context.Context, socket string, sharedVolumes []string, fix bool) (int, error) {
+func checkDocker(ctx context.Context, socket string, sharedVolumes []string, mode resourceCheck) (int, error) {
 	dockerClient, err := dockerclient.New(
 		dockerclient.FromEnv,
 		dockerclient.WithHost("unix://"+socket),
@@ -272,7 +320,7 @@ func checkDocker(ctx context.Context, socket string, sharedVolumes []string, fix
 	var totalOrphans int
 
 	// Check orphaned containers
-	orphans, err := checkDockerContainers(ctx, dockerClient, fix)
+	orphans, err := checkDockerContainers(ctx, dockerClient, mode)
 	if err != nil {
 		return totalOrphans, err
 	}
@@ -288,9 +336,10 @@ func checkDocker(ctx context.Context, socket string, sharedVolumes []string, fix
 	return totalOrphans, nil
 }
 
-// checkDockerContainers finds and optionally removes orphaned runner
-// containers, via findOrphanContainers and removeOrphanContainers.
-func checkDockerContainers(ctx context.Context, client containerAPI, fix bool) (int, error) {
+// checkDockerContainers reports runner's containers, as orphans or as the
+// running runner's own, and with removeOrphans removes them, via
+// findOrphanContainers and removeOrphanContainers.
+func checkDockerContainers(ctx context.Context, client containerAPI, mode resourceCheck) (int, error) {
 	orphans, err := findOrphanContainers(ctx, client)
 	if err != nil {
 		fmt.Printf("  ✗ Failed to list Docker containers: %s\n", err)
@@ -302,12 +351,18 @@ func checkDockerContainers(ctx context.Context, client containerAPI, fix bool) (
 		return 0, nil
 	}
 
-	if !fix {
-		fmt.Printf("  ⚠ Found %d orphaned Docker container(s)\n", len(orphans))
+	if mode != removeOrphans {
+		issues := len(orphans)
+		heading := fmt.Sprintf("  ⚠ Found %d orphaned Docker container(s)", issues)
+		if mode == reportInUse {
+			issues = 0
+			heading = fmt.Sprintf("  ℹ %d Docker container(s) belong to the running runner", len(orphans))
+		}
+		fmt.Println(heading)
 		for _, o := range orphans {
 			fmt.Printf("      %s (%s)\n", o.Name, o.Status)
 		}
-		return len(orphans), nil
+		return issues, nil
 	}
 
 	// Fix: remove orphaned containers. Per-container failures are logged
@@ -420,7 +475,7 @@ func volumeSizeText(result dockerclient.VolumeInspectResult) string {
 }
 
 // checkTart checks for Tart binary and orphaned VMs.
-func checkTart(ctx context.Context, fix bool, homes map[string]bool) (int, error) {
+func checkTart(ctx context.Context, mode resourceCheck, homes map[string]bool) (int, error) {
 	if _, err := exec.LookPath("tart"); err != nil {
 		fmt.Println("  - Tart: not installed (skipping)")
 		return 0, nil
@@ -429,7 +484,7 @@ func checkTart(ctx context.Context, fix bool, homes map[string]bool) (int, error
 
 	var total int
 	for home := range homes {
-		issues, err := checkTartVMs(ctx, provider.TartCommandRunner(home), home, fix)
+		issues, err := checkTartVMs(ctx, provider.TartCommandRunner(home), home, mode)
 		if err != nil {
 			return total, err
 		}
@@ -438,10 +493,11 @@ func checkTart(ctx context.Context, fix bool, homes map[string]bool) (int, error
 	return total, nil
 }
 
-// checkTartVMs reports, and with fix removes, the Tart VMs runner left
-// behind in one TART_HOME, through the same ownership rules and removal
-// path as startup reconciliation (findOrphanTartVMs, removeOrphanTartVMs).
-func checkTartVMs(ctx context.Context, runner provider.CommandRunner, home string, fix bool) (int, error) {
+// checkTartVMs reports the Tart VMs runner owns in one TART_HOME, as orphans
+// or as the running runner's own, and with removeOrphans removes them,
+// through the same ownership rules and removal path as startup
+// reconciliation (findOrphanTartVMs, removeOrphanTartVMs).
+func checkTartVMs(ctx context.Context, runner provider.CommandRunner, home string, mode resourceCheck) (int, error) {
 	orphans, err := findOrphanTartVMs(ctx, runner)
 	if err != nil {
 		fmt.Printf("  ✗ Failed to list Tart VMs: %s\n", err)
@@ -453,12 +509,18 @@ func checkTartVMs(ctx context.Context, runner provider.CommandRunner, home strin
 		return 0, nil
 	}
 
-	if !fix {
-		fmt.Printf("  ⚠ Found %d orphaned Tart VM(s)\n", len(orphans))
+	if mode != removeOrphans {
+		issues := len(orphans)
+		heading := fmt.Sprintf("  ⚠ Found %d orphaned Tart VM(s)", issues)
+		if mode == reportInUse {
+			issues = 0
+			heading = fmt.Sprintf("  ℹ %d Tart VM(s) belong to the running runner", len(orphans))
+		}
+		fmt.Println(heading)
 		for _, vm := range orphans {
 			fmt.Printf("      %s (%s)\n", vm.Name, vm.State)
 		}
-		return len(orphans), nil
+		return issues, nil
 	}
 
 	// Per-VM failures are logged (see removeOrphanTartVMs) rather than

@@ -269,10 +269,12 @@ runner update
 這個流程不會驗證設定／provider 相容性、重寫服務定義或重啟服務；既有 system／user
 範圍與執行身分會保留，原本以 root 執行的服務不會被轉成非 root 帳號。
 
-安裝後會列出針對實際設定檔的驗證指令，請在服務使用的憑證、provider 存取權限與群組
-環境下執行。重啟提示會使用選定 binary 與明確的 `--scope user|system`；system 服務
-管理需使用管理員 shell。健康端點回報相同版本，不代表設定相容性或就緒狀態已驗證。
+安裝後會列出完成升級的步驟：先用新 binary 驗證選定的設定檔，再重啟服務，並依設定的
+`drain-timeout` 說明重啟最多會等執行中的工作多久。非 root 的 system 服務會跟 `doctor`
+一樣，透過 `systemd-run` 以服務的身分、群組與環境檔執行驗證指令。重啟提示會使用選定
+binary 與明確的 `--scope user|system`；system 服務管理需使用管理員 shell。健康端點回報相同版本，不代表設定相容性或就緒狀態已驗證。
 健康端點停用或無法連線時，會明示執行版本未確認，不會假定服務已停止。
+binary 已是最新版、但服務仍回報舊版本時，`runner update` 會再列一次這些步驟。
 使用 `--binary-path` 或沒有安裝服務時，不會選取服務；驗證後請手動重啟使用該 binary 的程序。
 
 SIGTERM 通常會開始排空並等待工作完成，但仍受 `drain-timeout` 與服務管理器停止期限限制。
@@ -300,7 +302,8 @@ listener 斷線時，runner 會在五秒後重新連線，之後每次等待加�
 
 若 runner 意外終止（例如 `kill -9`、當機或斷電），可能會遺留 Docker 容器或 Tart VM。
 下次執行 `runner run` 時，會在取得整台機器共用的鎖定後自動清理這些資源。
-若要手動檢查，請在 runner 停止時使用 `doctor`：
+可以用 `doctor` 手動檢查。有 runner 持有這個鎖時，doctor 會把它擁有的容器和 VM
+標成使用中，不算孤立資源：
 
 ```bash
 # Check GitHub API connectivity and orphaned resources
@@ -322,7 +325,8 @@ Doctor 會使用各個已設定 runner 規模集的 App 或 PAT 憑證探測 Git
 停止 runner，再執行 `runner scaleset delete <name>`。
 找到這類規模集不會讓 doctor 失敗，但列出失敗會。
 
-即使沒有孤立資源，API 檢查失敗仍會讓指令以失敗狀態結束。
+找不到設定檔時，doctor 會跳過 GitHub API 檢查並列出找過的路徑；`runner validate`
+則會列出同樣的路徑並以失敗結束。即使沒有孤立資源，API 檢查失敗仍會讓指令以失敗狀態結束。
 報告僅包含安全的取消、逾時、DNS、TLS、速率限制或數字 HTTP 狀態分類，
 速率限制還會附上 GitHub 要求的等待時間；不會輸出原始 SDK 回應本文。
 
@@ -849,7 +853,7 @@ runner service install --scope user
 
 系統憑證必須在設定中明確指定。若使用 `token="env:NAME"` 或 App 的 `private-key-env`，請透過 `--environment-file /etc/runner/credentials.env` 指定受 root 保護的 systemd 環境檔；不會保存安裝 shell 的私人憑證。寫入 unit 前，會以服務身分執行 `runner validate`，用服務實際使用的身分檢查 Docker socket、憑證與 GitHub 存取；離線準備可用 `--no-start` 跳過即時探測。rootful Docker socket 僅透過 unit 的 supplementary groups 授權，仍具有等同 root 的能力，與 rootless daemon 不同；不會接管其他使用者的 rootless socket。
 
-管理指令（`status`、`logs`、`doctor`、`service …`、`update`）會選擇唯一已安裝服務的 binary／config。可用 `--scope user|system` 明確選擇；`--user`、`--user=false` 保留為別名。auto 模式遇到兩份安裝或無法確認的服務資訊會停止；安裝也會拒絕建立第二個範圍。Linux 探索需要支援 JSON 的 systemd `busctl` 及對應的服務管理匯流排。明確 scope 不會退回其他安裝。完全沒有已安裝服務時，仍保留獨立執行的設定搜尋方式。由套件安裝在 `/usr/lib/systemd/system` 或 `/lib/systemd/system` 的 system unit 會像 runner 自己的 unit 一樣被管理，但 `uninstall` 絕不刪除它，而是說明如何停用；`install --force` 會把 runner 的 unit 寫到優先載入的 `/etc/systemd/system`，並重啟服務讓新定義生效。
+管理指令（`status`、`logs`、`doctor`、`service …`、`update`）會選擇唯一已安裝服務的 binary／config。可用 `--scope user|system` 明確選擇；`--user`、`--user=false` 保留為別名。auto 模式遇到兩份安裝或無法確認的服務資訊會停止；安裝也會拒絕建立第二個範圍。探索只看得到 system 定義和執行帳號自己的 user 定義，所以全新安裝時若有其他 runner 持有執行鎖（例如另一個帳號的 user 服務或前景執行的 `runner run`），也會拒絕安裝。Linux 探索需要支援 JSON 的 systemd `busctl` 及對應的服務管理匯流排。明確 scope 不會退回其他安裝。完全沒有已安裝服務時，仍保留獨立執行的設定搜尋方式。由套件安裝在 `/usr/lib/systemd/system` 或 `/lib/systemd/system` 的 system unit 會像 runner 自己的 unit 一樣被管理，但 `uninstall` 絕不刪除它，而是說明如何停用；`install --force` 會把 runner 的 unit 寫到優先載入的 `/etc/systemd/system`，並重啟服務讓新定義生效。
 
 `runner update` 更新選定服務的 binary，不會自動重啟。系統 binary 更新需要 root，且目前的 updater 必須位於受 root 保護的路徑；可寫入的 user binary 不需要 sudo。若只更新指定 binary（包括 macOS 的 root 擁有共用 binary），可用 `sudo /absolute/path/current-runner update --binary-path /absolute/path/target-runner`，不會選擇或操作 LaunchAgent。系統 `doctor`／`doctor --fix` 請使用錯誤訊息提供的 `sudo systemd-run …`，重現服務 UID、unit 群組與憑證來源；單純 `sudo -u` 可能缺少 Docker 群組。`--fix` 仍要求 manager 已停止並取得共用執行鎖。私人 inline 環境值不會放入命令列，需先移至受保護的 EnvironmentFile。
 

@@ -127,10 +127,17 @@ func init() {
 
 func main() {
 	ensureHomebrewPath()
-	if err := cmd.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+	os.Exit(execute(cmd, os.Stderr))
+}
+
+// execute runs root and returns the exit status. Root silences Cobra's own
+// error output, so this is the one place a failure is reported.
+func execute(root *cobra.Command, stderr io.Writer) int {
+	if err := root.Execute(); err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
 	}
+	return 0
 }
 
 // startManager loads config, sets up signal handling, and runs the runner manager.
@@ -244,6 +251,16 @@ or a single scale set via 'runner run' CLI flags.`,
 
   # Using CLI flags
   runner run --url https://github.com/org --name my-runners --token ghp_xxx`,
+	// execute prints a returned error once; Cobra's own copy would repeat it.
+	SilenceErrors: true,
+	// Cobra parses flags and checks arguments before this hook, so those
+	// mistakes still print usage. A later error is a runtime failure, and the
+	// flag list would bury its cause. Cobra checks required flags and flag
+	// groups after this hook, and a subcommand's own PersistentPreRun
+	// replaces it.
+	PersistentPreRun: func(c *cobra.Command, _ []string) {
+		c.SilenceUsage = true
+	},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return cmd.Help()
 	},

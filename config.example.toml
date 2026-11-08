@@ -68,7 +68,7 @@ max-runners = 10
 # --- Disk guard ---
 # Host-wide: watches every scale set's stores grouped by filesystem, not
 # part of any one scale set. Reclaims space only under real pressure — see
-# README's Caching section for the three-layer model this fits into
+# docs/caching.md for the three-layer model this fits into
 # (guard / each store's own retention settings / `runner cache` visibility).
 # All values below are the defaults; uncomment only what you want to change.
 

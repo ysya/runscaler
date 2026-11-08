@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"time"
 
+	"github.com/actions/scaleset"
 	dockerclient "github.com/moby/moby/client"
 	"github.com/spf13/cobra"
 
@@ -130,19 +132,23 @@ func runValidate(cmd *cobra.Command, args []string) error {
 func validateGitHubAccess(ctx context.Context, out io.Writer, scaleSets []config.ScaleSetConfig, newClient func(config.ScaleSetConfig) (scaleSetAPI, error)) error {
 	for i, ss := range scaleSets {
 		probeCtx, cancel := context.WithTimeout(ctx, apiProbeTimeout)
-		registered, err := probeScaleSet(probeCtx, ss, newClient)
+		probe, err := probeScaleSet(probeCtx, ss, newClient)
 		cancel()
 		if err != nil {
 			fmt.Fprintf(out, "  ✗ scaleset[%d] %q GitHub API: %s\n", i, ss.ScaleSetName, safeAPIError(err))
-			if ss.GitHubApp != nil {
+			var rateLimited *scaleset.RateLimitError
+			switch {
+			case errors.As(err, &rateLimited):
+				fmt.Fprintln(out, "    GitHub is rate-limiting these credentials; wait for the limit to reset, then validate again")
+			case ss.GitHubApp != nil:
 				fmt.Fprintln(out, "    Check the GitHub App installation, private key, and runner permissions")
-			} else {
+			default:
 				fmt.Fprintln(out, "    Check that your token has the correct scopes (admin:org or repo)")
 			}
 			return fmt.Errorf("validation failed")
 		}
 		state := "not registered yet"
-		if registered {
+		if probe.registered {
 			state = "registered"
 		}
 		fmt.Fprintf(out, "  ✓ scaleset[%d] %q GitHub API is reachable; scale set %s\n", i, ss.ScaleSetName, state)

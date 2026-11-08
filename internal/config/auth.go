@@ -14,7 +14,6 @@ import (
 	"strings"
 
 	"github.com/actions/scaleset"
-	"github.com/hashicorp/go-retryablehttp"
 )
 
 // GitHubAppConfig stores references to a private key, never its PEM contents.
@@ -115,15 +114,14 @@ func (a GitHubAppConfig) privateKey() (string, error) {
 }
 
 // NewScalesetClient selects the configured App or PAT credentials. The SDK
-// handles JWT signing and credential exchange when API requests need them.
+// handles JWT signing and credential exchange when API requests need them,
+// and its default HTTP client and retry policy apply unless options say
+// otherwise.
 func (ss *ScaleSetConfig) NewScalesetClient(logger *slog.Logger, options ...scaleset.HTTPOption) (*scaleset.Client, error) {
 	if err := ss.validateAuthentication(); err != nil {
 		return nil, err
 	}
-	httpClient := retryablehttp.NewClient()
-	httpClient.Logger = nil
-	opts := []scaleset.HTTPOption{scaleset.WithLogger(logger), scaleset.WithRetryableHTTPClint(httpClient)}
-	opts = append(opts, options...)
+	opts := append([]scaleset.HTTPOption{scaleset.WithLogger(logger)}, options...)
 	var client *scaleset.Client
 	var err error
 	if ss.GitHubApp != nil {

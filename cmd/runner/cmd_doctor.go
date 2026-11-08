@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"slices"
+	"strings"
 	"time"
 
 	cerrdefs "github.com/containerd/errdefs"
@@ -146,12 +147,13 @@ func checkScalesetAPI(ctx context.Context, cfg *config.Config) error {
 func checkScalesetAPIWith(ctx context.Context, cfg *config.Config, out io.Writer, newClient func(config.ScaleSetConfig) (scaleSetAPI, error)) error {
 	scaleSets := cfg.ResolveScaleSets()
 	var failures []error
+	var groups []probedRunnerGroup
 	for _, ss := range scaleSets {
 		if err := ctx.Err(); err != nil {
 			return errors.Join(append(failures, err)...)
 		}
 		probeCtx, cancel := context.WithTimeout(ctx, apiProbeTimeout)
-		registered, err := probeScaleSet(probeCtx, ss, newClient)
+		probe, err := probeScaleSet(probeCtx, ss, newClient)
 		cancel()
 		if err != nil {
 			safeErr := safeAPIError(err)
@@ -159,13 +161,92 @@ func checkScalesetAPIWith(ctx context.Context, cfg *config.Config, out io.Writer
 			failures = append(failures, fmt.Errorf("GitHub API [%s]: %w", ss.ScaleSetName, safeErr))
 			continue
 		}
-		if registered {
+		if probe.registered {
 			fmt.Fprintf(out, "  ✓ GitHub API [%s]: reachable; scale set registered\n", ss.ScaleSetName)
 		} else {
 			fmt.Fprintf(out, "  ✓ GitHub API [%s]: reachable; scale set not registered yet\n", ss.ScaleSetName)
 		}
+		groups = addProbedRunnerGroup(groups, ss, probe)
+	}
+	for _, group := range groups {
+		if err := ctx.Err(); err != nil {
+			return errors.Join(append(failures, err)...)
+		}
+		if err := reportUnconfiguredScaleSets(ctx, out, group, scaleSets); err != nil {
+			failures = append(failures, err)
+		}
 	}
 	return errors.Join(failures...)
+}
+
+// probedRunnerGroup is a runner group doctor reached, through the first
+// configured scale set it probed there.
+type probedRunnerGroup struct {
+	scaleSet config.ScaleSetConfig
+	probe    scaleSetProbe
+}
+
+func addProbedRunnerGroup(groups []probedRunnerGroup, ss config.ScaleSetConfig, probe scaleSetProbe) []probedRunnerGroup {
+	for _, g := range groups {
+		if g.scaleSet.RegistrationURL == ss.RegistrationURL && g.probe.runnerGroupID == probe.runnerGroupID {
+			return groups
+		}
+	}
+	return append(groups, probedRunnerGroup{scaleSet: ss, probe: probe})
+}
+
+// maxUnconfiguredScaleSetsShown bounds the names doctor prints per runner
+// group.
+const maxUnconfiguredScaleSetsShown = 20
+
+// reportUnconfiguredScaleSets prints the scale sets registered in group's
+// runner group that no scale set configured for the same registration URL
+// names. runner never deletes a scale set on its own, so one left behind by a
+// rename or a removed [[scaleset]] keeps the jobs that target it queued.
+// Another host may run the others, so finding some is not a failure. Names
+// come from GitHub and are printed quoted.
+func reportUnconfiguredScaleSets(ctx context.Context, out io.Writer, group probedRunnerGroup, scaleSets []config.ScaleSetConfig) error {
+	name := group.scaleSet.ScaleSetName
+	listCtx, cancel := context.WithTimeout(ctx, apiProbeTimeout)
+	registered, err := group.probe.client.ListRunnerScaleSets(listCtx, group.probe.runnerGroupID)
+	cancel()
+	if err != nil {
+		safeErr := safeAPIError(err)
+		fmt.Fprintf(out, "  ✗ GitHub API [%s]: listing its runner group failed: %s\n", name, safeErr)
+		return fmt.Errorf("GitHub API [%s]: listing its runner group: %w", name, safeErr)
+	}
+	var others []string
+	for _, rs := range registered {
+		if !configuredScaleSet(scaleSets, group.scaleSet.RegistrationURL, rs.Name) {
+			others = append(others, rs.Name)
+		}
+	}
+	if len(others) == 0 {
+		return nil
+	}
+	slices.Sort(others)
+	fmt.Fprintf(out, "  ⚠ GitHub API [%s]: its runner group has %d scale set(s) not in this config\n", name, len(others))
+	for _, other := range others[:min(len(others), maxUnconfiguredScaleSetsShown)] {
+		fmt.Fprintf(out, "      %q\n", other)
+	}
+	if extra := len(others) - maxUnconfiguredScaleSetsShown; extra > 0 {
+		fmt.Fprintf(out, "      … and %d more\n", extra)
+	}
+	fmt.Fprintln(out, "    If no other host runs one, jobs that target it stay queued. Delete it with")
+	fmt.Fprintln(out, "    'runner scaleset delete NAME' after adding it to the config.")
+	return nil
+}
+
+// configuredScaleSet reports whether scaleSets configure name for
+// registrationURL, in any runner group. Names compare without regard to case,
+// so a configured scale set is never reported over a difference in case.
+func configuredScaleSet(scaleSets []config.ScaleSetConfig, registrationURL, name string) bool {
+	for _, ss := range scaleSets {
+		if ss.RegistrationURL == registrationURL && strings.EqualFold(ss.ScaleSetName, name) {
+			return true
+		}
+	}
+	return false
 }
 
 // checkDocker checks for Docker daemon reachability, orphaned containers, and

@@ -20,7 +20,6 @@ import (
 	"testing"
 
 	"github.com/actions/scaleset"
-	"github.com/hashicorp/go-retryablehttp"
 )
 
 func appScaleSet() ScaleSetConfig {
@@ -141,8 +140,6 @@ func TestScalesetClientSelectsAppSigningOrPAT(t *testing.T) {
 				ss.Token = "synthetic-pat"
 			}
 			requests := 0
-			httpClient := retryablehttp.NewClient()
-			httpClient.Logger = nil
 			transport := authTransport(func(req *http.Request) (*http.Response, error) {
 				requests++
 				if mode == "PAT" {
@@ -179,13 +176,10 @@ func TestScalesetClientSelectsAppSigningOrPAT(t *testing.T) {
 				// Stop after the auth request: exercise the real SDK signer without any external network.
 				return &http.Response{StatusCode: 400, Status: "400 Bad Request", Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader("{}")), ContentLength: 2}, nil
 			})
-			client, err := ss.NewScalesetClient(slog.New(slog.DiscardHandler), scaleset.WithRetryableHTTPClint(httpClient))
+			client, err := ss.NewScalesetClient(slog.New(slog.DiscardHandler), scaleset.WithHTTPClient(&http.Client{Transport: transport}))
 			if err != nil {
 				t.Fatal(err)
 			}
-			// The SDK initializes a concrete *http.Transport during construction.
-			// Replace the external transport only after that initialization.
-			httpClient.HTTPClient.Transport = transport
 			if _, err := client.GetRunnerGroupByName(context.Background(), "default"); err == nil {
 				t.Fatal("expected synthetic backend rejection")
 			}

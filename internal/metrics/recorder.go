@@ -5,11 +5,7 @@ import (
 	"time"
 
 	"github.com/actions/scaleset"
-	"github.com/actions/scaleset/listener"
 )
-
-// Compile-time check that Recorder implements listener.MetricsRecorder.
-var _ listener.MetricsRecorder = (*Recorder)(nil)
 
 // Snapshot holds a point-in-time copy of the metrics for external consumption.
 type Snapshot struct {
@@ -20,14 +16,14 @@ type Snapshot struct {
 	JobsStarted   int64
 	JobsCompleted int64
 
-	// Current desired runner count as reported by the listener.
+	// Desired runner count from the latest demand update, idle polls included.
 	DesiredRunners int
 
 	// Timestamp of the last update.
 	UpdatedAt time.Time
 }
 
-// Recorder collects metrics from the scaleset listener.
+// Recorder collects the metrics reported for each scale-set listener message.
 // All methods are safe for concurrent use.
 type Recorder struct {
 	mu             sync.RWMutex

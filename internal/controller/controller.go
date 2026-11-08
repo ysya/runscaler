@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/actions/scaleset"
-	"github.com/actions/scaleset/listener"
 
 	"github.com/ysya/runscaler/internal/capacity"
 	"github.com/ysya/runscaler/internal/config"
@@ -36,8 +35,9 @@ type DiskChecker interface {
 	Sweep(ctx context.Context) error
 }
 
-// ScaleSetController implements listener.Scaler to handle scaling decisions
-// and manage runner lifecycle via a pluggable InstanceProvider.
+// ScaleSetController makes scaling decisions from the listener messages
+// MessageHandler passes it and manages runner lifecycle via a pluggable
+// InstanceProvider.
 type ScaleSetController struct {
 	instances       instanceState
 	scaleSetID      int
@@ -83,9 +83,6 @@ type ScaleSetController struct {
 	lastFailureAttempt uint64
 	failureGeneration  uint64
 }
-
-// Compile-time check that ScaleSetController implements listener.Scaler.
-var _ listener.Scaler = (*ScaleSetController)(nil)
 
 // Option configures optional ScaleSetController behavior at construction time.
 type Option func(*ScaleSetController)
@@ -154,7 +151,7 @@ func (s *ScaleSetController) HandleDesiredRunnerCount(ctx context.Context, count
 	s.demandStale = false
 	s.desiredMu.Unlock()
 	s.signalReconcile()
-	// The listener records this value as desired-runners. Reconciliation is
+	// MessageHandler records this value as desired-runners. Reconciliation is
 	// asynchronous, so report the bounded target rather than a timing-dependent
 	// snapshot of instances that happen to be ready at callback return.
 	return s.targetRunnerCount(), nil
@@ -200,10 +197,10 @@ func (s *ScaleSetController) HandleJobCompleted(ctx context.Context, jobInfo *sc
 		// completes cleanup.
 		return nil
 	}
-	// Provider cleanup belongs to the background reconciler. The scaleset
-	// listener deletes a message before invoking this callback, so blocking or
-	// returning a cleanup error cannot improve delivery semantics and only
-	// delays later job messages.
+	// Provider cleanup belongs to the background reconciler. The listener
+	// acks a message only after it is handled, so blocking here would hold
+	// back that ack and every later message. A failed removal is retried by
+	// the reconciler, not by redelivering the message.
 	s.signalReconcile()
 	return nil
 }

@@ -668,7 +668,7 @@ func runScaleSetController(ctx context.Context, drain <-chan struct{}, drainTime
 
 		// A listener that stayed connected for a while failed afresh, so the
 		// ramp starts over and the reconnect is quick.
-		delay := reconnect.next(time.Since(listenStart))
+		delay := reconnect.next(time.Since(listenStart), listenErr)
 		logger.Warn("Listener disconnected, will reconnect",
 			slog.Any("error", listenErr),
 			slog.Duration("backoff", delay),
@@ -683,22 +683,41 @@ func runScaleSetController(ctx context.Context, drain <-chan struct{}, drainTime
 }
 
 // Listener reconnects: 5s doubling to a minute, starting over once a
-// connection has stayed up longer than the cap.
+// connection has stayed up longer than the cap. After a rate limit the wait
+// is at least what GitHub asked for, a minute when it gave no usable wait,
+// and at most an hour.
 const (
 	listenerReconnectInitial = 5 * time.Second
 	listenerReconnectMax     = time.Minute
+	listenerRateLimitDefault = time.Minute
+	listenerRateLimitMax     = time.Hour
 )
 
 type listenerBackoff struct{ failures int }
 
 // next returns how long to wait before reconnecting a listener that had
-// been connected for connectedFor.
-func (b *listenerBackoff) next(connectedFor time.Duration) time.Duration {
+// been connected for connectedFor and then failed with err.
+func (b *listenerBackoff) next(connectedFor time.Duration, err error) time.Duration {
 	if connectedFor > listenerReconnectMax {
 		b.failures = 0
 	}
 	b.failures++
-	return backoff.Exponential(b.failures, listenerReconnectInitial, listenerReconnectMax)
+	delay := backoff.Exponential(b.failures, listenerReconnectInitial, listenerReconnectMax)
+	var rateLimited *scaleset.RateLimitError
+	if errors.As(err, &rateLimited) {
+		delay = max(delay, rateLimitWait(rateLimited))
+	}
+	return delay
+}
+
+// rateLimitWait is how long GitHub asked runner to stay away. Without a
+// usable wait it is a minute, as the SDK advises for secondary limits; the
+// cap keeps a bad header from parking the listener indefinitely.
+func rateLimitWait(rl *scaleset.RateLimitError) time.Duration {
+	if rl.RetryAfter <= 0 {
+		return listenerRateLimitDefault
+	}
+	return min(rl.RetryAfter, listenerRateLimitMax)
 }
 
 type drainer interface {
@@ -805,7 +824,7 @@ func listenOnce(ctx context.Context, client *scaleset.Client, scaleSetID int, se
 		ScaleSetID: scaleSetID,
 		MaxRunners: maxRunners,
 		Logger:     logger,
-	}, listener.WithMetricsRecorder(recorder))
+	})
 	if err != nil {
 		return fmt.Errorf("failed to create listener: %w", err)
 	}
@@ -813,5 +832,5 @@ func listenOnce(ctx context.Context, client *scaleset.Client, scaleSetID int, se
 		onReady()
 	}
 
-	return l.Run(ctx, s)
+	return l.Run(ctx, controller.NewMessageHandler(sessionClient, s, recorder, logger))
 }

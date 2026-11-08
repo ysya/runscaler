@@ -20,11 +20,12 @@ import (
 	runnerlock "github.com/ysya/runscaler/internal/lock"
 )
 
-// scaleSetAPI is the part of the scaleset client that finds, registers and
-// removes a runner scale set.
+// scaleSetAPI is the part of the scaleset client that finds, lists,
+// registers and removes runner scale sets.
 type scaleSetAPI interface {
 	GetRunnerGroupByName(ctx context.Context, runnerGroup string) (*scaleset.RunnerGroup, error)
 	GetRunnerScaleSet(ctx context.Context, runnerGroupID int, runnerScaleSetName string) (*scaleset.RunnerScaleSet, error)
+	ListRunnerScaleSets(ctx context.Context, runnerGroupID int) ([]scaleset.RunnerScaleSet, error)
 	CreateRunnerScaleSet(ctx context.Context, runnerScaleSet *scaleset.RunnerScaleSet) (*scaleset.RunnerScaleSet, error)
 	UpdateRunnerScaleSet(ctx context.Context, runnerScaleSetID int, runnerScaleSet *scaleset.RunnerScaleSet) (*scaleset.RunnerScaleSet, error)
 	DeleteRunnerScaleSet(ctx context.Context, runnerScaleSetID int) error
@@ -40,30 +41,41 @@ func newScaleSetClient(ss config.ScaleSetConfig) (scaleSetAPI, error) {
 	return ss.NewScalesetClient(nil)
 }
 
+// scaleSetProbe is what a read-only probe learned about one scale set: the
+// client and runner group it used, and whether the scale set is registered.
+type scaleSetProbe struct {
+	client        scaleSetAPI
+	runnerGroupID int
+	registered    bool
+}
+
 // probeScaleSet checks, read-only, that GitHub accepts ss's credentials for
 // its configured runner group, and reports whether its scale set is
 // registered. Its errors may carry SDK text; print them through
 // safeAPIError.
-func probeScaleSet(ctx context.Context, ss config.ScaleSetConfig, newClient func(config.ScaleSetConfig) (scaleSetAPI, error)) (bool, error) {
+func probeScaleSet(ctx context.Context, ss config.ScaleSetConfig, newClient func(config.ScaleSetConfig) (scaleSetAPI, error)) (scaleSetProbe, error) {
 	// Match ScaleSetConfig.Validate's URL boundary before the factory can
 	// read App credentials or the SDK can issue an authenticated request.
 	registrationURL, err := url.ParseRequestURI(ss.RegistrationURL)
 	if err != nil || registrationURL.Scheme != "https" || registrationURL.Host == "" || registrationURL.User != nil {
-		return false, errors.New("invalid registration URL")
+		return scaleSetProbe{}, errors.New("invalid registration URL")
 	}
 	if ss.Token == "" && ss.GitHubApp == nil {
-		return false, fmt.Errorf("registration URL and credentials are required")
+		return scaleSetProbe{}, fmt.Errorf("registration URL and credentials are required")
 	}
 	client, err := newClient(ss)
 	if err != nil {
-		return false, err
+		return scaleSetProbe{}, err
 	}
 	groupID, err := resolveRunnerGroupID(ctx, client, ss.RunnerGroup)
 	if err != nil {
-		return false, err
+		return scaleSetProbe{}, err
 	}
 	registered, err := client.GetRunnerScaleSet(ctx, groupID, ss.ScaleSetName)
-	return registered != nil, err
+	if err != nil {
+		return scaleSetProbe{}, err
+	}
+	return scaleSetProbe{client: client, runnerGroupID: groupID, registered: registered != nil}, nil
 }
 
 // The SDK wraps response bodies, URLs and authentication failures in error
@@ -95,12 +107,28 @@ func safeAPIError(err error) error {
 	if errors.As(err, &verificationErr) || errors.As(err, &authorityErr) || errors.As(err, &hostnameErr) || errors.As(err, &certificateErr) || errors.As(err, &recordErr) {
 		return errors.New("TLS verification failed")
 	}
-	// SDK v0.4.0 exposes response status only in its formatted error. Copy
-	// just the three validated digits, never arbitrary response text.
+	var rateLimited *scaleset.RateLimitError
+	if errors.As(err, &rateLimited) {
+		return rateLimitCategory(rateLimited)
+	}
+	// SDK v0.5.0 types only some statuses (400, 401, 404, 409 and rate
+	// limits); others, such as a plain 403 or a 5xx, appear only in its
+	// formatted error. Copy just the three validated digits, never arbitrary
+	// response text.
 	if match := apiHTTPStatus.FindStringSubmatch(err.Error()); len(match) == 2 {
 		return fmt.Errorf("HTTP %s request failed", match[1])
 	}
 	return errors.New("request failed")
+}
+
+// rateLimitCategory names a rate limit by its status, its kind and the wait
+// GitHub asked for, none of which carries response text.
+func rateLimitCategory(rl *scaleset.RateLimitError) error {
+	category := fmt.Sprintf("HTTP %d rate limited (%s)", rl.StatusCode, rl.Kind)
+	if rl.RetryAfter > 0 {
+		category += "; retry after " + rl.RetryAfter.Round(time.Second).String()
+	}
+	return errors.New(category)
 }
 
 // resolveRunnerGroupID maps the configured runner group to its ID; the

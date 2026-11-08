@@ -19,3 +19,6 @@ dist/
 # Local planning notes and SDD scratch workspace (never committed)
 .superpowers/
 docs/superpowers/
+
+# Claude Code settings, worktrees and agent files (never committed)
+.claude/

@@ -147,7 +147,7 @@ func upToDateUpdate(t *testing.T, running string) string {
 
 func TestUpdateWhenUpToDateRemindsAboutAPendingRestart(t *testing.T) {
 	out := upToDateUpdate(t, "1.0.0")
-	for _, want := range []string{"up to date (2.0.0)", "still running 1.0.0", "service restart --scope user", "up to 45m for running jobs"} {
+	for _, want := range []string{"up to date (2.0.0)", "still running 1.0.0", " service restart\n", "up to 45m for running jobs"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("output lacks %q:\n%s", want, out)
 		}

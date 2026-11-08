@@ -97,10 +97,14 @@ func TestUpdateUsesInstalledBinaryAndItsVersion(t *testing.T) {
 		t.Fatalf("wrong binary updated: invoking=%s installed=%s", a, b)
 	}
 	validate := runnerCommand{binary: installed, args: []string{"validate", "--config", configPath}}.String()
-	for _, want := range []string{"Installed 2.0.0 at " + installed, "checksum verified", "1. Validate", validate, "2. Restart", "--scope user"} {
+	// The only installation needs no --scope: auto detection selects it.
+	for _, want := range []string{"Installed 2.0.0 at " + installed, "checksum verified", "1. Validate", validate, "2. Restart", installed + " service restart\n"} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("missing target-aware guidance %q: %s", want, out.String())
 		}
+	}
+	if strings.Contains(out.String(), "--scope") {
+		t.Fatalf("the only installation was named with --scope: %s", out.String())
 	}
 }
 

@@ -1014,6 +1014,10 @@ Management commands (`status`, `logs`, `doctor`, `service …`, `update`) use a
 unique installed target's binary/config. `--scope user|system` selects one
 explicitly; `--user` and `--user=false` remain aliases. Auto mode refuses two
 installations or unverifiable metadata. Installation refuses a second scope.
+Discovery sees system definitions but only the invoking account's user
+definition, so a fresh installation also refuses while another runner holds
+the run lock, such as another account's user service or a foreground
+`runner run`.
 Linux discovery requires systemd's `busctl` JSON support and the relevant
 service-manager bus. Explicit scopes never fall back to another installation.
 Without any installed service, normal standalone config discovery still works.

@@ -15,6 +15,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/ysya/runscaler/internal/layout"
+	runnerlock "github.com/ysya/runscaler/internal/lock"
 )
 
 type serviceScope string
@@ -140,6 +141,10 @@ func targetFromArgs(scope serviceScope, binary string, args []string) (*installa
 
 var discoverInstallations = readInstalledTargets
 
+// runnerLockPath is the machine-wide lock `runner run` holds. A fresh
+// installation probes it; tests point it at a temporary file.
+var runnerLockPath = runnerlock.DefaultPath
+
 func init() {
 	for _, c := range []*cobra.Command{serviceInstallCmd, serviceUninstallCmd, serviceStartCmd, serviceStopCmd, serviceRestartCmd, serviceStatusCmd, serviceLogsCmd, statusCmd, logsCmd, updateCmd, doctorCmd} {
 		addInstallationFlags(c)
@@ -247,6 +252,11 @@ func serviceCommandInstallation(c *cobra.Command, install bool) (serviceScope, *
 	if err != nil {
 		return "", nil, err
 	}
+	if install && target == nil {
+		if err := refuseWhileAnotherRunnerRuns(); err != nil {
+			return "", nil, err
+		}
+	}
 	switch {
 	case target != nil:
 		scope = target.Scope
@@ -258,6 +268,23 @@ func serviceCommandInstallation(c *cobra.Command, install bool) (serviceScope, *
 		scope = defaultScope()
 	}
 	return scope, target, nil
+}
+
+// refuseWhileAnotherRunnerRuns stops a fresh installation while another
+// runner holds the machine-wide lock. Discovery sees system definitions but
+// only the invoking account's user definition, so another account's running
+// user service, or a foreground `runner run`, shows up only here. The probe
+// releases the lock at once: the service being installed must take it.
+func refuseWhileAnotherRunnerRuns() error {
+	release, err := runnerlock.Acquire(runnerLockPath, runnerlock.Info{PID: os.Getpid(), StartedAt: time.Now()})
+	if errors.Is(err, runnerlock.ErrAlreadyRunning) {
+		return fmt.Errorf("%w\n\n  Only one runner may run per machine, so no service was installed.\n  If another account's service runs it, uninstall that service as that account;\n  otherwise stop that runner first", err)
+	}
+	if err != nil {
+		return fmt.Errorf("cannot check for a running runner before installing: %w", err)
+	}
+	release()
+	return nil
 }
 
 func announceInstallation(c *cobra.Command, target *installationTarget) {

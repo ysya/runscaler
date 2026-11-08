@@ -119,7 +119,21 @@ disambiguate. --user and --user=false remain aliases for the two scopes.`,
 var serviceInstallCmd = &cobra.Command{
 	Use:   "install",
 	Short: "Install and start runner as a system service",
-	RunE:  runServiceInstall,
+	Long: `Install runner as a service and start it.
+
+On Linux, the default is a system service that runs as the dedicated
+non-root "runscaler" account. It needs sudo, and before the unit is written
+'runner validate' runs as that account (--no-start skips this check).
+--scope user installs a systemd user service for the current account
+instead, without sudo. On macOS, runner installs a LaunchAgent for the
+logged-in user.
+
+A host has one runner installation: install refuses a second one, and a
+fresh install refuses while another runner is running.`,
+	Example: `  sudo runner service install             # Linux: system service (the default)
+  runner service install --scope user     # User service for this account, no sudo
+  runner service install --no-start       # Install and enable without starting`,
+	RunE: runServiceInstall,
 }
 
 var serviceUninstallCmd = &cobra.Command{

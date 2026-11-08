@@ -27,10 +27,9 @@ shared volume, named cache volumes, and Tart's image cache — and print how
 much space each is using, the filesystem it lives on, that filesystem's
 current free percentage, and any retention policy configured for it.
 
-This calls Measure() on every store, which can be expensive: some stores
-run a short-lived helper container to walk a volume. For a cheap,
-filesystem-level view that is safe to poll instead, see the "disk" section
-of 'runner status --json'.`,
+Measuring can take a while: some stores start a short-lived helper
+container to walk a volume. For a cheap, filesystem-level view that is safe
+to poll, see the "disk" section of 'runner status --json'.`,
 	Example: `  runner cache
   runner cache --json`,
 	RunE: runCache,

@@ -34,6 +34,9 @@ func (s serviceScope) String() string { return string(s) }
 // Environment is private metadata: never print it or copy it into errors.
 type installationTarget struct {
 	Scope serviceScope
+	// Unique is set when this is the only installation discovery finds, so
+	// auto detection selects it without --scope.
+	Unique bool
 	// DefinitionPath is the unit file or plist the service manager loads.
 	// Uninstall removes it only when it is the file runner writes.
 	DefinitionPath      string
@@ -56,10 +59,12 @@ type installationCandidate struct {
 
 // addInstallationFlags registers both spellings of the installation scope
 // on every installation-aware command. --scope is canonical; --user and
-// --user=false remain aliases for --scope user and --scope system.
+// --user=false remain aliases for --scope user and --scope system, hidden
+// from help.
 func addInstallationFlags(c *cobra.Command) {
 	c.Flags().String("scope", string(scopeAuto), "Installation scope: auto, user, or system")
 	c.Flags().Bool("user", false, "Alias for --scope user; --user=false means --scope system")
+	_ = c.Flags().MarkHidden("user")
 }
 
 func requestedScope(c *cobra.Command) (serviceScope, error) {
@@ -89,6 +94,15 @@ func requestedScope(c *cobra.Command) (serviceScope, error) {
 }
 
 func selectInstallation(candidates []installationCandidate, scope serviceScope) (*installationTarget, error) {
+	installed, verified := 0, true
+	for _, candidate := range candidates {
+		if candidate.Target != nil {
+			installed++
+		}
+		if candidate.Err != nil {
+			verified = false
+		}
+	}
 	var selected *installationTarget
 	for _, candidate := range candidates {
 		if scope != scopeAuto && scope != candidate.Scope {
@@ -104,6 +118,9 @@ func selectInstallation(candidates []installationCandidate, scope serviceScope) 
 			return nil, fmt.Errorf("both system and user installations exist:\n  system/user targets include %s (%s) and %s (%s)\nSelect --scope user or --scope system; no installation was changed", selected.BinaryPath, selected.ConfigPath, candidate.Target.BinaryPath, candidate.Target.ConfigPath)
 		}
 		selected = candidate.Target
+	}
+	if selected != nil {
+		selected.Unique = installed == 1 && verified
 	}
 	return selected, nil
 }
@@ -258,7 +275,7 @@ func serviceCommandInstallation(c *cobra.Command, install bool) (serviceScope, *
 		c.SetContext(context.WithValue(commandContext(c), installationContextKey{}, target))
 		announceInstallation(c, target)
 	case !install:
-		return "", nil, errServiceNotInstalled
+		return "", nil, notInstalledError(c, scope, candidates)
 	case scope == scopeAuto:
 		scope = defaultScope()
 	}
@@ -278,6 +295,22 @@ func refuseWhileAnotherRunnerRuns() error {
 		return fmt.Errorf("%w\n\n  Only one runner may run per machine, so no service was installed.\n  If another account's service runs it, uninstall that service as that account;\n  otherwise stop that runner first", running)
 	}
 	return nil
+}
+
+// notInstalledError explains a missing installation: the installation in
+// another scope that the requested scope excluded, or how to install one.
+func notInstalledError(c *cobra.Command, scope serviceScope, candidates []installationCandidate) error {
+	for _, candidate := range candidates {
+		if candidate.Target != nil && candidate.Scope != scope {
+			return fmt.Errorf("%w in %s scope; the installed service is in %s scope: select it with --scope %s", errServiceNotInstalled, scope, candidate.Scope, candidate.Scope)
+		}
+	}
+	binary := hintBinary(c)
+	hint := "\n\n  Install it with:\n    " + serviceCommand(binary, defaultScope(), "install")
+	if defaultScope() == scopeSystem {
+		hint += "\n  or, for this account only:\n    " + serviceCommand(binary, scopeUser, "install")
+	}
+	return fmt.Errorf("%w%s", errServiceNotInstalled, hint)
 }
 
 func announceInstallation(c *cobra.Command, target *installationTarget) {

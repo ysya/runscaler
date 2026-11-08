@@ -311,6 +311,9 @@ func fixtureUpdate(t *testing.T, cli, helper, configPath string, scope serviceSc
 	c.Flags().Bool("check", false, "")
 	c.Flags().String("binary-path", "", "")
 	c.Flags().String("config", "", "")
+	// --restart validates as the service runs (systemd-run for a non-root
+	// system service) and restarts the stopped fixture service.
+	c.Flags().Bool("restart", true, "")
 	addInstallationFlags(c)
 	if err := c.Flags().Set("scope", string(scope)); err != nil {
 		t.Fatal(err)

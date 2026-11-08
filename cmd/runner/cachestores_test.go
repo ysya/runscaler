@@ -47,9 +47,8 @@ func TestDockerPruneSettingsFor(t *testing.T) {
 	// run — PruneTTL/MaxAge/interval are still
 	// populated with real (defaulted) values regardless, because the disk
 	// guard reclaims through these stores whether or not any scaleset
-	// enabled the periodic sweep (see
-	// docs/superpowers/specs/2026-08-13-cache-architecture-design.md,
-	// "各 store 的啟用開關只約束例行清理"). A bare zero-value PruneTTL would leave
+	// enabled the periodic sweep (a store's switch gates only its own
+	// routine cleanup). A bare zero-value PruneTTL would leave
 	// the guard just as unable to reclaim as respecting Enabled() did.
 	t.Run("no scaleset enabled yields disabled=false but real defaulted settings", func(t *testing.T) {
 		sets := []config.ScaleSetConfig{{ScaleSetName: "a"}}

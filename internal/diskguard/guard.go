@@ -36,10 +36,8 @@ type Config struct {
 // filesystem's free space has dropped below MinFree, and never reclaims
 // past MaxTier).
 //
-// Neither mechanism consults a store's Enabled() (see
-// docs/superpowers/specs/2026-08-13-cache-architecture-design.md,
-// "各 store 的啟用開關只約束例行清理"). Enabled() means "run this store's own
-// routine periodic cleanup", not "never touch this even under disk
+// Neither mechanism consults a store's Enabled(). Enabled() means "run this
+// store's own routine periodic cleanup", not "never touch this even under disk
 // pressure" — the periodic sweepers in cmd/runner gate on it, but the
 // guard reclaims from every configured store regardless, because refusing
 // to touch a store the operator merely left off its routine schedule would

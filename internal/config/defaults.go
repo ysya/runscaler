@@ -94,10 +94,9 @@ const (
 	// filesystem below min-free) and its budget pass only touches stores the
 	// operator gave an explicit budget — it is not a routine sweeper running
 	// on a timer regardless of need. It deliberately does NOT respect a
-	// store's own Enabled()
-	// (see docs/superpowers/specs/2026-08-13-cache-architecture-design.md,
-	// "各 store 的啟用開關只約束例行清理" — prune/buildx-cleanup default off and
-	// max-tier defaults to 3, so a guard that honored Enabled() would ship
+	// store's own Enabled(), which gates only that store's routine cleanup
+	// (prune/buildx-cleanup default off and max-tier defaults to 3, so a
+	// guard that honored Enabled() would ship
 	// unable to reclaim anything). A host whose disk runner does not own
 	// opts out with `[disk] guard = false`, not by disabling individual
 	// stores.

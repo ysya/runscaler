@@ -15,7 +15,7 @@ func releaseNotesURL(tag string) string {
 
 func printUpgradeNotice(out io.Writer, tag string) {
 	fmt.Fprintf(out, "Release notes: %s\nUpgrade requirements: %s\n", releaseNotesURL(tag), upgradeRequirementsURL)
-	fmt.Fprintln(out, "This command verifies the download checksum; it does not validate configuration/provider compatibility, rewrite service definitions or restart services. Existing service scope and runtime user are retained.")
+	fmt.Fprintln(out, "Updating replaces only the binary: it verifies the checksum but does not check the config or restart services.")
 }
 
 func logAvailableUpdate(logger *slog.Logger, current, latest string) {

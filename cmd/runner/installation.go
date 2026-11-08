@@ -247,6 +247,11 @@ func serviceCommandInstallation(c *cobra.Command, install bool) (serviceScope, *
 	if err != nil {
 		return "", nil, err
 	}
+	if install && target == nil {
+		if err := refuseWhileAnotherRunnerRuns(); err != nil {
+			return "", nil, err
+		}
+	}
 	switch {
 	case target != nil:
 		scope = target.Scope
@@ -258,6 +263,21 @@ func serviceCommandInstallation(c *cobra.Command, install bool) (serviceScope, *
 		scope = defaultScope()
 	}
 	return scope, target, nil
+}
+
+// refuseWhileAnotherRunnerRuns stops a fresh installation while another
+// runner holds the machine-wide lock. Discovery sees system definitions but
+// only the invoking account's user definition, so another account's running
+// user service, or a foreground `runner run`, shows up only here.
+func refuseWhileAnotherRunnerRuns() error {
+	running, err := probeRunningRunner()
+	if err != nil {
+		return fmt.Errorf("cannot check for a running runner before installing: %w", err)
+	}
+	if running != nil {
+		return fmt.Errorf("%w\n\n  Only one runner may run per machine, so no service was installed.\n  If another account's service runs it, uninstall that service as that account;\n  otherwise stop that runner first", running)
+	}
+	return nil
 }
 
 func announceInstallation(c *cobra.Command, target *installationTarget) {

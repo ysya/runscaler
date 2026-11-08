@@ -255,14 +255,19 @@ validate configuration/provider compatibility, rewrite service definitions or
 restart services. Existing system/user scope and runtime identity are retained;
 an existing root service is not converted to a non-root account.
 
-After installation, the command prints an explicit validation command for the
-selected config. Run it with the service's credentials, provider access and
-groups. The restart hint uses the selected binary and `--scope user|system`;
-system service management needs an administrative shell. A matching health
-version is not proof of configuration compatibility or readiness. If health is
-disabled or unavailable, the running version is reported as unverified rather
-than assumed stopped. With `--binary-path` or no installed service, no service
-is selected: restart processes using that binary manually after validation.
+After installation, the command lists the steps that finish the upgrade:
+validate the selected config with the new binary, then restart the service. It
+also says how long a restart waits for running jobs, from the configured
+`drain-timeout`. For a non-root system service, the validation command runs
+through `systemd-run` with the service's identity, groups and environment file,
+as `doctor` does. The restart hint uses the selected binary and
+`--scope user|system`; system service management needs an administrative shell.
+A matching health version is not proof of configuration compatibility or
+readiness. If health is disabled or unavailable, the running version is reported
+as unverified rather than assumed stopped. When the binary is already current
+but the service still reports an older version, `runner update` repeats the
+steps. With `--binary-path` or no installed service, no service is selected:
+restart processes using that binary manually after validation.
 
 SIGTERM normally begins a drain and waits for active jobs, bounded by
 `drain-timeout` and the service manager's stop timeout. Jobs may be terminated
@@ -294,7 +299,8 @@ or a minute when GitHub gave no wait, and never more than an hour.
 If runner is killed unexpectedly (e.g. `kill -9`, crash, power loss), Docker
 containers or Tart VMs may be left behind. The next `runner run` reconciles
 them automatically after acquiring the machine-wide lock. Use `doctor` for a
-manual check while runner is stopped:
+manual check. While a runner holds that lock, doctor reports the containers and
+VMs it owns as in use rather than orphaned:
 
 ```bash
 # Check GitHub API connectivity and orphaned resources
@@ -317,8 +323,9 @@ because runner never deletes a scale set on its own: add it to the config as a
 `[[scaleset]]`, stop runner, and run `runner scaleset delete <name>`. Finding
 such scale sets does not fail doctor; a failed listing does.
 
-Failed API checks make the command exit unsuccessfully even when there are no
-orphaned resources. Reports contain safe cancellation, timeout, DNS, TLS,
+Without a config file, doctor skips the GitHub API checks and lists where it
+looked; `runner validate` fails with the same list. Failed API checks make the
+command exit unsuccessfully even when there are no orphaned resources. Reports contain safe cancellation, timeout, DNS, TLS,
 rate-limit, or numeric HTTP-status categories, and a rate limit includes the
 wait GitHub asked for; raw SDK response bodies are not printed.
 
@@ -1014,6 +1021,10 @@ Management commands (`status`, `logs`, `doctor`, `service …`, `update`) use a
 unique installed target's binary/config. `--scope user|system` selects one
 explicitly; `--user` and `--user=false` remain aliases. Auto mode refuses two
 installations or unverifiable metadata. Installation refuses a second scope.
+Discovery sees system definitions but only the invoking account's user
+definition, so a fresh installation also refuses while another runner holds
+the run lock, such as another account's user service or a foreground
+`runner run`.
 Linux discovery requires systemd's `busctl` JSON support and the relevant
 service-manager bus. Explicit scopes never fall back to another installation.
 Without any installed service, normal standalone config discovery still works.

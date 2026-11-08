@@ -63,13 +63,22 @@ type AlreadyRunningError struct {
 
 func (e *AlreadyRunningError) Error() string {
 	if e.Info == nil {
-		return fmt.Sprintf("%s (lock %s is held)", ErrAlreadyRunning, e.Path)
+		return fmt.Sprintf("%s (%s)", ErrAlreadyRunning, e.Detail())
+	}
+	return fmt.Sprintf("%s on this host (%s)", ErrAlreadyRunning, e.Detail())
+}
+
+// Detail names the lock's holder: its PID, start time and config when the
+// lock file records them, else the held lock's path.
+func (e *AlreadyRunningError) Detail() string {
+	if e.Info == nil {
+		return fmt.Sprintf("lock %s is held", e.Path)
 	}
 	detail := fmt.Sprintf("PID %d, started %s", e.Info.PID, e.Info.StartedAt.Format(time.DateTime))
 	if e.Info.ConfigPath != "" {
 		detail += ", config " + e.Info.ConfigPath
 	}
-	return fmt.Sprintf("%s on this host (%s)", ErrAlreadyRunning, detail)
+	return detail
 }
 
 func (e *AlreadyRunningError) Unwrap() error { return ErrAlreadyRunning }

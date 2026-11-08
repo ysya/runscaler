@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -25,7 +26,18 @@ import (
 
 type doctorProbeClient struct {
 	fakeScaleSetAPI
-	err error
+	err     error
+	listErr error
+}
+
+func (c *doctorProbeClient) ListRunnerScaleSets(ctx context.Context, groupID int) ([]scaleset.RunnerScaleSet, error) {
+	if _, ok := ctx.Deadline(); !ok {
+		return nil, errors.New("listing has no deadline")
+	}
+	if c.listErr != nil {
+		return nil, c.listErr
+	}
+	return c.fakeScaleSetAPI.ListRunnerScaleSets(ctx, groupID)
 }
 
 func (c *doctorProbeClient) GetRunnerScaleSet(ctx context.Context, groupID int, name string) (*scaleset.RunnerScaleSet, error) {
@@ -185,7 +197,7 @@ func TestDoctorSDKFactoryUsesGitHubApp(t *testing.T) {
 	roots.AddCert(server.Certificate())
 	var output bytes.Buffer
 	probeErr := checkScalesetAPIWith(context.Background(), &cfg, &output, func(ss config.ScaleSetConfig) (scaleSetAPI, error) {
-		return ss.NewScalesetClient(nil, scaleset.WithRootCAs(roots))
+		return ss.NewScalesetClient(nil, scaleset.WithHTTPClient(scaleset.NewHTTPClient(scaleset.HTTPClientConfig{RootCAs: roots})))
 	})
 	select {
 	case path := <-requests:
@@ -222,6 +234,7 @@ func TestDoctorAPIErrorMessagesUseSafeCategories(t *testing.T) {
 		{"DNS", &net.DNSError{Err: secret, Name: secret}, "DNS lookup failed"},
 		{"TLS", x509.UnknownAuthorityError{}, "TLS verification failed"},
 		{"HTTP", errors.New(`request failed(status="403 Forbidden"): ` + secret), "HTTP 403"},
+		{"rate limit", fmt.Errorf("%s: %w", secret, &scaleset.RateLimitError{StatusCode: 403, Kind: scaleset.RateLimitSecondary, RetryAfter: 90 * time.Second}), "HTTP 403 rate limited (secondary); retry after 1m30s"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := config.Config{ScaleSets: []config.ScaleSetConfig{{ScaleSetName: "builders", RegistrationURL: "https://github.com/example", Token: "synthetic-pat"}}}
@@ -244,6 +257,134 @@ func TestDoctorAPIErrorMessagesUseSafeCategories(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A 429 whose Retry-After outlasts the probe deadline comes back from the
+// real SDK at once, as a RateLimitError that doctor must name without
+// response text.
+func TestDoctorReportsRateLimitsFromTheRealSDK(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "60")
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusTooManyRequests)
+		fmt.Fprint(w, "synthetic-rate-limit-body ghp_syntheticsecret")
+	}))
+	defer server.Close()
+	cfg := config.Config{ScaleSets: []config.ScaleSetConfig{{
+		ScaleSetName: "limited", RegistrationURL: server.URL + "/example", Token: "synthetic-pat",
+	}}}
+	roots := x509.NewCertPool()
+	roots.AddCert(server.Certificate())
+	var out bytes.Buffer
+	err := checkScalesetAPIWith(context.Background(), &cfg, &out, func(ss config.ScaleSetConfig) (scaleSetAPI, error) {
+		return ss.NewScalesetClient(nil, scaleset.WithHTTPClient(scaleset.NewHTTPClient(scaleset.HTTPClientConfig{RootCAs: roots})))
+	})
+	if err == nil {
+		t.Fatal("a rate-limited probe passed")
+	}
+	want := "HTTP 429 rate limited (secondary); retry after 1m0s"
+	if !strings.Contains(out.String(), want) || !strings.Contains(err.Error(), want) {
+		t.Fatalf("missing %q:\n%s\n%v", want, &out, err)
+	}
+	for _, secret := range []string{"synthetic-rate-limit-body", "ghp_syntheticsecret", "synthetic-pat"} {
+		if strings.Contains(out.String(), secret) || strings.Contains(err.Error(), secret) {
+			t.Fatal("rate-limited response text leaked")
+		}
+	}
+}
+
+func TestDoctorListsScaleSetsThisConfigDoesNotRun(t *testing.T) {
+	example := &doctorProbeClient{fakeScaleSetAPI: fakeScaleSetAPI{
+		groups: map[string]int{"builders": 42},
+		scaleSets: map[int][]scaleset.RunnerScaleSet{
+			1:  {{Name: "linux"}, {Name: "old-linux"}, {Name: "MAC"}, {Name: "evil\nname"}, {Name: "elsewhere"}},
+			42: {{Name: "builders-set"}},
+		},
+	}}
+	other := &doctorProbeClient{fakeScaleSetAPI: fakeScaleSetAPI{
+		scaleSets: map[int][]scaleset.RunnerScaleSet{1: {{Name: "elsewhere"}}},
+	}}
+	cfg := config.Config{ScaleSets: []config.ScaleSetConfig{
+		{ScaleSetName: "linux", RegistrationURL: "https://github.com/example", Token: "synthetic-pat"},
+		{ScaleSetName: "mac", RegistrationURL: "https://github.com/example", Token: "synthetic-pat"},
+		{ScaleSetName: "builders-set", RegistrationURL: "https://github.com/example", RunnerGroup: "builders", Token: "synthetic-pat"},
+		{ScaleSetName: "elsewhere", RegistrationURL: "https://github.com/other", Token: "synthetic-pat"},
+	}}
+	var out bytes.Buffer
+	err := checkScalesetAPIWith(context.Background(), &cfg, &out, func(ss config.ScaleSetConfig) (scaleSetAPI, error) {
+		if ss.RegistrationURL == "https://github.com/other" {
+			return other, nil
+		}
+		return example, nil
+	})
+	if err != nil {
+		t.Fatalf("scale sets this config does not run must not fail diagnosis: %v\n%s", err, &out)
+	}
+	if !slices.Equal(example.listed, []int{1, 42}) || !slices.Equal(other.listed, []int{1}) {
+		t.Fatalf("listed runner groups %v and %v, want each group once", example.listed, other.listed)
+	}
+	report := out.String()
+	want := "  ⚠ GitHub API [linux]: its runner group has 3 scale set(s) not in this config\n" +
+		"      \"elsewhere\"\n      \"evil\\nname\"\n      \"old-linux\"\n"
+	if !strings.Contains(report, want) {
+		t.Fatalf("missing the scale sets this config does not run:\n%s", report)
+	}
+	if strings.Contains(report, `"MAC"`) || strings.Contains(report, "[builders-set]: its runner group") || strings.Contains(report, "[elsewhere]: its runner group") {
+		t.Fatalf("reported a scale set this config runs:\n%s", report)
+	}
+}
+
+func TestDoctorBoundsTheListOfScaleSetsThisConfigDoesNotRun(t *testing.T) {
+	var registered []scaleset.RunnerScaleSet
+	for i := range 25 {
+		registered = append(registered, scaleset.RunnerScaleSet{Name: fmt.Sprintf("other-%02d", i)})
+	}
+	client := &doctorProbeClient{fakeScaleSetAPI: fakeScaleSetAPI{scaleSets: map[int][]scaleset.RunnerScaleSet{1: registered}}}
+	cfg := config.Config{ScaleSets: []config.ScaleSetConfig{{ScaleSetName: "linux", RegistrationURL: "https://github.com/example", Token: "synthetic-pat"}}}
+	var out bytes.Buffer
+	if err := checkScalesetAPIWith(context.Background(), &cfg, &out, func(config.ScaleSetConfig) (scaleSetAPI, error) { return client, nil }); err != nil {
+		t.Fatal(err)
+	}
+	report := out.String()
+	if !strings.Contains(report, "has 25 scale set(s)") || !strings.Contains(report, `"other-19"`) || strings.Contains(report, `"other-20"`) || !strings.Contains(report, "… and 5 more") {
+		t.Fatalf("the list is not bounded to 20 names:\n%s", report)
+	}
+}
+
+func TestDoctorListingFailureFailsDiagnosis(t *testing.T) {
+	limited := &scaleset.RateLimitError{StatusCode: 403, Kind: scaleset.RateLimitSecondary}
+	client := &doctorProbeClient{listErr: fmt.Errorf("synthetic-installation-token: %w", limited)}
+	cfg := config.Config{ScaleSets: []config.ScaleSetConfig{{ScaleSetName: "linux", RegistrationURL: "https://github.com/example", Token: "synthetic-pat"}}}
+	var out bytes.Buffer
+	err := checkScalesetAPIWith(context.Background(), &cfg, &out, func(config.ScaleSetConfig) (scaleSetAPI, error) { return client, nil })
+	if err == nil || !strings.Contains(out.String(), "✗ GitHub API [linux]: listing its runner group failed: HTTP 403 rate limited (secondary)") || !strings.Contains(err.Error(), "HTTP 403 rate limited") {
+		t.Fatalf("a failed listing did not fail diagnosis with its safe category: %v\n%s", err, &out)
+	}
+	if strings.Contains(out.String(), "synthetic-installation-token") || strings.Contains(err.Error(), "synthetic-installation-token") {
+		t.Fatal("raw listing error leaked")
+	}
+}
+
+// A configured scale set whose own probe failed is still in this config.
+func TestDoctorDoesNotListConfiguredScaleSetsWhoseProbeFailed(t *testing.T) {
+	working := &doctorProbeClient{fakeScaleSetAPI: fakeScaleSetAPI{scaleSets: map[int][]scaleset.RunnerScaleSet{1: {{Name: "broken"}, {Name: "linux"}}}}}
+	cfg := config.Config{ScaleSets: []config.ScaleSetConfig{
+		{ScaleSetName: "broken", RegistrationURL: "https://github.com/example", Token: "synthetic-pat"},
+		{ScaleSetName: "linux", RegistrationURL: "https://github.com/example", Token: "synthetic-pat"},
+	}}
+	var out bytes.Buffer
+	err := checkScalesetAPIWith(context.Background(), &cfg, &out, func(ss config.ScaleSetConfig) (scaleSetAPI, error) {
+		if ss.ScaleSetName == "broken" {
+			return &doctorProbeClient{err: errors.New("synthetic failure")}, nil
+		}
+		return working, nil
+	})
+	if err == nil {
+		t.Fatal("the failed probe must still fail diagnosis")
+	}
+	if !slices.Equal(working.listed, []int{1}) || strings.Contains(out.String(), "not in this config") {
+		t.Fatalf("listed %v; reported a configured scale set:\n%s", working.listed, &out)
 	}
 }
 

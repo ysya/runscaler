@@ -291,6 +291,9 @@ runner 規模集在重新啟動期間會維持註冊，因此當 runner 因升�
 runner 不會自行刪除 runner 規模集：當你停用某個 `[[scaleset]]` 時，
 請先停止 runner，再使用 `runner scaleset delete <name>` 從 GitHub 移除它。
 
+listener 斷線時，runner 會在五秒後重新連線，之後每次等待加倍，最長一分鐘。
+若被 GitHub 速率限制，會依 GitHub 要求的時間等待；GitHub 沒有給時間時等一分鐘，最長不超過一小時。
+
 <a id="troubleshooting-with-doctor"></a>
 
 ### 使用 `doctor` 疑難排解
@@ -312,9 +315,16 @@ Doctor 會使用各個已設定 runner 規模集的 App 或 PAT 憑證探測 Git
 即使失敗，也不會阻止後續探測或本機資源檢查。取消操作會停止後續探測。
 若 runner 規模集尚未註冊，僅會回報狀態，不會建立或修改它。
 
+接著，Doctor 會列出每個已連上的 runner 群組，回報其中已註冊、
+但這份設定中沒有任何相同註冊 URL 的 `[[scaleset]]` 使用的 runner 規模集。
+這些規模集可能由其他主機執行；若沒有主機執行，指定它的工作會一直排隊，
+因為 runner 不會自行刪除 runner 規模集：請把它加回設定成為 `[[scaleset]]`，
+停止 runner，再執行 `runner scaleset delete <name>`。
+找到這類規模集不會讓 doctor 失敗，但列出失敗會。
+
 即使沒有孤立資源，API 檢查失敗仍會讓指令以失敗狀態結束。
-報告僅包含安全的取消、逾時、DNS、TLS 或數字 HTTP 狀態分類，
-不會輸出原始 SDK 回應本文。
+報告僅包含安全的取消、逾時、DNS、TLS、速率限制或數字 HTTP 狀態分類，
+速率限制還會附上 GitHub 要求的等待時間；不會輸出原始 SDK 回應本文。
 
 `--fix` 旗標會取得與 `runner run` 相同的全機鎖定，因此只要目前仍有 runner 執行個體
 正在執行，就會拒絕移除資源。
@@ -910,7 +920,7 @@ internal/
   pathtrust/         "Only root can modify this path" checks
   lock/              Machine-wide process and destructive-maintenance lock
   provider/          InstanceProvider + Docker/Tart implementations
-  controller/        ScaleSetController; adapts listener.Scaler to instance lifecycle, readiness and retries
+  controller/        ScaleSetController and the listener MessageHandler; instance lifecycle, readiness and retries
   capacity/          Host-wide concurrent-runner broker shared by all scale sets
   backoff/           Exponential backoff with jitter for startup retries
   cachestore/        CacheStore abstraction over reclaimable Docker/Tart storage
@@ -927,7 +937,7 @@ runner 程序是**管理者**。每個已設定的 runner 規模集各有一個 
 - **`DockerProvider`** — 透過 Docker API 管理 runner 容器執行個體
 - **`TartProvider`** — 透過 Tart CLI 管理 VM 執行個體（複製 → 執行 → 執行命令 → 停止 → 刪除）
 
-`ScaleSetController` 實作上游的 `listener.Scaler` 介面：
+每個 listener session 會把訊息交給 `MessageHandler`，由它實作上游的 `listener.Scaler` 介面：先認領訊息提供的工作，再把工作開始、工作完成與所需 runner 數量交給 controller。listener 只在 handler 成功處理後才確認訊息，因此工作認領失敗的訊息會重新送達，不會遺失。controller 的處理函式：
 
 - `HandleDesiredRunnerCount` — 擴增 runner 以符合工作需求
 - `HandleJobStarted` — 將 runner 標記為忙碌

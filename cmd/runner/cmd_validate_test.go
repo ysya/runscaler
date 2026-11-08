@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/actions/scaleset"
 
@@ -46,5 +48,23 @@ func TestValidateGitHubAccessPrintsOnlySafeErrorCategories(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "request failed") || !strings.Contains(out.String(), "token has the correct scopes") {
 		t.Fatalf("missing the safe category or the credential hint:\n%s", &out)
+	}
+}
+
+func TestValidateGitHubAccessExplainsRateLimits(t *testing.T) {
+	ss := validScaleSet("limited", 0)
+	var out bytes.Buffer
+	err := validateGitHubAccess(context.Background(), &out, []config.ScaleSetConfig{ss}, func(config.ScaleSetConfig) (scaleSetAPI, error) {
+		limited := &scaleset.RateLimitError{StatusCode: 403, Kind: scaleset.RateLimitPrimary, RetryAfter: 20*time.Minute - 300*time.Millisecond}
+		return &doctorProbeClient{err: fmt.Errorf("failed to get runner scale set: %w", limited)}, nil
+	})
+	if err == nil {
+		t.Fatal("a rate-limited probe passed validation")
+	}
+	if !strings.Contains(out.String(), "HTTP 403 rate limited (primary); retry after 20m0s") || !strings.Contains(out.String(), "rate-limiting these credentials") {
+		t.Fatalf("missing the rate-limit category or hint:\n%s", &out)
+	}
+	if strings.Contains(out.String(), "correct scopes") {
+		t.Fatalf("a rate limit was reported as a scope problem:\n%s", &out)
 	}
 }

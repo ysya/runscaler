@@ -23,6 +23,14 @@ type fakeScaleSetAPI struct {
 	updated  []int
 	deleted  []int
 	lookedUp []int // runner group IDs passed to GetRunnerScaleSet
+
+	scaleSets map[int][]scaleset.RunnerScaleSet // runner group ID -> every scale set in it
+	listed    []int                             // runner group IDs passed to ListRunnerScaleSets
+}
+
+func (f *fakeScaleSetAPI) ListRunnerScaleSets(_ context.Context, groupID int) ([]scaleset.RunnerScaleSet, error) {
+	f.listed = append(f.listed, groupID)
+	return f.scaleSets[groupID], nil
 }
 
 func (f *fakeScaleSetAPI) GetRunnerGroupByName(_ context.Context, name string) (*scaleset.RunnerGroup, error) {

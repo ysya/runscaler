@@ -285,6 +285,10 @@ as soon as runner reconnects. runner never deletes a scale set on its own: when
 you retire a `[[scaleset]]`, stop runner and remove it from GitHub with
 `runner scaleset delete <name>`.
 
+When a listener disconnects, runner reconnects after five seconds, doubling the
+wait up to a minute. After a GitHub rate limit it waits as long as GitHub asked,
+or a minute when GitHub gave no wait, and never more than an hour.
+
 ### Troubleshooting with `doctor`
 
 If runner is killed unexpectedly (e.g. `kill -9`, crash, power loss), Docker
@@ -306,9 +310,17 @@ probe has a five-second timeout; failures do not prevent later probes or local
 resource checks. Cancellation stops further probes. A scale set that is not
 registered yet is reported without creating or modifying it.
 
+Doctor then lists each runner group it reached and reports the scale sets
+registered there that no `[[scaleset]]` with the same registration URL names.
+Another host may run them. If none does, jobs that target one stay queued,
+because runner never deletes a scale set on its own: add it to the config as a
+`[[scaleset]]`, stop runner, and run `runner scaleset delete <name>`. Finding
+such scale sets does not fail doctor; a failed listing does.
+
 Failed API checks make the command exit unsuccessfully even when there are no
-orphaned resources. Reports contain safe cancellation, timeout, DNS, TLS, or
-numeric HTTP-status categories; raw SDK response bodies are not printed.
+orphaned resources. Reports contain safe cancellation, timeout, DNS, TLS,
+rate-limit, or numeric HTTP-status categories, and a rate limit includes the
+wait GitHub asked for; raw SDK response bodies are not printed.
 
 The `--fix` flag takes the same machine-wide lock as `runner run`, so it refuses
 to remove resources while any current runner instance is active. Shared and
@@ -1090,7 +1102,7 @@ internal/
   pathtrust/         "Only root can modify this path" checks
   lock/              Machine-wide process and destructive-maintenance lock
   provider/          InstanceProvider + Docker/Tart implementations
-  controller/        ScaleSetController; adapts listener.Scaler to instance lifecycle, readiness and retries
+  controller/        ScaleSetController and the listener MessageHandler; instance lifecycle, readiness and retries
   capacity/          Host-wide concurrent-runner broker shared by all scale sets
   backoff/           Exponential backoff with jitter for startup retries
   cachestore/        CacheStore abstraction over reclaimable Docker/Tart storage
@@ -1109,7 +1121,12 @@ an `InstanceProvider` lifecycle:
 - **`DockerProvider`** — manages runner container instances via Docker API
 - **`TartProvider`** — manages VM instances via Tart CLI (clone → run → exec → stop → delete)
 
-`ScaleSetController` implements the upstream `listener.Scaler` interface:
+Each listener session passes its messages to a `MessageHandler`, which
+implements the upstream `listener.Scaler` interface. It acquires the jobs a
+message offers, then hands job starts, job completions and the desired runner
+count to the controller. The listener acknowledges a message only after the
+handler succeeds, so a message whose jobs could not be acquired is delivered
+again instead of lost. The controller's handlers:
 
 - `HandleDesiredRunnerCount` — Scales up runners to match job demand
 - `HandleJobStarted` — Marks runners as busy

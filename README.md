@@ -194,6 +194,7 @@ jobs:
 | `runner version`         | Show version, commit, build date, and runtime info     |
 | `runner update`          | Update runner to the latest release                    |
 | `runner update --check`  | Check for updates without installing                   |
+| `runner update --restart` | Update, validate the config and restart the service   |
 | `runner scaleset delete` | Remove a retired scale set from GitHub                 |
 
 ### Status dashboard
@@ -246,13 +247,16 @@ runner update --check
 
 # After preparing the installation, update its selected binary
 runner update
+
+# Or update, validate the config with the new binary and restart the service
+runner update --restart
 ```
 
 `runner update` displays the selected service scope, runtime user, binary and
 config, downloads the archive for your platform, verifies its SHA-256 checksum
-against `checksums.txt`, then atomically replaces the binary. It does not
-validate configuration/provider compatibility, rewrite service definitions or
-restart services. Existing system/user scope and runtime identity are retained;
+against `checksums.txt`, then atomically replaces the binary. Without
+`--restart` it does not validate configuration/provider compatibility or
+restart services, and it never rewrites service definitions. Existing system/user scope and runtime identity are retained;
 an existing root service is not converted to a non-root account.
 
 After installation, the command lists the steps that finish the upgrade:
@@ -260,14 +264,24 @@ validate the selected config with the new binary, then restart the service. It
 also says how long a restart waits for running jobs, from the configured
 `drain-timeout`. For a non-root system service, the validation command runs
 through `systemd-run` with the service's identity, groups and environment file,
-as `doctor` does. The restart hint uses the selected binary and
-`--scope user|system`; system service management needs an administrative shell.
+as `doctor` does. Hints name the selected binary and `--scope user|system`
+unless those are redundant: a hint without sudo calls the binary `runner` when
+that is what your PATH finds, and leaves `--scope` out when the selected
+installation is the only one. System service management needs an
+administrative shell.
 A matching health version is not proof of configuration compatibility or
 readiness. If health is disabled or unavailable, the running version is reported
 as unverified rather than assumed stopped. When the binary is already current
 but the service still reports an older version, `runner update` repeats the
 steps. With `--binary-path` or no installed service, no service is selected:
 restart processes using that binary manually after validation.
+
+`runner update --restart` runs those steps itself. It validates the config with
+the new binary as the service will run it and restarts the service only if that
+passes, so a failed validation leaves the running service alone. When health
+already reports the new version there is nothing to restart; when health cannot
+report a version, it restarts only after installing a new binary. `--restart`
+cannot be combined with `--check` or `--binary-path`.
 
 SIGTERM normally begins a drain and waits for active jobs, bounded by
 `drain-timeout` and the service manager's stop timeout. Jobs may be terminated
@@ -1019,7 +1033,7 @@ distinct from a rootless daemon. Another user's rootless socket is refused.
 
 Management commands (`status`, `logs`, `doctor`, `service …`, `update`) use a
 unique installed target's binary/config. `--scope user|system` selects one
-explicitly; `--user` and `--user=false` remain aliases. Auto mode refuses two
+explicitly; `--user` and `--user=false` remain aliases, hidden from help. Auto mode refuses two
 installations or unverifiable metadata. Installation refuses a second scope.
 Discovery sees system definitions but only the invoking account's user
 definition, so a fresh installation also refuses while another runner holds
@@ -1034,7 +1048,7 @@ deletes it and instead says how to disable it; `install --force` writes
 runner's unit to `/etc/systemd/system`, which takes precedence, and restarts
 the service so it applies.
 
-`runner update` replaces the selected service's binary and never restarts it.
+`runner update` replaces the selected service's binary and restarts it only with `--restart`.
 A system update requires root and a root-protected current updater; a writable user binary does not. To update a
 specific binary, including a root-owned shared binary on macOS, use
 `sudo /absolute/path/current-runner update --binary-path /absolute/path/target-runner`.

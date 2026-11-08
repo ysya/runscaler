@@ -59,7 +59,7 @@ func statusUnreachable(c *cobra.Command, address string, port int) error {
 	msg := fmt.Sprintf("cannot reach runner's health endpoint at %s (%s)", net.JoinHostPort(address, strconv.Itoa(port)), source)
 	if target := targetInContext(c); target != nil {
 		return fmt.Errorf("%s\n\n  The %s service may be stopped or still starting. Check it with:\n    %s\n    %s", msg, target.Scope,
-			serviceCommand(target.BinaryPath, target.Scope, "status"), serviceCommand(target.BinaryPath, target.Scope, "logs"))
+			targetCommand(target, "status"), targetCommand(target, "logs"))
 	}
 	if used == "" {
 		used = "config.toml"

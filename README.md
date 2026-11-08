@@ -84,7 +84,7 @@ flowchart LR
   brew install openai/tools/tart
 
   # Pull a macOS runner image (pre-installed with Xcode and runner dependencies)
-  tart pull ghcr.io/cirruslabs/macos-tahoe-xcode:latest
+  tart pull ghcr.io/cirruslabs/macos-golden-gate-xcode:latest
   ```
 
   > **Upgrading from the `cirruslabs/cli` tap:** Tart moved to `openai/tools`, so `brew upgrade` never gets past the last `cirruslabs/cli` release (2.32.x). Run `brew uninstall tart softnet`, then the two commands above, then remove the old tap. Homebrew will not untap formulae it does not trust, so trust them just for that: `brew trust --formula cirruslabs/cli/tart cirruslabs/cli/softnet && brew untap cirruslabs/cli && brew untrust --formula cirruslabs/cli/tart cirruslabs/cli/softnet`. Avoid `brew untap --force`, which uninstalls every formula it attributes to the tap.
@@ -95,8 +95,11 @@ flowchart LR
 
   | Image | CPU | Memory | Disk |
   | ----- | --- | ------ | ---- |
-  | `ghcr.io/cirruslabs/macos-tahoe-xcode:latest` | 4 cores | 8 GB (8192 MB) | 120 GB |
-  | `ghcr.io/cirruslabs/macos-sequoia-xcode:latest` | 4 cores | 8 GB (8192 MB) | 120 GB |
+  | `ghcr.io/cirruslabs/macos-golden-gate-xcode:latest` (macOS 27) | 4 cores | 8 GB (8192 MB) | 140 GB |
+  | `ghcr.io/cirruslabs/macos-tahoe-xcode:latest` (macOS 26) | 4 cores | 8 GB (8192 MB) | 140 GB |
+  | `ghcr.io/cirruslabs/macos-sequoia-xcode:latest` (macOS 15) | 4 cores | 8 GB (8192 MB) | 140 GB |
+
+  Image tags track the Xcode version, not macOS (e.g. `macos-golden-gate-xcode:27.2` ships Xcode 27.2); pin a tag instead of `latest` for reproducible builds. A guest cannot run a newer macOS than its host, so a macOS 26 host needs `macos-tahoe-xcode`.
 
   Override per VM with `cpu` and `memory` under `[tart]` in config. For iOS builds (Xcode), 8 GB+ is recommended.
 
@@ -462,7 +465,7 @@ url = "https://github.com/your-org"
 name = "macos-runners"
 token = "ghp_xxx"
 max-runners = 2          # Apple limits 2 concurrent macOS VMs per host
-runner-image = "ghcr.io/cirruslabs/macos-tahoe-xcode:latest"
+runner-image = "ghcr.io/cirruslabs/macos-golden-gate-xcode:latest"
 labels = ["self-hosted", "macOS"]
 log-level = "info"
 
@@ -557,7 +560,7 @@ CocoaPods/SPM caches, extra toolchains), clone a Cirrus Labs image, provision
 it, stop it, and point `runner-image` at the result:
 
 ```bash
-tart clone ghcr.io/cirruslabs/macos-tahoe-xcode:latest ios-golden
+tart clone ghcr.io/cirruslabs/macos-golden-gate-xcode:latest ios-golden
 tart run ios-golden --no-graphics &
 tart exec -it ios-golden zsh      # runs as admin; install tools, warm caches
 tart stop ios-golden
@@ -726,7 +729,7 @@ url = "https://github.com/your-org"
 name = "macos-runners"
 token = "ghp_bbb"
 max-runners = 2
-runner-image = "ghcr.io/cirruslabs/macos-tahoe-xcode:latest"
+runner-image = "ghcr.io/cirruslabs/macos-golden-gate-xcode:latest"
 labels = ["self-hosted", "macOS"]
 [scaleset.tart]
 pool-size = 2

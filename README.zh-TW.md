@@ -96,7 +96,7 @@ flowchart LR
   brew install openai/tools/tart
 
   # Pull a macOS runner image (pre-installed with Xcode and runner dependencies)
-  tart pull ghcr.io/cirruslabs/macos-tahoe-xcode:latest
+  tart pull ghcr.io/cirruslabs/macos-golden-gate-xcode:latest
   ```
 
   > **從 `cirruslabs/cli` tap 升級：** Tart 已移至 `openai/tools`，因此 `brew upgrade` 只能更新到 `cirruslabs/cli` 的最後一個版本（2.32.x）。請先執行 `brew uninstall tart softnet`，再執行上方兩個指令，最後移除舊 tap。Homebrew 不允許移除含有未受信任 formula 的 tap，因此僅為了移除而暫時信任這些 formula：`brew trust --formula cirruslabs/cli/tart cirruslabs/cli/softnet && brew untap cirruslabs/cli && brew untrust --formula cirruslabs/cli/tart cirruslabs/cli/softnet`。避免使用 `brew untap --force`，因為它會解除安裝所有被歸屬於該 tap 的 formula。
@@ -107,8 +107,11 @@ flowchart LR
 
   | 映像檔 | CPU | 記憶體 | 磁碟 |
   | ----- | --- | ------ | ---- |
-  | `ghcr.io/cirruslabs/macos-tahoe-xcode:latest` | 4 核心 | 8 GB（8192 MB） | 120 GB |
-  | `ghcr.io/cirruslabs/macos-sequoia-xcode:latest` | 4 核心 | 8 GB（8192 MB） | 120 GB |
+  | `ghcr.io/cirruslabs/macos-golden-gate-xcode:latest`（macOS 27） | 4 核心 | 8 GB（8192 MB） | 140 GB |
+  | `ghcr.io/cirruslabs/macos-tahoe-xcode:latest`（macOS 26） | 4 核心 | 8 GB（8192 MB） | 140 GB |
+  | `ghcr.io/cirruslabs/macos-sequoia-xcode:latest`（macOS 15） | 4 核心 | 8 GB（8192 MB） | 140 GB |
+
+  映像檔標籤對應的是 Xcode 版本而非 macOS 版本（例如 `macos-golden-gate-xcode:27.2` 內含 Xcode 27.2）；若需要可重現的建置，請固定標籤而非使用 `latest`。VM 的 macOS 版本不能比主機新，因此 macOS 26 主機請使用 `macos-tahoe-xcode`。
 
   可在設定檔的 `[tart]` 下，透過 `cpu` 與 `memory` 覆寫每台 VM 的資源。進行 iOS 建置（Xcode）時，建議至少配置 8 GB 記憶體。
 
@@ -438,7 +441,7 @@ url = "https://github.com/your-org"
 name = "macos-runners"
 token = "ghp_xxx"
 max-runners = 2          # Apple limits 2 concurrent macOS VMs per host
-runner-image = "ghcr.io/cirruslabs/macos-tahoe-xcode:latest"
+runner-image = "ghcr.io/cirruslabs/macos-golden-gate-xcode:latest"
 labels = ["self-hosted", "macOS"]
 log-level = "info"
 
@@ -474,7 +477,7 @@ Xcode VM 映像檔體積龐大（每個 50–80 GB），而 `:latest` 標籤會�
 **自訂 VM 映像檔。** `runner-image` 除了接受 OCI 參照，也接受本機 VM 名稱：啟動時會先檢查 `tart list`，只有找不到該名稱時才會拉取映像檔。若要將專案相依項目預先放入映像檔（模擬器執行環境、CocoaPods/SPM 快取、額外的工具鏈），請複製 Cirrus Labs 映像檔、完成環境配置並將其停止，再將 `runner-image` 指向配置好的 VM：
 
 ```bash
-tart clone ghcr.io/cirruslabs/macos-tahoe-xcode:latest ios-golden
+tart clone ghcr.io/cirruslabs/macos-golden-gate-xcode:latest ios-golden
 tart run ios-golden --no-graphics &
 tart exec -it ios-golden zsh      # runs as admin; install tools, warm caches
 tart stop ios-golden
@@ -595,7 +598,7 @@ url = "https://github.com/your-org"
 name = "macos-runners"
 token = "ghp_bbb"
 max-runners = 2
-runner-image = "ghcr.io/cirruslabs/macos-tahoe-xcode:latest"
+runner-image = "ghcr.io/cirruslabs/macos-golden-gate-xcode:latest"
 labels = ["self-hosted", "macOS"]
 [scaleset.tart]
 pool-size = 2

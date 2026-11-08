@@ -164,4 +164,4 @@ dind = true
 # token = "env:TOKEN_ORG_C"
 # provider = "tart"
 # max-runners = 2
-# runner-image = "ghcr.io/cirruslabs/macos-sequoia-xcode:latest"
+# runner-image = "ghcr.io/cirruslabs/macos-golden-gate-xcode:latest"

@@ -128,7 +128,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 	if providerName == "tart" {
 		// Tart provider config
 		if runnerImage == "" || runnerImage == config.DefaultRunnerImage {
-			runnerImage, err = promptString("Tart base VM image (e.g. ghcr.io/cirruslabs/macos-sequoia-xcode:latest)")
+			runnerImage, err = promptString("Tart base VM image (e.g. ghcr.io/cirruslabs/macos-golden-gate-xcode:latest)")
 			if err != nil {
 				return err
 			}
@@ -295,7 +295,7 @@ shared-volume = %q
 # token = "env:TOKEN_ORG_A"
 # provider = "tart"
 # max-runners = 2
-# runner-image = "ghcr.io/cirruslabs/macos-sequoia-xcode:latest"
+# runner-image = "ghcr.io/cirruslabs/macos-golden-gate-xcode:latest"
 `, url, name, initAuthenticationConfig(token, app), maxRunners, maxRunners,
 			config.DefaultLogLevel, config.DefaultLogFormat,
 			config.DefaultHealthAddress, config.DefaultHealthPort,

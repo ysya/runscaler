@@ -10,6 +10,7 @@ import (
 
 	cerrdefs "github.com/containerd/errdefs"
 	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/volume"
 	dockerclient "github.com/moby/moby/client"
 
 	"github.com/ysya/runscaler/internal/provider"
@@ -23,23 +24,16 @@ type fakeContainer struct {
 	labels map[string]string
 }
 
-// orphanFake implements provider.DockerAPI (for findOrphanContainers and
-// removeOrphanContainers) and also cmd_doctor.go's narrower volumeAPI (for
-// checkDockerVolume), with just enough behavior to exercise both.
-// ContainerList is driven by containers; ContainerRemove records every ID
-// it is called with to removed, failing when the ID equals removeErrOn.
-// VolumeInspect reports a volume as present when its name is in volumes;
-// otherwise it fails with volumeInspectErr if set, or a not-found error
-// (matching the real Docker client) if not. VolumeRemove records to
-// volumesRemoved — orphans.go never calls it, and checkDockerVolume no
-// longer even can (volumeAPI does not declare the method), so an empty
-// volumesRemoved after exercising either is itself part of what these
-// tests assert. Every other method returns its zero value — nothing under
-// test here calls them.
+// orphanFake supports orphan lifecycle cleanup and doctor's volume inspection.
+// ContainerList reads containers; ContainerRemove records IDs and can fail one.
+// VolumeInspect uses volumes; cleanup's VolumeList uses cleanupVolumes so tests
+// can distinguish explicitly owned temporary volumes from persistent data.
 type orphanFake struct {
-	containers  []fakeContainer
-	removed     []string
-	removeErrOn string
+	containers     []fakeContainer
+	removed        []string
+	removeErrOn    string
+	stopped        []string
+	cleanupVolumes []volume.Volume
 
 	volumes          []string
 	volumesRemoved   []string
@@ -72,8 +66,17 @@ func (f *orphanFake) VolumeInspect(_ context.Context, id string, _ dockerclient.
 	return dockerclient.VolumeInspectResult{}, cerrdefs.ErrNotFound
 }
 
-// The remaining provider.DockerAPI methods are unused by orphans.go; each
-// returns its zero value.
+func (f *orphanFake) ContainerStop(_ context.Context, id string, _ dockerclient.ContainerStopOptions) (dockerclient.ContainerStopResult, error) {
+	f.stopped = append(f.stopped, id)
+	return dockerclient.ContainerStopResult{}, nil
+}
+func (f *orphanFake) VolumeList(_ context.Context, _ dockerclient.VolumeListOptions) (dockerclient.VolumeListResult, error) {
+	return dockerclient.VolumeListResult{Items: f.cleanupVolumes}, nil
+}
+func (f *orphanFake) VolumeRemove(_ context.Context, name string, _ dockerclient.VolumeRemoveOptions) (dockerclient.VolumeRemoveResult, error) {
+	f.volumesRemoved = append(f.volumesRemoved, name)
+	return dockerclient.VolumeRemoveResult{}, nil
+}
 
 func TestFindOrphanContainers_MatchesLabelAndNamePattern(t *testing.T) {
 	md := &orphanFake{containers: []fakeContainer{
@@ -206,5 +209,29 @@ func TestRemoveOrphanTartVMs_ContinuesAfterDeleteFailure(t *testing.T) {
 		if !slices.Contains(mc.calls, want) {
 			t.Errorf("missing command %q in %v", want, mc.calls)
 		}
+	}
+}
+
+func TestOrphanCleanupPreservesActionsCacheServiceAndData(t *testing.T) {
+	fake := &orphanFake{
+		containers: []fakeContainer{
+			{id: "root", names: []string{"/runner-deadbeef"}, labels: map[string]string{"managed-by": "runner"}},
+			{id: "child", names: []string{"/job-child"}, labels: map[string]string{"runscaler.runner-id": "root"}},
+			{id: "cache", names: []string{"/runscaler-actions-cache"}, labels: map[string]string{"managed-by": "runscaler-cache"}},
+		},
+		cleanupVolumes: []volume.Volume{{Name: "runscaler-actions-cache-data", Labels: map[string]string{"managed-by": "runscaler-cache"}}},
+	}
+	orphans, err := findOrphanContainers(context.Background(), fake)
+	if err != nil || len(orphans) != 1 || orphans[0].ID != "root" {
+		t.Fatalf("orphans=%v err=%v", orphans, err)
+	}
+	if len(fake.stopped) != 0 || len(fake.removed) != 0 {
+		t.Fatal("orphan discovery must remain read-only")
+	}
+	if removed := removeOrphanContainers(context.Background(), fake, orphans, slog.New(slog.DiscardHandler)); removed != 1 {
+		t.Fatalf("removed %d roots", removed)
+	}
+	if !slices.Equal(fake.removed, []string{"child", "root"}) || len(fake.volumesRemoved) != 0 {
+		t.Fatalf("cache service/data affected: containers=%v volumes=%v", fake.removed, fake.volumesRemoved)
 	}
 }

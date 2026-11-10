@@ -1,0 +1,7 @@
+name: Verify local cache runtime
+description: Fail before caching if the actual runner does not preserve the local Results endpoint.
+runs:
+  using: node24
+  main: main.js
+  post: post.js
+  post-if: always()

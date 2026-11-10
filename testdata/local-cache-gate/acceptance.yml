@@ -1,0 +1,75 @@
+# Review fixture only. Copy to .github/workflows/local-cache-gate.yml on the
+# explicitly approved canary repository/branch; do not publish automatically.
+name: Local cache compatibility gate
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/local-actions-cache-gate]
+permissions:
+  contents: read
+jobs:
+  save:
+    runs-on: runscaler-local-cache-gate
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Verify Node handler before any cache payload operation
+        uses: ./testdata/local-cache-gate/node
+        env:
+          PROBE_POST_CACHE_KIND: node
+      - name: Verify nested composite handler
+        uses: ./testdata/local-cache-gate/composite
+        env:
+          PROBE_POST_CACHE_KIND: composite
+      - name: Verify container handler
+        uses: ./testdata/local-cache-gate/container
+        env:
+          # The runner's container handler does not set this flag itself.
+          ACTIONS_CACHE_SERVICE_V2: 'true'
+          PROBE_POST_CACHE_KIND: container
+      - name: Restore, then save through the actual action post-step
+        id: cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .local-cache-gate
+          key: runscaler-gate-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Verify cold miss and generate a nonsecret payload
+        env:
+          CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
+        run: |
+          test "$CACHE_HIT" != true
+          mkdir -p .local-cache-gate
+          /home/runner/externals/node24/bin/node -e 'require("node:fs").writeFileSync(".local-cache-gate/payload", Buffer.from(Array.from({length:300000},(_,i)=>i%251)))'
+          sha256sum .local-cache-gate/payload > cache-gate.sha256
+      - name: Upload ordinary artifact through Results passthrough
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: local-cache-gate-checksum
+          path: cache-gate.sha256
+          retention-days: 1
+  restore:
+    needs: save
+    runs-on: runscaler-local-cache-gate
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: ./testdata/local-cache-gate/node
+        env:
+          PROBE_POST_CACHE_VERIFY: 'true'
+      - name: Prove preceding job post-step saved to the local service
+        id: cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .local-cache-gate
+          key: runscaler-gate-${{ github.run_id }}-${{ github.run_attempt }}
+          fail-on-cache-miss: true
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: local-cache-gate-checksum
+          path: .
+      - name: Verify warm hit and exact restored bytes
+        env:
+          CACHE_HIT: ${{ steps.cache.outputs.cache-hit }}
+        run: |
+          test "$CACHE_HIT" = true
+          sha256sum -c cache-gate.sha256

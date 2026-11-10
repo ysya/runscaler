@@ -4,7 +4,28 @@
 # Pinned to the multi-arch index digest for reproducible builds and stable layer caching
 # (covers both linux/amd64 and linux/arm64). Dependabot keeps the tag+digest fresh.
 # Refresh manually with: docker buildx imagetools inspect ghcr.io/actions/actions-runner:latest
-FROM ghcr.io/actions/actions-runner:2.338.2@sha256:759a1d94a15b05941aba5196974ff43fe15b4cbba29b694b35cbc32a1166b232
+ARG RUNNER_BASE_IMAGE=ghcr.io/actions/actions-runner:2.338.2@sha256:759a1d94a15b05941aba5196974ff43fe15b4cbba29b694b35cbc32a1166b232
+
+# Validate/install the optional contract in a small independent stage. Copying
+# its overlay only at the end preserves the standard toolchain layer cache.
+FROM ${RUNNER_BASE_IMAGE} AS local-cache-contract
+ARG RUNNER_BASE_IMAGE
+ARG LOCAL_ACTIONS_CACHE=0
+COPY --chmod=0755 check-local-cache.sh /tmp/check-local-cache.sh
+RUN mkdir -p /tmp/local-cache-overlay/usr/local/bin /tmp/local-cache-overlay/usr/local/share/runscaler \
+    && case "$LOCAL_ACTIONS_CACHE" in \
+       0) ;; \
+       1) [ "$RUNNER_BASE_IMAGE" = "ghcr.io/falcondev-oss/actions-runner@sha256:462ebdbc95fabf0bdf264ffe02ff5182665c6d99ac0f870b67d7f649c1ef1746" ] \
+          || { echo "Local cache requires the gate-approved runner base" >&2; exit 1; }; \
+          /tmp/check-local-cache.sh --emit-manifest > /tmp/local-cache-overlay/usr/local/share/runscaler/local-actions-cache.manifest \
+          && cp /tmp/check-local-cache.sh /tmp/local-cache-overlay/usr/local/bin/runner-local-cache-check \
+          && sudo install -D -m 0755 /tmp/check-local-cache.sh /usr/local/bin/runner-local-cache-check \
+          && sudo install -D -m 0644 /tmp/local-cache-overlay/usr/local/share/runscaler/local-actions-cache.manifest /usr/local/share/runscaler/local-actions-cache.manifest \
+          && CUSTOM_ACTIONS_RESULTS_URL=http://offline-cache.invalid:9/ /usr/local/bin/runner-local-cache-check ;; \
+       *) echo "LOCAL_ACTIONS_CACHE must be 0 or 1" >&2; exit 1 ;; \
+       esac
+
+FROM ${RUNNER_BASE_IMAGE} AS runner
 
 # Avoid interactive prompts during package installation
 ENV DEBIAN_FRONTEND=noninteractive
@@ -109,3 +130,9 @@ RUN set -x \
     && pnpm --version \
     && ruby --version \
     && sdkmanager --version 2>&1 | head -1
+
+# Empty for standard images; only the validated opt-in stage supplies files.
+COPY --chown=0:0 --from=local-cache-contract /tmp/local-cache-overlay/ /
+RUN if [ -x /usr/local/bin/runner-local-cache-check ]; then \
+        CUSTOM_ACTIONS_RESULTS_URL=http://offline-cache.invalid:9/ /usr/local/bin/runner-local-cache-check; \
+    fi

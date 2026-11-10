@@ -84,6 +84,7 @@ max-runners = 10
 # ready-timeout = "5m"                 # marker + 5s alive, or GitHub work evidence
 socket = "/var/run/docker.sock"
 dind = true
+# actions-cache-url = "" # disabled; requires a verified local-cache runner variant
 # shared-volume = "/shared"
 # shared-volume-name = "runner-shared"     # named volume backing shared-volume; distinct names isolate scalesets (or two runner processes)
 # memory = 0     # MB, 0 = unlimited (e.g. 8192 for 8GB)
@@ -165,3 +166,20 @@ dind = true
 # provider = "tart"
 # max-runners = 2
 # runner-image = "ghcr.io/cirruslabs/macos-golden-gate-xcode:latest"
+
+# --- Host-local Actions cache pilot (Linux amd64, opt-in) ---
+# A stock runner or bare fork image does not provide Runscaler's capability check.
+# Use the accepted cache-capable variant's immutable digest after image validation.
+# Do not put the cache service's data volume in cache-volumes or [[docker.cache]].
+# [[scaleset]]
+# url = "https://github.com/<owner>"
+# name = "runscaler-local-cache-canary"
+# labels = ["runscaler-local-cache-canary"]
+# token = "env:RUNNER_TOKEN"
+# max-runners = 1
+# runner-image = "<verified-local-cache-image>@sha256:<accepted-digest>"
+# [scaleset.docker]
+# platform = "linux/amd64"
+# actions-cache-url = "http://<private-host-reachable-from-containers>:3000/"
+# cache-volumes = [] # disable overlapping inherited language-cache mounts
+# cache = []

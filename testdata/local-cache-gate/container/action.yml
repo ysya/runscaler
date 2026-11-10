@@ -1,0 +1,6 @@
+name: Verify container local cache runtime
+description: Exercise container and post-container Results endpoint overrides.
+runs:
+  using: docker
+  image: Dockerfile
+  post-entrypoint: post.sh

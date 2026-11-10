@@ -1,0 +1,6 @@
+name: Verify composite local cache runtime
+description: Exercise nested Node handlers and their post-steps.
+runs:
+  using: composite
+  steps:
+    - uses: ./testdata/local-cache-gate/node

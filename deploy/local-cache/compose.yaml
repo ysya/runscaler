@@ -1,0 +1,31 @@
+services:
+  runscaler-actions-cache:
+    image: ghcr.io/falcondev-oss/github-actions-cache-server@sha256:05c4d9e7169f525f2b74d412c4a081aeec5446a017ec88bae668e63ebfb16aa9
+    # Only this execution platform has passed the local-cache runtime gate.
+    platform: linux/amd64
+    container_name: runscaler-actions-cache
+    restart: unless-stopped
+    labels:
+      managed-by: runscaler-cache
+    ports:
+      - target: 3000
+        published: "${CACHE_PORT:-3000}"
+        host_ip: "${CACHE_BIND_IP:?Set CACHE_BIND_IP to a private host interface address}"
+        protocol: tcp
+    environment:
+      API_BASE_URL: "${CACHE_ADVERTISE_URL:?Set CACHE_ADVERTISE_URL to a runner and BuildKit reachable URL}"
+      HOST: "0.0.0.0"
+      PORT: "3000"
+      STORAGE_DRIVER: filesystem
+      DB_DRIVER: sqlite
+      SKIP_TOKEN_VALIDATION: "false"
+      CACHE_MAX_SIZE_BYTES: "${CACHE_MAX_SIZE_BYTES:?Set an absolute cache byte budget}"
+      CACHE_CLEANUP_OLDER_THAN_DAYS: "30"
+      MANAGEMENT_API_KEY: "${CACHE_MANAGEMENT_KEY:?Set a private management API key}"
+    volumes:
+      - runscaler-actions-cache-data:/app/.data
+
+volumes:
+  runscaler-actions-cache-data:
+    external: true
+    name: runscaler-actions-cache-data

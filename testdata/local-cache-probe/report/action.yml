@@ -1,0 +1,7 @@
+name: Local cache measurement
+description: Record aggregate timings after cache post-saves without credentials.
+runs:
+  using: node24
+  main: main.cjs
+  post: post.cjs
+  post-if: always()

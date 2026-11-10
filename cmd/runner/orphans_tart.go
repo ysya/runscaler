@@ -60,9 +60,9 @@ func removeOrphanTartVMs(ctx context.Context, runner provider.CommandRunner, orp
 // machine-wide internal/lock before entering run; without that lock these
 // resources could belong to another live runner process.
 //
-// Reconciliation never examines or removes Docker volumes. Shared and cache
-// volumes intentionally outlive the process and may hold data needed by a
-// later job in an in-flight workflow run.
+// Reconciliation reclaims anonymous and explicitly runner-owned temporary
+// volumes only. Shared/cache volumes outlive the process and may hold data
+// needed by a later job in an in-flight workflow run.
 func reconcileOrphans(ctx context.Context, dockerClients map[string]*dockerclient.Client, tartHomes []string, logger *slog.Logger) {
 	sockets := make([]string, 0, len(dockerClients))
 	for socket := range dockerClients {

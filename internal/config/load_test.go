@@ -1070,3 +1070,48 @@ net-bridged = ""
 		t.Errorf("overridden net-bridged = %q, want empty", got)
 	}
 }
+
+func TestLoad_ActionsCacheURLInheritance(t *testing.T) {
+	cfg := loadTOML(t, `
+[docker]
+actions-cache-url = "http://192.168.50.10:3000/"
+
+[[scaleset]]
+name = "inherited"
+url = "https://github.com/test-org"
+token = "test-only"
+
+[[scaleset]]
+name = "overridden"
+url = "https://github.com/test-org"
+token = "test-only"
+[scaleset.docker]
+actions-cache-url = "https://cache.example/"
+
+[[scaleset]]
+name = "disabled"
+url = "https://github.com/test-org"
+token = "test-only"
+[scaleset.docker]
+actions-cache-url = ""
+`)
+	if len(cfg.Warnings) != 0 {
+		t.Fatalf("unexpected warnings: %v", cfg.Warnings)
+	}
+	sets := cfg.ResolveScaleSets()
+	if len(sets) != 3 {
+		t.Fatalf("got %d scale sets", len(sets))
+	}
+	for i, want := range []string{"http://192.168.50.10:3000/", "https://cache.example/", ""} {
+		if got := sets[i].Docker.ActionsCacheURL; got != want {
+			t.Errorf("set %d endpoint=%q, want %q", i, got, want)
+		}
+	}
+	legacy := resolveTOML(t, `url="https://github.com/test-org"
+name="legacy"
+token="test-only"
+`)
+	if len(legacy) != 1 || legacy[0].Docker.ActionsCacheURL != "" {
+		t.Fatal("legacy configuration must keep local cache disabled")
+	}
+}

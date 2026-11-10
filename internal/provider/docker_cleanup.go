@@ -82,7 +82,7 @@ func RemoveRunnerContainer(ctx context.Context, client RunnerCleanupAPI, instanc
 		}
 		// Another runner can share a network namespace intentionally; it has
 		// its own lifecycle and must never be treated as a child container.
-		if c.ID == instanceID || c.Labels["managed-by"] == "runner" {
+		if c.ID == instanceID || OwnsContainer(c.Labels, c.Names) {
 			continue
 		}
 		networkRef, sharesContainerNetwork := strings.CutPrefix(c.HostConfig.NetworkMode, "container:")

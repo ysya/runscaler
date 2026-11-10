@@ -393,3 +393,24 @@ func TestDockerProvider_RemoveInstancePreservesActionsCacheServiceAndData(t *tes
 		t.Fatalf("cache service/data affected: containers=%v volumes=%v", m.removed, m.volumesRemoved)
 	}
 }
+
+func TestDockerProvider_RemoveInstancePreservesLegacyRunnerLifecycle(t *testing.T) {
+	p, m := newCleanupDockerProvider()
+	root := container.Summary{ID: "root-a", Names: []string{"/runner-deadbeef"}, Labels: map[string]string{"managed-by": "runner"}}
+	legacy := networkContainer("root-b", "container:root-a")
+	legacy.Names = []string{"/runner-cafebabe"}
+	legacy.Labels = map[string]string{"managed-by": "legacy-value"}
+	m.containers = []container.Summary{root, legacy, networkContainer("child-b", "container:runner-cafebabe")}
+	if err := p.RemoveInstance(context.Background(), "root-a"); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(m.removed, []string{"root-a"}) {
+		t.Fatalf("removed other runner's lifecycle metadata: %v", m.removed)
+	}
+	if err := p.RemoveInstance(context.Background(), "root-b"); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(m.removed, []string{"root-a", "child-b", "root-b"}) {
+		t.Fatalf("legacy runner did not clean its own child: %v", m.removed)
+	}
+}

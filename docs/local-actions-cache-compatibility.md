@@ -12,8 +12,9 @@ Metadata alone is not runtime compatibility evidence.
 The user approved one bounded privileged DinD test environment on the selected
 Linux host, and separately approved a dedicated operator-controlled canary branch plus temporary JIT runner
 registrations. Operator-specific repository, run and registration identifiers
-are retained in the local evidence ledger rather than this public report. Existing
-scale sets, the default branch, and business CI settings were not modified.
+are retained in the local evidence ledger rather than this public report. The original isolated gate did not modify existing
+scale sets, the default branch, or business CI settings. The later host rollout
+is recorded separately below.
 
 ## Candidate images resolved from the published releases
 
@@ -432,3 +433,48 @@ same data volume; the independently finalized payload still restored with its
 original checksum. This verifies invisibility of the unfinished entry, not
 immediate reclamation of temporary disk space or every action's cancellation
 handler. The explicit probe lifecycle suite reproduces these assertions.
+
+## Provider-managed host acceptance (2026-11-11)
+
+A Linux amd64 host upgraded from Runscaler 0.16.0 to 0.17.0 and passed a dedicated
+one-runner canary using the published assembled image. The cache used a
+host-backed Docker named volume, filesystem/SQLite, normal GitHub JWT validation,
+a 50 GiB eviction budget and 30-day unused retention. Existing business workflows
+were unchanged while a temporary, uniquely labeled scale set ran the fixtures.
+
+Six cold client jobs passed, then the service was recreated against the same
+volume. Six fresh-runner warm client jobs and a same-attempt artifact consumer
+passed. The five Node-based cache clients recorded positive local downloads and
+no foreign cache origin. A fresh BuildKit builder fetched and extracted the
+known layer from the local gha v2 cache; its 125-byte blob matched SHA256
+`7559c73a5714f41ee7bf0bbcd43ccd7dff996455316acd54e3dba2c6cc082e6e` when
+independently read from the scoped local server entry. Artifact upload/download
+continued through normal Results passthrough to GitHub.
+
+The accepted cold and warm fixture windows were:
+
+| Client | Cold window (ms) | Warm window (ms) |
+|---|---:|---:|
+| Direct archive | 3,321 | 3,387 |
+| Go | 21,733 | 8,178 |
+| npm | 6,186 | 5,729 |
+| Gradle | 28,613 | 20,808 |
+| Rust | 9,251 | 9,169 |
+| Docker | 10,801 | 9,208 |
+
+These windows start after checkout/runtime validation and include tool setup,
+the synthetic fixture and cache post-handlers; the direct job also uploads its
+artifact. They exclude provisioning/checkout and the separate artifact consumer.
+Cache data had also been exercised by an earlier warm attempt; these are
+validation windows, not a controlled first-hit benchmark, full application CI
+times, or a comparison against GitHub cache transfer. The cache fixture tree
+and helper revisions were unchanged between the accepted cold and warm cohorts.
+
+After acceptance, the selected original scale set was switched to the pinned
+cache image/endpoint with its existing labels, credentials and five-runner
+capacity retained. The user unit's stop deadline became 7,260 seconds. The
+manager and cache service were ready, and the temporary scale-set registration,
+GitHub branch/runs/artifacts and scoped test cache entries were removed. The
+persistent data volume and private recovery backups remain. No live business-job
+rollback or cache-service outage was deliberately induced after cutover; each
+operator still needs a recovery plan and workload-specific capacity validation.

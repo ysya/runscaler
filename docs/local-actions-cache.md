@@ -14,6 +14,10 @@ The isolated real-job tests, provider guard and full toolchain image build passe
 The assembled Linux amd64 image is published with v0.17.0; each host still needs
 its own provider-managed canary and route/storage validation before expansion.
 Arm64 and other clients are unverified. The standard runner image is unchanged.
+A provider-managed one-runner host canary has also passed six cold and six warm
+clients plus artifact transfer; see the dated host results in the evidence report.
+Its original scale set was then switched with the existing five-runner capacity
+retained. This does not validate every host or five simultaneous workloads.
 
 ## Components and workflow changes
 

@@ -12,6 +12,9 @@ BuildKit v2 匯出／匯入。請閱讀[固定 revision、三組量測與限制]
 Linux amd64 完整映像已隨 v0.17.0 發布；每台主機擴大使用前，仍須完成自己的
 provider canary、路由與儲存驗證。Arm64 與其他 client 尚未驗證；標準 runner
 映像維持原行為。
+另已完成 provider 管理的單一 runner 主機驗收：六種冷／暖 client 與 artifact
+傳輸通過，之後將原 scale set 切換並保留原本五個 runner 的容量。日期與範圍
+見相容性報告；這不代表所有主機或五個工作同時執行都已驗證。
 
 ## 元件與 workflow 調整範圍
 

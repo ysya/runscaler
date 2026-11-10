@@ -1,0 +1,208 @@
+name: Local cache acceptance
+on:
+  workflow_dispatch:
+    inputs:
+      workload:
+        type: choice
+        options: [all, direct, go, node, gradle, rust, docker]
+        default: all
+        description: Workload to measure on dedicated disposable runners
+      scenario:
+        type: choice
+        options: [normal, outage]
+        default: normal
+        description: Outage requires the dedicated test endpoint to be unavailable
+      phase:
+        type: choice
+        options: [cold, warm]
+        default: cold
+        description: Cold requires a fresh isolated service data set; warm reuses it
+      pair:
+        type: choice
+        options: ['1', '2', '3']
+        default: '1'
+        description: Measurement pair (does not change helper cache keys)
+permissions:
+  contents: read
+concurrency:
+  group: local-cache-acceptance
+  cancel-in-progress: false
+jobs:
+  client:
+    runs-on: runscaler-local-cache-canary
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        workload: ${{ fromJSON(inputs.workload == 'all' && '["direct","go","node","gradle","rust","docker"]' || format('["{0}"]', inputs.workload)) }}
+    env:
+      PROBE_WORKLOAD: ${{ matrix.workload }}
+      PROBE_PHASE: ${{ inputs.phase }}
+      PROBE_PAIR: ${{ inputs.pair }}
+      PROBE_SCENARIO: ${{ inputs.scenario }}
+      DOCKER_BUILD_RECORD_UPLOAD: 'false'
+      DOCKER_BUILD_SUMMARY: 'false'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - if: inputs.scenario == 'normal'
+        uses: ./testdata/local-cache-gate/node
+      # Registered first, so this post-step measures the other actions' post-saves.
+      - uses: ./testdata/local-cache-probe/report
+      - name: Restore direct fixture
+        if: matrix.workload == 'direct'
+        id: direct
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        env:
+          NODE_OPTIONS: --require ${{ github.workspace }}/testdata/local-cache-probe/observer.cjs
+        with:
+          path: .local-cache-probe
+          key: runscaler-direct-linux-amd64-v1-${{ hashFiles('testdata/local-cache-probe/docker/payload') }}
+      - name: Setup Go and its normal module/build cache
+        if: matrix.workload == 'go'
+        id: go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        env:
+          NODE_OPTIONS: --require ${{ github.workspace }}/testdata/local-cache-probe/observer.cjs
+        with:
+          go-version: '1.27.3'
+          cache: true
+          cache-dependency-path: testdata/local-cache-probe/go/go.sum
+      - name: Setup Node and package-store cache
+        if: matrix.workload == 'node'
+        id: node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        env:
+          NODE_OPTIONS: --require ${{ github.workspace }}/testdata/local-cache-probe/observer.cjs
+        with:
+          node-version: '24.22.1'
+          cache: npm
+          cache-dependency-path: testdata/local-cache-probe/node/package-lock.json
+          package-manager-cache: false
+      - name: Setup Java without overlapping dependency/JDK caches
+        if: matrix.workload == 'gradle'
+        uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+        with:
+          distribution: temurin
+          java-version: '17.0.17+10'
+          cache-jdk: false
+      - name: Setup Gradle with the basic provider
+        id: gradle
+        if: matrix.workload == 'gradle'
+        uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
+        env:
+          NODE_OPTIONS: --require ${{ github.workspace }}/testdata/local-cache-probe/observer.cjs
+        with:
+          gradle-version: '9.2.1'
+          cache-provider: basic
+          cache-read-only: false
+          dependency-graph: disabled
+          add-job-summary: never
+      - name: Install Rust linker in the disposable minimal runner
+        if: matrix.workload == 'rust'
+        run: |
+          if ! command -v cc >/dev/null; then
+            sudo sed -i 's|http://archive.ubuntu.com|https://archive.ubuntu.com|g; s|http://security.ubuntu.com|https://security.ubuntu.com|g' /etc/apt/sources.list.d/ubuntu.sources
+            sudo timeout 180 apt-get -o Acquire::Retries=1 -o Acquire::https::Timeout=15 -o Acquire::ForceIPv4=true update -qq
+            sudo timeout 180 apt-get -o Acquire::Retries=1 -o Acquire::https::Timeout=15 -o Acquire::ForceIPv4=true install -y --no-install-recommends gcc libc6-dev
+          fi
+      - name: Setup pinned Rust toolchain
+        if: matrix.workload == 'rust'
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
+        with:
+          toolchain: '1.99.1'
+      - name: Restore Rust dependency/target cache
+        if: matrix.workload == 'rust'
+        id: rust
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        env:
+          NODE_OPTIONS: --require ${{ github.workspace }}/testdata/local-cache-probe/observer.cjs
+        with:
+          cache-provider: github
+          shared-key: runscaler-linux-amd64-fixture-v1
+          add-job-id-key: false
+          add-rust-environment-hash-key: true
+          workspaces: testdata/local-cache-probe/rust -> target
+          cache-bin: false
+      - name: Verify cold/warm helper result
+        if: inputs.scenario == 'normal' && contains(fromJSON('["direct","go","node","rust"]'), matrix.workload)
+        env:
+          HIT: ${{ steps.direct.outputs.cache-hit || steps.go.outputs.cache-hit || steps.node.outputs.cache-hit || steps.rust.outputs.cache-hit }}
+        run: |
+          if [ "$PROBE_PHASE" = warm ]; then test "$HIT" = true; else test "$HIT" != true; fi
+      - name: Build and verify restored content
+        if: matrix.workload != 'docker'
+        run: /home/runner/externals/node24/bin/node testdata/local-cache-probe/build.cjs
+      - name: Create a fresh bounded BuildKit builder
+        if: matrix.workload == 'docker'
+        id: builder
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          version: v0.38.1
+          cache-binary: false
+          driver-opts: |
+            image=moby/buildkit@sha256:c5f8862f52499773af85bc07695b2379ef08e8002352b0df2c4864c91d78dabe
+            memory=512m
+            cpu-quota=100000
+      - name: Build with standard gha v2 cache
+        id: docker-build
+        if: matrix.workload == 'docker'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: testdata/local-cache-probe/docker
+          platforms: linux/amd64
+          push: false
+          provenance: false
+          outputs: type=local,dest=${{ runner.temp }}/probe-output
+          github-token: ''
+          # Isolate optional export failure in outage mode; import outage is not assumed optional.
+          cache-from: ${{ inputs.scenario == 'normal' && format('type=gha,version=2,url_v2={0},scope=runscaler-linux-amd64-fixture-v1,timeout=30s', env.EXPECTED_CACHE_URL) || '' }}
+          cache-to: type=gha,version=2,url_v2=${{ env.EXPECTED_CACHE_URL }},scope=runscaler-linux-amd64-fixture-v1,mode=max,ignore-error=true,timeout=30s,ghtoken=,repository=
+      - name: Verify Docker output hash
+        if: matrix.workload == 'docker'
+        run: cmp testdata/local-cache-probe/docker/payload "$RUNNER_TEMP/probe-output/payload"
+      - name: Artifact failure when Results passthrough is unavailable
+        if: inputs.scenario == 'outage' && matrix.workload == 'direct'
+        id: outage-artifact
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cache-outage-test
+          path: testdata/local-cache-probe/docker/payload
+          retention-days: 1
+      - name: Check actual artifact failure
+        if: inputs.scenario == 'outage' && matrix.workload == 'direct'
+        env:
+          OUTCOME: ${{ steps.outage-artifact.outcome }}
+        run: test "$OUTCOME" = failure
+      - name: Invalid Docker build must still fail with ignore-error on cache export
+        if: inputs.scenario == 'outage' && matrix.workload == 'docker'
+        id: invalid-build
+        continue-on-error: true
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: testdata/local-cache-probe/docker
+          file: testdata/local-cache-probe/docker/Dockerfile.invalid
+          platforms: linux/amd64
+          push: false
+          provenance: false
+          github-token: ''
+          cache-to: type=gha,version=2,url_v2=${{ env.EXPECTED_CACHE_URL }},scope=runscaler-invalid-build-linux-amd64,ignore-error=true,timeout=10s,ghtoken=,repository=
+      - name: Check actual build failure
+        if: inputs.scenario == 'outage' && matrix.workload == 'docker'
+        env:
+          OUTCOME: ${{ steps.invalid-build.outcome }}
+        run: test "$OUTCOME" = failure
+      - name: Record explicit client outcomes
+        if: always()
+        env:
+          DIRECT: ${{ steps.direct.outcome }}
+          GO: ${{ steps.go.outcome }}
+          NODE: ${{ steps.node.outcome }}
+          GRADLE: ${{ steps.gradle.outcome }}
+          RUST: ${{ steps.rust.outcome }}
+          DOCKER: ${{ steps.docker-build.outcome }}
+          ARTIFACT: ${{ steps.outage-artifact.outcome }}
+          INVALID_BUILD: ${{ steps.invalid-build.outcome }}
+        run: |
+          /home/runner/externals/node24/bin/node -e 'const names=["DIRECT","GO","NODE","GRADLE","RUST","DOCKER","ARTIFACT","INVALID_BUILD"]; console.log("RUNSCALER_CACHE_OUTCOMES="+JSON.stringify(Object.fromEntries(names.map(k=>[k,process.env[k]]))))'

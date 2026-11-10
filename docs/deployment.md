@@ -167,3 +167,13 @@ ReadWritePaths=/tmp /var/lib/runner /var/log/runner
 [Install]
 WantedBy=multi-user.target
 ```
+
+## Host-local Actions cache rollout
+
+The optional [local-cache runbook](local-actions-cache.md) covers the separate
+service/data volume, immutable runner variant, approved canary and rollback.
+A manager configuration change needs a maintenance restart; there is no hot
+reload, per-set disable switch, or second-manager exception to the host lock.
+Preserve unrelated entries and check the running version's drain behavior and
+service stop deadline before any restart. Runner/doctor cleanup preserves the
+external cache data volume; it is not a generic wipeable job cache.

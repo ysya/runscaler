@@ -24,9 +24,9 @@ import (
 // run, watch and diagnose runner containers. internal/cachestore declares
 // its own interface for the daemon-maintenance calls it needs.
 type DockerAPI interface {
+	RunnerCleanupAPI
 	ContainerCreate(ctx context.Context, options dockerclient.ContainerCreateOptions) (dockerclient.ContainerCreateResult, error)
 	ContainerStart(ctx context.Context, containerID string, options dockerclient.ContainerStartOptions) (dockerclient.ContainerStartResult, error)
-	ContainerRemove(ctx context.Context, containerID string, options dockerclient.ContainerRemoveOptions) (dockerclient.ContainerRemoveResult, error)
 	ContainerWait(ctx context.Context, containerID string, options dockerclient.ContainerWaitOptions) dockerclient.ContainerWaitResult
 	// ContainerLogs feeds readiness detection and failure diagnostics.
 	ContainerLogs(ctx context.Context, containerID string, options dockerclient.ContainerLogsOptions) (dockerclient.ContainerLogsResult, error)
@@ -38,6 +38,7 @@ type DockerAPI interface {
 // DockerProvider runs GitHub Actions runners as Docker containers.
 type DockerProvider struct {
 	dockerClient     DockerAPI
+	actionsCacheURL  string
 	runnerImage      string
 	dockerSocket     string
 	dind             bool
@@ -62,6 +63,7 @@ func NewDockerProvider(ss config.ScaleSetConfig, client DockerAPI, logger *slog.
 	p := &DockerProvider{
 		dockerClient:     client,
 		runnerImage:      ss.RunnerImage,
+		actionsCacheURL:  ss.Docker.ActionsCacheURL,
 		dockerSocket:     ss.Docker.Socket,
 		dind:             ss.IsDinD(),
 		sharedVolume:     ss.Docker.SharedVolume,
@@ -151,7 +153,7 @@ func (p *DockerProvider) StartInstance(ctx context.Context, name string, jitConf
 		Config: &container.Config{
 			Image:  p.runnerImage,
 			User:   "runner",
-			Cmd:    runnerCmd(volumeTargets),
+			Cmd:    runnerCmd(volumeTargets, p.actionsCacheURL != ""),
 			Env:    p.buildContainerEnv(jitConfig),
 			Labels: map[string]string{ManagedByLabel: ManagedByValue},
 		},
@@ -176,15 +178,9 @@ func (p *DockerProvider) StartInstance(ctx context.Context, name string, jitConf
 	return c.ID, nil
 }
 
-// RemoveInstance force-removes a Docker container by ID.
+// RemoveInstance removes a runner and its explicitly owned child resources.
 func (p *DockerProvider) RemoveInstance(ctx context.Context, instanceID string) error {
-	if _, err := p.dockerClient.ContainerRemove(ctx, instanceID, dockerclient.ContainerRemoveOptions{Force: true}); err != nil {
-		if cerrdefs.IsNotFound(err) {
-			return nil
-		}
-		return fmt.Errorf("failed to remove runner container: %w", err)
-	}
-	return nil
+	return RemoveRunnerContainer(ctx, p.dockerClient, instanceID, p.logger)
 }
 
 // WaitInstance returns when a runner container is no longer running. The controller uses
@@ -220,20 +216,23 @@ func (p *DockerProvider) WaitInstance(ctx context.Context, instanceID string) er
 func (p *DockerProvider) Shutdown(_ context.Context) {}
 
 // runnerCmd returns the container command: plain run.sh when no named
-// volumes are mounted, otherwise a shell prelude that fixes the ownership of
+// volumes or local cache guard are needed, otherwise a shell prelude that fixes the ownership of
 // each volume mount point first. Freshly created named volumes are root-owned
 // at the top level, so the chown is conditional on the mount point's owner:
 // the first job on a fresh volume pays the recursive chown once and later
 // jobs skip the IO storm entirely. (stat -c is GNU coreutils — the runner
 // image is Ubuntu.)
-func runnerCmd(volumeTargets []string) []string {
-	if len(volumeTargets) == 0 {
+func runnerCmd(volumeTargets []string, localActionsCache bool) []string {
+	if len(volumeTargets) == 0 && !localActionsCache {
 		return []string{"/home/runner/run.sh"}
 	}
 	var sb strings.Builder
 	sb.WriteString(`fix_own() { [ "$(stat -c %u "$1")" = "1001" ] || sudo chown -R 1001:123 "$1"; };`)
 	for _, target := range volumeTargets {
 		fmt.Fprintf(&sb, " fix_own %s;", shell.Quote(target))
+	}
+	if localActionsCache {
+		sb.WriteString(" /usr/local/bin/runner-local-cache-check &&")
 	}
 	sb.WriteString(" exec /home/runner/run.sh")
 	return []string{"sh", "-c", sb.String()}
@@ -246,6 +245,9 @@ func (p *DockerProvider) buildContainerEnv(jitConfig string) []string {
 	}
 	if p.sharedVolume != "" {
 		env = append(env, fmt.Sprintf("SHARED_DIR=%s", p.sharedVolume))
+	}
+	if p.actionsCacheURL != "" {
+		env = append(env, "CUSTOM_ACTIONS_RESULTS_URL="+p.actionsCacheURL)
 	}
 	return env
 }

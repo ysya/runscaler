@@ -1,0 +1,10 @@
+[package]
+name = "runscaler-cache-probe"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+itoa = "=1.0.15"
+
+# Keep this fixture independent when copied into another Cargo workspace.
+[workspace]

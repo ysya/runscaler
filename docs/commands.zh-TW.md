@@ -137,7 +137,20 @@ Doctor 會使用各個已設定 runner 規模集的 App 或 PAT 憑證探測 Git
 啟動時的資源清理或 `doctor --fix` 都不會移除共用磁碟區與快取磁碟區：
 這些磁碟區原本就會保留至程序結束之後，而且可能仍包含執行中工作流程的後續工作所需的資料。
 
-啟動時的資源清理與 `doctor` 採用相同的辨識規則：容器須帶有 `managed-by=runner` 標籤，或名稱正好是 `runner-<8 位十六進位>`；本機 Tart VM 的名稱須正好符合 runner 產生的 `runner-`、`pool-` 或 `runner-keep-` 格式。其餘資源無論叫什麼名字都不會被移除。
+一般 runner 刪除，以及這兩個修復路徑，都會先停止父 runner，再清除透過
+`--network container:<runner-id-or-name>` 或
+`runscaler.runner-id=<runner-id-or-name>` 明確關聯的容器。ID 前綴至少 12 字元且須
+沒有歧義；其他 managed runner 不會被視為子容器。刪除容器時一併回收匿名 volume。
+Named volume 只有在明確標註 runner 歸屬，或被已確認歸屬的 Buildx 子容器掛載、且
+名稱正好為 `<buildx-container-name>_state` 時，才視為暫存資料回收。
+父 runner、其他容器或刪除失敗的子容器仍掛載的 volume 會保留；named volume 刪除
+失敗會記錄日誌，不會強制移除。
+
+獨立管理的 `runscaler-actions-cache` 服務及外部資料 volume 會保留。
+資源探索仍從可辨識的父 runner 開始；父容器已消失、且無法歸屬的殘留容器或 volume，
+不會因此被全面 prune。未加 `--fix` 的 `doctor` 維持唯讀。
+
+啟動時的資源清理與 `doctor` 採用相同的辨識規則：容器須帶有 `managed-by=runner` 標籤，或名稱正好是 `runner-<8 位十六進位>`；本機 Tart VM 的名稱須正好符合 runner 產生的 `runner-`、`pool-` 或 `runner-keep-` 格式。只移除這些父 runner 及明確關聯的子資源，其餘 daemon 資源會保留。
 
 <a id="logs"></a>
 

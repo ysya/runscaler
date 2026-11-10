@@ -156,11 +156,26 @@ cache volumes are never removed by startup reconciliation or `doctor --fix`:
 they intentionally outlive the process and may still contain data needed by a
 later job in an in-flight workflow.
 
+Normal runner removal and these fix paths stop the root runner, then remove
+containers explicitly linked by `--network container:<runner-id-or-name>` or
+`runscaler.runner-id=<runner-id-or-name>`. ID prefixes must be unambiguous and
+at least 12 characters. Other managed runners are excluded. Anonymous volumes
+are removed with their containers. Temporary named volumes are reclaimed only
+with an explicit runner-owner label, or when an owned Buildx child mounts its
+exact `<buildx-container-name>_state` volume. Volumes still referenced by the
+root, another container or a failed child are retained; named-volume failures
+are logged without forcing removal.
+
+The independently owned `runscaler-actions-cache` service and its external data
+volume are preserved. Discovery starts from a recognized runner parent;
+unattributed containers and volumes with an already-missing parent are not a
+global prune target. `doctor` without `--fix` remains read-only.
+
 Startup reconciliation and `doctor` recognise runner's resources by the same
 rules: a container carries the `managed-by=runner` label or an exact
 `runner-<8 hex>` name, and a local Tart VM carries an exact `runner-`, `pool-`
-or `runner-keep-` name of the form runner generates. Nothing else is ever
-removed, however it is named.
+or `runner-keep-` name of the form runner generates. Only those parent runners and their explicitly associated child resources
+are removed; unrelated daemon resources are retained.
 
 ## Logs
 

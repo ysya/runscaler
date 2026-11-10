@@ -12,6 +12,7 @@ import (
 	cerrdefs "github.com/containerd/errdefs"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/mount"
+	"github.com/moby/moby/api/types/volume"
 	dockerclient "github.com/moby/moby/client"
 
 	"github.com/ysya/runscaler/internal/config"
@@ -27,10 +28,13 @@ type createCall struct {
 }
 
 type mockDocker struct {
-	created     []string     // container names
-	createCalls []createCall // full create args
-	started     []string     // container IDs
-	removed     []string     // container IDs
+	created        []string     // container names
+	createCalls    []createCall // full create args
+	started        []string     // container IDs
+	removed        []string     // container IDs
+	containers     []container.Summary
+	volumes        []volume.Volume
+	volumesRemoved []string
 
 	// Optional overrides for ContainerWait. When unset, the wait succeeds
 	// immediately with status 0.
@@ -56,13 +60,23 @@ func (m *mockDocker) ContainerRemove(_ context.Context, id string, _ dockerclien
 	return dockerclient.ContainerRemoveResult{}, m.removeErr
 }
 
-// The three prune methods exist only to satisfy DockerAPI. Nothing in this
-// package prunes any more: reclamation moved to internal/cachestore, whose
-// own fakeDockerAPI records and injects errors into these calls.
+// These calls support runner-owned resource cleanup; daemon maintenance stays
+// in internal/cachestore.
+func (m *mockDocker) ContainerStop(_ context.Context, _ string, _ dockerclient.ContainerStopOptions) (dockerclient.ContainerStopResult, error) {
+	return dockerclient.ContainerStopResult{}, nil
+}
+func (m *mockDocker) ContainerList(_ context.Context, _ dockerclient.ContainerListOptions) (dockerclient.ContainerListResult, error) {
+	return dockerclient.ContainerListResult{Items: m.containers}, nil
+}
+func (m *mockDocker) VolumeList(_ context.Context, _ dockerclient.VolumeListOptions) (dockerclient.VolumeListResult, error) {
+	return dockerclient.VolumeListResult{Items: m.volumes}, nil
+}
+func (m *mockDocker) VolumeRemove(_ context.Context, name string, _ dockerclient.VolumeRemoveOptions) (dockerclient.VolumeRemoveResult, error) {
+	m.volumesRemoved = append(m.volumesRemoved, name)
+	return dockerclient.VolumeRemoveResult{}, nil
+}
 
-// ContainerLogs is unused by this package's own tests (only
-// internal/cachestore's volume helper reads logs) — a minimal stub keeps
-// mockDocker satisfying DockerAPI.
+// ContainerLogs supplies empty logs unless a test overrides it.
 func (m *mockDocker) ContainerLogs(_ context.Context, _ string, _ dockerclient.ContainerLogsOptions) (dockerclient.ContainerLogsResult, error) {
 	return io.NopCloser(strings.NewReader("")), nil
 }

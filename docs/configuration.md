@@ -221,6 +221,43 @@ gh api repos/<owner>/<repo>/actions/runners/deprecations/<version>   # runtime_d
 The org-level endpoint (`orgs/<org>/actions/runners/deprecations/<version>`)
 needs the `admin:org` scope.
 
+## Host-local Actions cache (opt-in)
+
+`[docker] actions-cache-url` is disabled when empty/unset. It inherits through
+Docker scale-set defaults; `[scaleset.docker] actions-cache-url = ""` explicitly
+disables an inherited value. Configure it per scale set during the Linux amd64
+pilot, together with an accepted cache-capable runner variant by immutable digest.
+A stock runner or the bare fork base image is insufficient: the final variant
+must provide Runscaler's verified capability checker before accepting work.
+
+The endpoint must be an absolute HTTP(S) URL with a host and literal trailing
+slash. Credentials, queries and fragments are rejected without echoing their
+values in validation errors. Runscaler does not repair or normalize an invalid URL.
+The actual runner and sibling BuildKit must both reach the advertised endpoint.
+
+```toml
+[[scaleset]]
+url = "https://github.com/<owner>"
+name = "runscaler-local-cache-canary"
+labels = ["runscaler-local-cache-canary"]
+token = "env:RUNNER_TOKEN"
+max-runners = 1
+runner-image = "<verified-local-cache-image>@sha256:<accepted-digest>"
+
+[scaleset.docker]
+platform = "linux/amd64"
+actions-cache-url = "http://<private-host-reachable-from-containers>:3000/"
+cache-volumes = []
+cache = []
+```
+
+Keep the service/data outside runner-owned resources and generic wipeable cache
+mounts. Read [service setup, supported clients and recovery](local-actions-cache.md).
+For rollback, drain and disable affected opt-in sets before reverting settings;
+simply clearing the endpoint and resuming unchanged actions enables GitHub
+caching again. An empty override is configuration behavior, not a local-only
+rollback procedure.
+
 ## GitHub App Authentication
 
 GitHub App authentication is supported for organization and repository runners.

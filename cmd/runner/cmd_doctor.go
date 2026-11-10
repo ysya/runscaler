@@ -339,7 +339,7 @@ func checkDocker(ctx context.Context, socket string, sharedVolumes []string, mod
 // checkDockerContainers reports runner's containers, as orphans or as the
 // running runner's own, and with removeOrphans removes them, via
 // findOrphanContainers and removeOrphanContainers.
-func checkDockerContainers(ctx context.Context, client containerAPI, mode resourceCheck) (int, error) {
+func checkDockerContainers(ctx context.Context, client provider.RunnerCleanupAPI, mode resourceCheck) (int, error) {
 	orphans, err := findOrphanContainers(ctx, client)
 	if err != nil {
 		fmt.Printf("  ✗ Failed to list Docker containers: %s\n", err)

@@ -122,6 +122,40 @@ gh api repos/<owner>/<repo>/actions/runners/deprecations/<version>   # runtime_d
 
 <a id="github-app-authentication"></a>
 
+## 主機本機 Actions 快取（opt-in）
+
+`[docker] actions-cache-url` 空白或未設定時停用。它會繼承 Docker scale-set 預設值；
+在 `[scaleset.docker]` 明確設定 `actions-cache-url = ""` 可取消繼承的端點。
+Linux amd64 pilot 建議逐一 scale set 啟用，並搭配固定 digest、通過驗收的快取專用
+runner 變體。標準 runner 或單純 fork base image 都不夠；最終映像必須提供
+Runscaler 的 capability checker，先驗證能力再接收工作。
+
+端點必須是有 host 與結尾實際斜線的完整 HTTP(S) URL，不能有帳密、query 或 fragment。
+驗證錯誤不會回顯輸入的敏感值，也不會自動修正或正規化 URL。實際 runner 與旁系
+BuildKit 容器都必須能連線至此端點。
+
+```toml
+[[scaleset]]
+url = "https://github.com/<owner>"
+name = "runscaler-local-cache-canary"
+labels = ["runscaler-local-cache-canary"]
+token = "env:RUNNER_TOKEN"
+max-runners = 1
+runner-image = "<verified-local-cache-image>@sha256:<accepted-digest>"
+
+[scaleset.docker]
+platform = "linux/amd64"
+actions-cache-url = "http://<private-host-reachable-from-containers>:3000/"
+cache-volumes = []
+cache = []
+```
+
+服務與資料不可歸屬於 runner，也不可放進一般可清空的快取掛載。
+詳見[服務設定、client 範圍與回復方式](local-actions-cache.zh-TW.md)。
+回復時先 drain 並停用受影響的 opt-in scale set，再還原設定；直接清空端點並恢復
+原 cache action 會重新使用 GitHub cache。空字串覆寫是設定語意，不是保證資料只留
+本機的回復程序。
+
 ## GitHub App 驗證
 
 組織與儲存庫 runner 支援 GitHub App 驗證。請將 App 安裝至擁有這些 runner 的組織或儲存庫。組織 runner 需授予組織層級的 **Self-hosted runners: Read and write** 權限。儲存庫 runner 需授予儲存庫層級的 **Administration: Read and write** 權限；儲存庫的 **Metadata: Read-only** 權限會一併包含。企業層級的 runner 需要 PAT。App 註冊與權限細節請見 GitHub 的 [runner 驗證指南](https://docs.github.com/en/actions/how-tos/manage-runners/use-actions-runner-controller/authenticate-to-the-api)。

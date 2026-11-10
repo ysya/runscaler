@@ -156,6 +156,32 @@ cache = []
 原 cache action 會重新使用 GitHub cache。空字串覆寫是設定語意，不是保證資料只留
 本機的回復程序。
 
+### 原生 Go 接收器（開發分支）
+
+Manager 可選擇在另一個私有 listener 提供 cache-v2 接收器。此功能尚未通過實際
+簽名 job 與 canary 驗收，不能視為目前 Rust 服務的替代品。以下是全域設定，
+不會繼承至各 scale set：
+
+```toml
+[actions-cache]
+enabled = true
+listen-address = "172.18.0.1:32500"
+advertise-url = "http://cache.internal:32500/"
+data-dir = "/var/lib/runner/native-actions-cache"
+max-size-bytes = 53687091200
+max-idle-days = 30
+# audiences = ["an-exact-verified-runtime-audience"]
+```
+
+`listen-address` 應使用實際私有主機 IP；`advertise-url` 須能從 runner 與旁系
+BuildKit 容器連通。資料目錄須為全新、私有，且與 Rust volume 分開。預設使用
+GitHub token issuer／JWKS 與 Results 上游；可信任的 HTTPS issuer 可同時設定
+`token-issuer` 與 `jwks-url`，`upstream-results-url` 則是固定 HTTPS 來源。
+沒有略過 token 驗證的開關。只有選用原生快取的 scale set，才需將既有
+`docker.actions-cache-url` 設為與 `advertise-url` 相同；其他 scale set 保留
+原有端點。啟用後，`runner status --json` 與 `runner cache` 會回報原生快取的
+就緒狀態與已完成資料量。
+
 ## GitHub App 驗證
 
 組織與儲存庫 runner 支援 GitHub App 驗證。請將 App 安裝至擁有這些 runner 的組織或儲存庫。組織 runner 需授予組織層級的 **Self-hosted runners: Read and write** 權限。儲存庫 runner 需授予儲存庫層級的 **Administration: Read and write** 權限；儲存庫的 **Metadata: Read-only** 權限會一併包含。企業層級的 runner 需要 PAT。App 註冊與權限細節請見 GitHub 的 [runner 驗證指南](https://docs.github.com/en/actions/how-tos/manage-runners/use-actions-runner-controller/authenticate-to-the-api)。

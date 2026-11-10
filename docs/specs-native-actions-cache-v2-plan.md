@@ -8,7 +8,7 @@
 
 **Tech Stack:** Go 1.27.3, `net/http`, `database/sql` with one justified pure-Go SQLite driver, generated protobuf messages plus `google.golang.org/protobuf`, existing `github.com/golang-jwt/jwt/v5`, filesystem storage.
 
-**Spec:** `/private/tmp/runscaler-native-actions-cache-v2-design.md` (move both reviewed documents into the chosen current-source worktree before implementation).
+**Spec:** `docs/specs-native-actions-cache-v2-design.md`. Implementation is in an isolated feature worktree; host cutover remains a separate approval gate.
 
 ## Global Constraints
 

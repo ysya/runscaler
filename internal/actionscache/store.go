@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,6 +23,7 @@ var (
 	ErrNotFound     = errors.New("cache entry not found")
 	ErrSizeMismatch = errors.New("cache size does not match uploaded blocks")
 	ErrIncomplete   = errors.New("cache upload is incomplete")
+	ErrStagingFull  = errors.New("cache staging budget exceeded")
 )
 
 const maxPartBytes = int64(1 << 30)
@@ -40,11 +42,55 @@ type Entry struct {
 }
 
 type Store struct {
-	root   string
-	db     *sql.DB
-	mu     sync.Mutex
-	pins   map[string]int
-	closed bool
+	root         string
+	db           *sql.DB
+	mu           sync.Mutex
+	pins         map[string]int
+	closed       bool
+	stagingLimit int64
+	activeBytes  int64
+}
+
+func (s *Store) SetStagingLimit(bytes int64) {
+	s.mu.Lock()
+	s.stagingLimit = bytes
+	s.mu.Unlock()
+}
+
+type StoreStats struct {
+	Entries int64
+	Bytes   int64
+}
+
+func (s *Store) Stats(ctx context.Context) (StoreStats, error) {
+	var stats StoreStats
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(size_bytes),0) FROM entries WHERE state='complete'`).Scan(&stats.Entries, &stats.Bytes)
+	return stats, err
+}
+
+// ReadStoreStats opens an existing database read-only for operator reporting.
+// It never creates a cache directory or starts the receiver.
+func ReadStoreStats(ctx context.Context, root string) (StoreStats, error) {
+	path := filepath.Join(root, "cache.sqlite")
+	if _, err := os.Stat(path); err != nil {
+		return StoreStats{}, err
+	}
+	dsn := (&url.URL{Scheme: "file", Path: path, RawQuery: "mode=ro"}).String()
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return StoreStats{}, err
+	}
+	defer db.Close()
+	var version int
+	if err := db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
+		return StoreStats{}, err
+	}
+	if version != 1 {
+		return StoreStats{}, fmt.Errorf("unsupported native cache schema version %d", version)
+	}
+	var stats StoreStats
+	err = db.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(size_bytes),0) FROM entries WHERE state='complete'`).Scan(&stats.Entries, &stats.Bytes)
+	return stats, err
 }
 
 func OpenStore(root string) (*Store, error) {
@@ -65,8 +111,19 @@ func OpenStore(root string) (*Store, error) {
 		if err := os.Mkdir(filepath.Join(root, name), 0700); err != nil && !os.IsExist(err) {
 			return nil, err
 		}
+		info, err := os.Lstat(filepath.Join(root, name))
+		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0077 != 0 {
+			return nil, errors.New("cache storage directory must be private and not a symlink")
+		}
 	}
 	dbPath := filepath.Join(root, "cache.sqlite")
+	if info, err := os.Lstat(dbPath); err == nil {
+		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+			return nil, errors.New("cache database must be a regular file")
+		}
+	} else if !os.IsNotExist(err) {
+		return nil, err
+	}
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, err
@@ -88,22 +145,34 @@ func OpenStore(root string) (*Store, error) {
 		return nil, fmt.Errorf("unsupported native cache schema version %d", version)
 	}
 	if version == 0 {
+		tx, err := db.Begin()
+		if err != nil {
+			db.Close()
+			return nil, err
+		}
+		defer tx.Rollback()
 		for _, statement := range []string{
-			`CREATE TABLE entries (
+			`CREATE TABLE IF NOT EXISTS entries (
 			 id INTEGER PRIMARY KEY, object_id TEXT NOT NULL UNIQUE,
 			 repository_id TEXT NOT NULL, scope TEXT NOT NULL, cache_key TEXT NOT NULL, version TEXT NOT NULL,
-			 state TEXT NOT NULL, created_at INTEGER NOT NULL, accessed_at INTEGER NOT NULL,
+			 state TEXT NOT NULL, created_at INTEGER NOT NULL, completed_at INTEGER NOT NULL DEFAULT 0, accessed_at INTEGER NOT NULL,
 			 expires_at INTEGER NOT NULL, size_bytes INTEGER NOT NULL DEFAULT 0, manifest TEXT,
 			 UNIQUE(repository_id, scope, cache_key, version))`,
-			`CREATE TABLE parts (object_id TEXT NOT NULL, block_id TEXT NOT NULL, size_bytes INTEGER NOT NULL,
+			`CREATE TABLE IF NOT EXISTS parts (object_id TEXT NOT NULL, block_id TEXT NOT NULL, file_name TEXT NOT NULL, size_bytes INTEGER NOT NULL,
 			 PRIMARY KEY(object_id, block_id))`,
-			`CREATE INDEX entry_lookup ON entries(repository_id, scope, version, state, accessed_at)`,
+			`CREATE INDEX IF NOT EXISTS entry_lookup ON entries(repository_id, scope, version, state, completed_at)`,
 			`PRAGMA user_version=1`,
 		} {
-			if _, err := db.Exec(statement); err != nil {
+			if _, err := tx.Exec(statement); err != nil {
+				_ = tx.Rollback()
 				db.Close()
 				return nil, err
 			}
+		}
+		if err := tx.Commit(); err != nil {
+			_ = tx.Rollback()
+			db.Close()
+			return nil, err
 		}
 	}
 	if err := os.Chmod(dbPath, 0600); err != nil {
@@ -157,6 +226,34 @@ func (s *Store) PutPart(ctx context.Context, id, blockID string, body io.Reader)
 	if blockID == "" || len(blockID) > 256 {
 		return errors.New("invalid block ID")
 	}
+	s.mu.Lock()
+	if err := s.requireReserved(ctx, id); err != nil {
+		s.mu.Unlock()
+		return err
+	}
+	allowed := maxPartBytes
+	limited := s.stagingLimit > 0
+	if limited {
+		var staged int64
+		if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(SUM(parts.size_bytes),0) FROM parts
+		 JOIN entries ON entries.object_id=parts.object_id WHERE entries.state='reserved'`).Scan(&staged); err != nil {
+			s.mu.Unlock()
+			return err
+		}
+		available := s.stagingLimit - staged - s.activeBytes
+		if available <= 0 {
+			s.mu.Unlock()
+			return ErrStagingFull
+		}
+		if available < allowed {
+			allowed = available
+		}
+		s.activeBytes += allowed
+	}
+	s.mu.Unlock()
+	if limited {
+		defer func() { s.mu.Lock(); s.activeBytes -= allowed; s.mu.Unlock() }()
+	}
 	dir := filepath.Join(s.root, "staging", id)
 	temp, err := os.CreateTemp(dir, ".upload-")
 	if err != nil {
@@ -164,14 +261,14 @@ func (s *Store) PutPart(ctx context.Context, id, blockID string, body io.Reader)
 	}
 	tempPath := temp.Name()
 	defer os.Remove(tempPath)
-	size, err := io.Copy(temp, io.LimitReader(body, maxPartBytes+1))
+	size, err := io.Copy(temp, io.LimitReader(body, allowed+1))
 	if err != nil {
 		temp.Close()
 		return err
 	}
-	if size > maxPartBytes {
+	if size > allowed {
 		temp.Close()
-		return errors.New("cache block too large")
+		return ErrStagingFull
 	}
 	if err := ctx.Err(); err != nil {
 		temp.Close()
@@ -189,13 +286,23 @@ func (s *Store) PutPart(ctx context.Context, id, blockID string, body io.Reader)
 	if err := s.requireReserved(ctx, id); err != nil {
 		return err
 	}
-	path := filepath.Join(dir, uuid.NewSHA1(uuid.NameSpaceOID, []byte(blockID)).String())
+	var oldName string
+	_ = s.db.QueryRowContext(ctx, `SELECT file_name FROM parts WHERE object_id=? AND block_id=?`, id, blockID).Scan(&oldName)
+	fileName := uuid.NewString()
+	path := filepath.Join(dir, fileName)
 	if err := os.Rename(tempPath, path); err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO parts(object_id,block_id,size_bytes) VALUES(?,?,?)
-	 ON CONFLICT(object_id,block_id) DO UPDATE SET size_bytes=excluded.size_bytes`, id, blockID, size)
-	return err
+	_, err = s.db.ExecContext(ctx, `INSERT INTO parts(object_id,block_id,file_name,size_bytes) VALUES(?,?,?,?)
+	 ON CONFLICT(object_id,block_id) DO UPDATE SET file_name=excluded.file_name,size_bytes=excluded.size_bytes`, id, blockID, fileName, size)
+	if err != nil {
+		_ = os.Remove(path)
+		return err
+	}
+	if oldName != "" {
+		_ = os.Remove(filepath.Join(dir, oldName))
+	}
+	return nil
 }
 
 func (s *Store) PutBlob(ctx context.Context, id string, body io.Reader) error {
@@ -281,6 +388,11 @@ func (s *Store) Finalize(ctx context.Context, p Principal, key, version string, 
 		if err := s.db.QueryRowContext(ctx, `SELECT size_bytes FROM parts WHERE object_id=? AND block_id=?`, entry.ID, blockID).Scan(&partSize); err != nil {
 			return Entry{}, ErrIncomplete
 		}
+		name := s.stagedPartPath(entry.ID, blockID)
+		info, err := os.Stat(name)
+		if err != nil || !info.Mode().IsRegular() || info.Size() != partSize {
+			return Entry{}, ErrIncomplete
+		}
 		size += partSize
 	}
 	if size != declaredSize {
@@ -289,8 +401,8 @@ func (s *Store) Finalize(ctx context.Context, p Principal, key, version string, 
 	if err := os.Rename(filepath.Join(s.root, "staging", entry.ID), filepath.Join(s.root, "objects", entry.ID)); err != nil {
 		return Entry{}, err
 	}
-	now := time.Now().Unix()
-	if _, err := s.db.ExecContext(ctx, `UPDATE entries SET state='complete',size_bytes=?,accessed_at=?,expires_at=0 WHERE object_id=? AND state='reserved'`, size, now, entry.ID); err != nil {
+	now := time.Now()
+	if _, err := s.db.ExecContext(ctx, `UPDATE entries SET state='complete',size_bytes=?,completed_at=?,accessed_at=?,expires_at=0 WHERE object_id=? AND state='reserved'`, size, now.UnixNano(), now.Unix(), entry.ID); err != nil {
 		return Entry{}, err
 	}
 	entry.RepositoryID, entry.Scope, entry.Key, entry.Version, entry.Size = p.RepositoryID, scope, key, version, size
@@ -311,9 +423,9 @@ func (s *Store) Lookup(ctx context.Context, p Principal, key string, restoreKeys
 				query := `SELECT id,object_id,repository_id,scope,cache_key,version,size_bytes,manifest FROM entries
 				 WHERE repository_id=? AND scope=? AND version=? AND state='complete' AND `
 				if exact {
-					rows, err = s.db.QueryContext(ctx, query+`cache_key=? ORDER BY accessed_at DESC,id DESC`, p.RepositoryID, scope, version, candidate)
+					rows, err = s.db.QueryContext(ctx, query+`cache_key=? ORDER BY completed_at DESC,id DESC`, p.RepositoryID, scope, version, candidate)
 				} else {
-					rows, err = s.db.QueryContext(ctx, query+`substr(cache_key,1,length(?))=? ORDER BY accessed_at DESC,id DESC`, p.RepositoryID, scope, version, candidate, candidate)
+					rows, err = s.db.QueryContext(ctx, query+`substr(cache_key,1,length(?))=? ORDER BY completed_at DESC,id DESC`, p.RepositoryID, scope, version, candidate, candidate)
 				}
 				if err != nil {
 					return Entry{}, false, err
@@ -342,7 +454,9 @@ func (s *Store) Lookup(ctx context.Context, p Principal, key string, restoreKeys
 						_, _ = s.db.ExecContext(ctx, `UPDATE entries SET accessed_at=? WHERE object_id=?`, time.Now().Unix(), entry.ID)
 						return entry, true, nil
 					}
-					_, _ = s.db.ExecContext(ctx, `DELETE FROM entries WHERE object_id=?`, entry.ID)
+					if err := s.removeEntry(ctx, entry.ID, "objects"); err != nil {
+						return Entry{}, false, err
+					}
 				}
 			}
 		}
@@ -350,8 +464,45 @@ func (s *Store) Lookup(ctx context.Context, p Principal, key string, restoreKeys
 	return Entry{}, false, nil
 }
 
+func (s *Store) EntryByID(ctx context.Context, id string) (Entry, error) {
+	if _, err := uuid.Parse(id); err != nil {
+		return Entry{}, ErrNotFound
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var entry Entry
+	var manifest string
+	err := s.db.QueryRowContext(ctx, `SELECT id,object_id,repository_id,scope,cache_key,version,size_bytes,manifest FROM entries
+	 WHERE object_id=? AND state='complete'`, id).Scan(&entry.DatabaseID, &entry.ID, &entry.RepositoryID, &entry.Scope, &entry.Key, &entry.Version, &entry.Size, &manifest)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Entry{}, ErrNotFound
+	}
+	if err != nil {
+		return Entry{}, err
+	}
+	if err := json.Unmarshal([]byte(manifest), &entry.Parts); err != nil {
+		return Entry{}, ErrIncomplete
+	}
+	return entry, nil
+}
+
 func (s *Store) partPath(id, blockID string) string {
-	return filepath.Join(s.root, "objects", id, uuid.NewSHA1(uuid.NameSpaceOID, []byte(blockID)).String())
+	return s.partFilePath("objects", id, blockID)
+}
+
+func (s *Store) stagedPartPath(id, blockID string) string {
+	return s.partFilePath("staging", id, blockID)
+}
+
+func (s *Store) partFilePath(directory, id, blockID string) string {
+	var fileName string
+	if err := s.db.QueryRow(`SELECT file_name FROM parts WHERE object_id=? AND block_id=?`, id, blockID).Scan(&fileName); err != nil {
+		return ""
+	}
+	if _, err := uuid.Parse(fileName); err != nil {
+		return ""
+	}
+	return filepath.Join(s.root, directory, id, fileName)
 }
 
 func (s *Store) partsExist(entry Entry) bool {
@@ -510,7 +661,7 @@ func (s *Store) Sweep(ctx context.Context, maxBytes int64, maxIdle time.Duration
 	if total <= maxBytes {
 		return nil
 	}
-	target := maxBytes * 9 / 10
+	target := maxBytes - maxBytes/10
 	for _, entry := range entries {
 		if total <= target {
 			break
@@ -538,6 +689,13 @@ func (s *Store) removeEntry(ctx context.Context, id, directory string) error {
 		return errors.New("invalid cache object ID")
 	}
 	if err := os.RemoveAll(filepath.Join(s.root, directory, id)); err != nil {
+		return err
+	}
+	other := "objects"
+	if directory == "objects" {
+		other = "staging"
+	}
+	if err := os.RemoveAll(filepath.Join(s.root, other, id)); err != nil {
 		return err
 	}
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM parts WHERE object_id=?`, id); err != nil {

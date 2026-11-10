@@ -180,3 +180,22 @@ back to GitHub. Keep canary workloads stopped unless the operator explicitly
 chooses a reviewed workflow that omits all applicable cache operations. A shared
 helper-disable recipe has not been validated here; no automatic resume path is
 provided.
+
+## Native Go receiver development
+
+The optional native receiver is implemented in the manager on a separate private
+port and fresh data directory. It uses token-derived repository/scope permissions,
+an immutable completed key, ordered Azure blocks, expiring local payload URLs,
+and SQLite plus private files. It forwards non-cache Results calls to the fixed
+GitHub upstream for artifacts. Its listener remains available during normal
+manager drain. Back up or restore the entire native directory only while the
+manager is stopped; the database, WAL, objects, and capability key belong
+together. `runner status --json` reports readiness and `runner cache` reads
+completed-entry counts/bytes without creating a missing store.
+
+The Rust service and its data remain the live rollback endpoint. The existing
+runner fork still gives legacy v1 clients GitHub's `ACTIONS_CACHE_URL`; a new
+verified and pinned fail-closed image is required before promising that *all*
+cache payloads stay local. Native protocol tests alone do not establish real
+signed-client compatibility. Do not switch a host until the separate signed
+actions/cache, language-helper, BuildKit, artifact, restart and outage gates pass.

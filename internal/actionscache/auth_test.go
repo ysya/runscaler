@@ -154,3 +154,33 @@ func TestVerifierBoundsUnknownKeyRefresh(t *testing.T) {
 		t.Fatalf("unbounded JWKS fetches: %d", requests)
 	}
 }
+
+func TestVerifierThrottlesFailedJWKSRefresh(t *testing.T) {
+	key, _ := rsa.GenerateKey(rand.Reader, 2048)
+	requests := 0
+	failing := false
+	client := &http.Client{Transport: transportFunc(func(*http.Request) (*http.Response, error) {
+		requests++
+		if failing {
+			return &http.Response{StatusCode: 503, Body: io.NopCloser(strings.NewReader("outage")), Header: make(http.Header)}, nil
+		}
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(jwksResponse(key, "known"))), Header: make(http.Header)}, nil
+	})}
+	verifier, err := NewVerifier(VerifierConfig{Issuer: "https://issuer.example", JWKSURL: "https://issuer.example/keys", Client: client})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := verifier.Bootstrap(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	verifier.fetched = time.Now().Add(-11 * time.Minute)
+	failing = true
+	for i := 0; i < 2; i++ {
+		if _, err := verifier.Verify(context.Background(), signFixture(t, key, "known", nil)); err == nil {
+			t.Fatal("accepted stale key after failed refresh")
+		}
+	}
+	if requests != 2 {
+		t.Fatalf("unbounded failed JWKS refreshes: %d", requests)
+	}
+}

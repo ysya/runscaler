@@ -98,6 +98,259 @@ func TestStorePurgesDanglingEntry(t *testing.T) {
 	}
 }
 
+func TestStoreStatsCountOnlyCompletedEntries(t *testing.T) {
+	store, err := OpenStore(filepath.Join(t.TempDir(), "native"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	p := Principal{RepositoryID: "repo", Grants: []Grant{{Scope: "main", Permission: 3}}}
+	saveEntry(t, store, p, "complete", "12345")
+	if _, err := store.Reserve(context.Background(), p, "partial", "v1"); err != nil {
+		t.Fatal(err)
+	}
+	stats, err := store.Stats(context.Background())
+	if err != nil || stats.Entries != 1 || stats.Bytes != 5 {
+		t.Fatalf("stats = %+v, %v", stats, err)
+	}
+}
+
+func TestStoreFailedBlockReplacementKeepsRecordedBytes(t *testing.T) {
+	store, err := OpenStore(filepath.Join(t.TempDir(), "native"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	p := Principal{RepositoryID: "repo", Grants: []Grant{{Scope: "main", Permission: 3}}}
+	ctx := context.Background()
+	reservation, err := store.Reserve(ctx, p, "retry", "v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutPart(ctx, reservation.ID, "block", bytes.NewReader([]byte("old"))); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`CREATE TRIGGER fail_part_update BEFORE UPDATE ON parts BEGIN SELECT RAISE(ABORT,'simulated update failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutPart(ctx, reservation.ID, "block", bytes.NewReader([]byte("new"))); err == nil {
+		t.Fatal("replacement unexpectedly committed")
+	}
+	if _, err := store.db.Exec(`DROP TRIGGER fail_part_update`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetBlockList(ctx, reservation.ID, []string{"block"}); err != nil {
+		t.Fatal(err)
+	}
+	entry, err := store.Finalize(ctx, p, "retry", "v1", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader, err := store.OpenEntry(entry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	data, err := io.ReadAll(reader)
+	if err != nil || string(data) != "old" {
+		t.Fatalf("failed replacement changed published bytes: %q, %v", data, err)
+	}
+}
+
+func TestReadStoreStatsDoesNotCreateMissingStore(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "native")
+	if _, err := ReadStoreStats(context.Background(), root); err == nil {
+		t.Fatal("missing store reported as empty")
+	}
+	if _, err := os.Stat(root); !os.IsNotExist(err) {
+		t.Fatalf("status created missing directory: %v", err)
+	}
+	store, err := OpenStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := Principal{RepositoryID: "repo", Grants: []Grant{{Scope: "main", Permission: 3}}}
+	saveEntry(t, store, p, "complete", "12345")
+	stats, err := ReadStoreStats(context.Background(), root)
+	if err != nil || stats.Entries != 1 || stats.Bytes != 5 {
+		t.Fatalf("read-only stats = %+v, %v", stats, err)
+	}
+	store.Close()
+}
+
+func TestOpenStoreRejectsSymlinkedObjectDirectory(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "native")
+	if err := os.Mkdir(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(t.TempDir(), filepath.Join(root, "objects")); err != nil {
+		t.Fatal(err)
+	}
+	if store, err := OpenStore(root); err == nil {
+		store.Close()
+		t.Fatal("followed symlinked object directory")
+	}
+}
+
+func TestCancelledUploadNeverPublishesAndRestartKeepsItHidden(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "native")
+	store, err := OpenStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := Principal{RepositoryID: "repo", Grants: []Grant{{Scope: "main", Permission: 3}}}
+	reservation, err := store.Reserve(context.Background(), p, "cancelled", "v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := store.PutPart(ctx, reservation.ID, "block", bytes.NewReader([]byte("partial"))); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled PutPart = %v", err)
+	}
+	if err := store.SetBlockList(context.Background(), reservation.ID, []string{"block"}); !errors.Is(err, ErrIncomplete) {
+		t.Fatalf("cancelled block staged: %v", err)
+	}
+	if _, ok, err := store.Lookup(context.Background(), p, "cancelled", nil, "v1"); err != nil || ok {
+		t.Fatalf("cancelled exact hit: %v, %v", ok, err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = OpenStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, ok, err := store.Lookup(context.Background(), p, "missing", []string{"cancel"}, "v1"); err != nil || ok {
+		t.Fatalf("cancelled prefix hit after restart: %v, %v", ok, err)
+	}
+}
+
+func TestOpenStoreRejectsUnknownSchemaVersion(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "native")
+	store, err := OpenStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`PRAGMA user_version=99`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if reopened, err := OpenStore(root); err == nil {
+		reopened.Close()
+		t.Fatal("unknown schema version accepted")
+	}
+}
+
+func TestFailedFinalizeReclaimsMovedObjectsAfterReservationExpires(t *testing.T) {
+	store, err := OpenStore(filepath.Join(t.TempDir(), "native"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	p := Principal{RepositoryID: "repo", Grants: []Grant{{Scope: "main", Permission: 3}}}
+	ctx := context.Background()
+	reservation, err := store.Reserve(ctx, p, "failed-finalize", "v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutBlob(ctx, reservation.ID, bytes.NewReader([]byte("12345"))); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`CREATE TRIGGER fail_finalize BEFORE UPDATE ON entries BEGIN SELECT RAISE(ABORT,'simulated finalize failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Finalize(ctx, p, "failed-finalize", "v1", 5); err == nil {
+		t.Fatal("finalize unexpectedly succeeded")
+	}
+	if _, err := store.db.Exec(`DROP TRIGGER fail_finalize`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`UPDATE entries SET expires_at=1 WHERE object_id=?`, reservation.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Sweep(ctx, 1024, 30*24*time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(store.root, "objects", reservation.ID)); !os.IsNotExist(err) {
+		t.Fatalf("failed finalize leaked object directory: %v", err)
+	}
+}
+
+func TestStagingQuotaBoundsUnfinishedUploads(t *testing.T) {
+	store, err := OpenStore(filepath.Join(t.TempDir(), "native"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	store.SetStagingLimit(10)
+	p := Principal{RepositoryID: "repo", Grants: []Grant{{Scope: "main", Permission: 3}}}
+	reservation, err := store.Reserve(context.Background(), p, "quota", "v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutPart(context.Background(), reservation.ID, "first", bytes.NewReader([]byte("12345678"))); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutPart(context.Background(), reservation.ID, "second", bytes.NewReader([]byte("12345"))); !errors.Is(err, ErrStagingFull) {
+		t.Fatalf("over-quota block = %v", err)
+	}
+	if err := store.SetBlockList(context.Background(), reservation.ID, []string{"second"}); !errors.Is(err, ErrIncomplete) {
+		t.Fatalf("over-quota block staged: %v", err)
+	}
+}
+
+func TestPrefixLookupPrefersNewestCompletionOverRecentRead(t *testing.T) {
+	store, err := OpenStore(filepath.Join(t.TempDir(), "native"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	p := Principal{RepositoryID: "repo", Grants: []Grant{{Scope: "main", Permission: 3}}}
+	saveEntry(t, store, p, "index#1", "old")
+	saveEntry(t, store, p, "index#2", "new")
+	if _, err := store.db.Exec(`UPDATE entries SET accessed_at=1 WHERE state='complete'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := store.Lookup(context.Background(), p, "index#1", nil, "v1"); err != nil || !ok {
+		t.Fatalf("exact old lookup: %v, %v", ok, err)
+	}
+	entry, ok, err := store.Lookup(context.Background(), p, "index#", nil, "v1")
+	if err != nil || !ok || entry.Key != "index#2" {
+		t.Fatalf("prefix chose older index: %+v, %v, %v", entry, ok, err)
+	}
+}
+
+func TestOpenStoreCompletesInterruptedInitialSchema(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "native")
+	store, err := OpenStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`DROP TABLE parts`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`PRAGMA user_version=0`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = OpenStore(root)
+	if err != nil {
+		t.Fatalf("partial schema was not recovered: %v", err)
+	}
+	defer store.Close()
+	var version int
+	if err := store.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 1 {
+		t.Fatalf("schema version=%d, %v", version, err)
+	}
+}
+
 func TestStorePublishesOnlyCompleteImmutableEntries(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "native")
 	store, err := OpenStore(dir)

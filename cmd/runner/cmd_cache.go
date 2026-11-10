@@ -12,6 +12,7 @@ import (
 	dockerclient "github.com/moby/moby/client"
 	"github.com/spf13/cobra"
 
+	"github.com/ysya/runscaler/internal/actionscache"
 	"github.com/ysya/runscaler/internal/bytesize"
 	"github.com/ysya/runscaler/internal/cachestore"
 	"github.com/ysya/runscaler/internal/config"
@@ -61,6 +62,7 @@ type cacheRow struct {
 	Store      string `json:"store"`
 	Filesystem string `json:"filesystem"`
 	SizeBytes  uint64 `json:"size_bytes"`
+	Entries    int64  `json:"entries,omitempty"`
 	// SizeUnknown is true when SizeBytes is not a real measurement — e.g.
 	// buildxStore.Measure hardcodes 0 because there is no cheap way for it
 	// to report a real total (see cachestore/buildx.go's Measure doc
@@ -78,6 +80,27 @@ type cacheRow struct {
 	// A store that fails to measure still gets a row, with this set: a
 	// missing row would read as "nothing there", not "could not be read".
 	MeasureError string `json:"measure_error,omitempty"`
+}
+
+func nativeActionsCacheRow(cfg config.ActionsCacheConfig) cacheRow {
+	row := cacheRow{Store: "actions-cache-v2", Filesystem: cfg.DataDir,
+		Policy: fmt.Sprintf("budget=%s idle=%dd", bytesize.Format(uint64(cfg.MaxSizeBytes)), cfg.EffectiveMaxIdleDays())}
+	stats, err := actionscache.ReadStoreStats(context.Background(), cfg.DataDir)
+	if err != nil {
+		row.MeasureError = fmt.Sprintf("measure: %v", err)
+	} else {
+		row.SizeBytes, row.Entries = uint64(stats.Bytes), stats.Entries
+		row.Policy = fmt.Sprintf("entries=%d %s", stats.Entries, row.Policy)
+	}
+	if fs, err := diskguard.StatFor(cfg.DataDir); err != nil {
+		if row.MeasureError != "" {
+			row.MeasureError += "; "
+		}
+		row.MeasureError += fmt.Sprintf("stat filesystem: %v", err)
+	} else if fs.TotalBytes > 0 {
+		row.FSFreePercent = float64(fs.FreeBytes) / float64(fs.TotalBytes) * 100
+	}
+	return row
 }
 
 // hardcodedZeroMeasureStores lists the CacheStore.Name() values whose
@@ -232,6 +255,15 @@ func runCache(cmd *cobra.Command, args []string) error {
 
 	stores := buildCacheStores(scaleSets, dockerClients, logger)
 	rows := buildCacheRows(stores)
+	if cfg.ActionsCache.Enabled {
+		rows = append(rows, nativeActionsCacheRow(cfg.ActionsCache))
+		sort.Slice(rows, func(i, j int) bool {
+			if rows[i].Filesystem != rows[j].Filesystem {
+				return rows[i].Filesystem < rows[j].Filesystem
+			}
+			return rows[i].Store < rows[j].Store
+		})
+	}
 
 	if jsonOutput {
 		data, err := json.MarshalIndent(rows, "", "  ")

@@ -258,6 +258,33 @@ simply clearing the endpoint and resuming unchanged actions enables GitHub
 caching again. An empty override is configuration behavior, not a local-only
 rollback procedure.
 
+### Native Go receiver (development branch)
+
+The manager can host an opt-in cache-v2 receiver on a separate private listener.
+This feature has not passed the signed-job/canary gates and is not a replacement
+for the running Rust service. The global table is not inherited by scale sets:
+
+```toml
+[actions-cache]
+enabled = true
+listen-address = "172.18.0.1:32500"
+advertise-url = "http://cache.internal:32500/"
+data-dir = "/var/lib/runner/native-actions-cache"
+max-size-bytes = 53687091200
+max-idle-days = 30
+# audiences = ["an-exact-verified-runtime-audience"]
+```
+
+Use an actual private host IP for `listen-address` and a URL reachable from
+both runner and sibling BuildKit containers. The directory must be new, private,
+and separate from the Rust volume. The receiver uses GitHub's token issuer/JWKS
+and Results upstream by default. `token-issuer` and `jwks-url` may be set together
+for a trusted HTTPS issuer; `upstream-results-url` is a fixed HTTPS origin.
+There is no token-validation bypass. The existing `docker.actions-cache-url` must
+match `advertise-url` only for a scale set selected for native cache. Other scale
+sets retain their configured endpoint. `runner status --json` and `runner cache`
+report native readiness and completed bytes when enabled.
+
 ## GitHub App Authentication
 
 GitHub App authentication is supported for organization and repository runners.

@@ -101,6 +101,7 @@ type Verifier struct {
 	keys               map[string]*rsa.PublicKey
 	fetched            time.Time
 	lastUnknownRefresh time.Time
+	lastRefreshFailure time.Time
 }
 
 func NewVerifier(cfg VerifierConfig) (*Verifier, error) {
@@ -157,9 +158,14 @@ func (v *Verifier) keyFor(ctx context.Context, kid string) (*rsa.PublicKey, erro
 		}
 		v.lastUnknownRefresh = time.Now()
 	}
+	if time.Since(v.lastRefreshFailure) < 30*time.Second {
+		return nil, errors.New("JWKS temporarily unavailable")
+	}
 	if err := v.refresh(ctx); err != nil {
+		v.lastRefreshFailure = time.Now()
 		return nil, err
 	}
+	v.lastRefreshFailure = time.Time{}
 	key := v.keys[kid]
 	if key == nil {
 		return nil, errors.New("unknown key ID")

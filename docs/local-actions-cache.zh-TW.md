@@ -145,3 +145,19 @@ v10 是單向遷移：比 v9.10 更舊的資料庫會被刪除並清空 storage�
 直接清空端點後恢復原 cache action，會重新將 payload 傳到 GitHub。除非操作者
 明確選擇已審閱、略過所有相關 cache 操作的 workflow，否則維持 canary 工作暫停。
 本次未驗證適用於所有 helper 的停用配方，因此不提供自動復跑路徑。
+
+## 原生 Go 接收器開發狀態
+
+可選用的原生接收器位於 manager 程序內，使用獨立私有連接埠與全新資料目錄。
+它根據已驗證 token 的 repository／scope 授權，完成後的 key 不可覆蓋，
+依序提交 Azure block，並發出有期限的本機 payload URL。SQLite 與私有檔案
+一起保存資料；非 cache 的 Results 請求仍轉送至固定 GitHub 上游供 artifact
+使用。正常 drain 期間 listener 保持運作。備份或還原時，須先停止 manager，
+並把整個原生目錄中的資料庫、WAL、物件及 capability key 一起處理。
+`runner status --json` 回報就緒狀態；`runner cache` 唯讀查詢已完成的項目數與容量。
+
+目前 Rust 服務與資料仍是正式回復端點。既有 runner fork 對舊版 v1 client
+仍提供 GitHub 的 `ACTIONS_CACHE_URL`；要宣稱所有 cache payload 都留在本機，
+還須另行驗證並固定一版拒絕 v1 外送的 runner 映像。原生協定測試不能取代
+真實簽名 client 驗收；actions/cache、語言 helper、BuildKit、artifact、重啟與
+上游故障 gate 通過前，不切換主機。

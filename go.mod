@@ -9,6 +9,7 @@ require (
 	github.com/charmbracelet/colorprofile v0.4.3
 	github.com/containerd/errdefs v1.0.0
 	github.com/go-viper/mapstructure/v2 v2.5.0
+	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/uuid v1.6.0
 	github.com/moby/moby/api v1.56.1
 	github.com/moby/moby/client v0.6.2
@@ -19,6 +20,7 @@ require (
 	github.com/spf13/viper v1.21.0
 	golang.org/x/sys v0.50.0
 	golang.org/x/term v0.47.0
+	google.golang.org/protobuf v1.36.12
 )
 
 require (
@@ -41,7 +43,6 @@ require (
 	github.com/go-logfmt/logfmt v0.6.1 // indirect
 	github.com/go-logr/logr v1.4.4 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
-	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/lucasb-eyer/go-colorful v1.4.1 // indirect
 	github.com/mattn/go-runewidth v0.0.31 // indirect

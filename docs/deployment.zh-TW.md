@@ -106,3 +106,11 @@ ReadWritePaths=/tmp /var/lib/runner /var/log/runner
 [Install]
 WantedBy=multi-user.target
 ```
+
+## 主機本機 Actions 快取部署
+
+選用的[本機快取操作手冊](local-actions-cache.zh-TW.md) 說明獨立服務／資料 volume、
+固定 digest 的 runner 變體、核准後的 canary 與回復。Manager 設定變更需要維護重啟；
+不支援熱載入、各 scale set 停用開關，也不可另啟第二個 manager 繞過主機鎖。
+保留其他 entry，重啟前確認執行中版本的 drain 行為與服務停止期限。Runner／doctor
+清理會保留外部快取資料 volume，不將它視為可清空的 job 快取。

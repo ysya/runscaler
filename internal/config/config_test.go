@@ -1,6 +1,7 @@
 package config
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -846,5 +847,38 @@ func TestValidateGlobal_RejectsInvalidDisk(t *testing.T) {
 	err := cfg.ValidateGlobal()
 	if err == nil || !contains(err.Error(), "min-free must be less than target-free") {
 		t.Errorf("ValidateGlobal() = %v, want min-free/target-free error", err)
+	}
+}
+
+func TestActionsCacheURLValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name, value string
+		valid       bool
+	}{
+		{"disabled", "", true}, {"http", "http://192.168.50.10:3000/", true},
+		{"https path", "https://cache.example/cache/", true}, {"ipv6", "http://[fd00::1]:3000/", true},
+		{"case insensitive scheme", "HTTPS://cache.example/", true},
+		{"relative", "cache/", false}, {"scheme relative", "//cache/", false},
+		{"missing host", "http:///", false}, {"missing hostname", "http://:3000/", false}, {"missing slash", "http://cache.example", false},
+		{"userinfo", "http://user:do-not-echo-this@cache.example/", false}, {"empty userinfo", "http://@cache.example/", false},
+		{"query", "http://cache.example/?token=do-not-echo-this", false}, {"empty query", "http://cache.example/?", false},
+		{"fragment", "http://cache.example/#section/", false}, {"empty fragment", "http://cache.example/#", false},
+		{"unsupported scheme", "ftp://cache.example/", false}, {"opaque", "http:cache/", false},
+		{"malformed credential URL", "http://user:do-not-echo-this@%zz/", false}, {"invalid port", "http://cache.example:bad/", false},
+		{"whitespace", " http://cache.example/", false}, {"newline", "http://cache.example/\n", false},
+		{"encoded final slash", "http://cache.example/cache%2F", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := validScaleSetConfig()
+			cfg.Docker.ActionsCacheURL = tc.value
+			for _, err := range []error{validateActionsCacheURL(tc.value), cfg.Validate()} {
+				if (err == nil) != tc.valid {
+					t.Fatalf("valid=%v, err=%v", tc.valid, err)
+				}
+				if err != nil && strings.Contains(err.Error(), "do-not-echo-this") {
+					t.Fatal("validation leaked credential-bearing URL")
+				}
+			}
+		})
 	}
 }

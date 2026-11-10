@@ -30,7 +30,8 @@ docker pull ghcr.io/ysya/actions-runner:latest
 
 ## Architectures
 
-`linux/amd64` and `linux/arm64` are both supported via multi-platform build.
+`linux/amd64` and `linux/arm64` are both supported by the standard image.
+The opt-in local Actions cache variant currently supports **linux/amd64 only**.
 
 ## Environment variables
 
@@ -53,3 +54,37 @@ The image includes `sdkmanager` on `PATH`. You can install additional components
 ```bash
 docker build -t actions-runner:latest images/actions-runner/
 ```
+
+## Opt-in host-local Actions cache variant
+
+The standard build still defaults to the official digest-pinned runner and
+`LOCAL_ACTIONS_CACHE=0`. It does not contain a valid local-cache capability
+manifest or installed checker. The optional cache variant uses the separately
+accepted fork digest; [compatibility evidence](../../docs/local-actions-cache-compatibility.md)
+records the actual source/binary differences and supported client revisions.
+
+`RUNNER_BASE_IMAGE` selects the base. `LOCAL_ACTIONS_CACHE=1` accepts only the
+specific gate-approved base and assembly checksums; a stock/arbitrary base fails
+the independent `local-cache-contract` stage. Its manifest and checker are copied
+into the final image after the existing toolchain layers. Modified assemblies,
+missing metadata or a missing endpoint fail before the listener starts. The
+checker makes no network request and does not require a healthy server.
+
+The manual **Build Local Cache Runner Image** workflow validates without
+publishing by default. Explicit `publish=true` writes only the separate
+`actions-runner-local-cache` package, a unique source/run/attempt/platform tag,
+and its own registry build cache. It never replaces the standard `latest` tag.
+Image construction remains GitHub-hosted; the registry build cache is separate
+from self-hosted job caches. Binary caching in setup-buildx and build-record
+artifact upload are disabled in this workflow.
+
+Inspect the published digest/attestation before using it in `runner-image`.
+Do not configure the bare fork base as the final Runscaler cache image. Only the
+verified variant installs `/usr/local/bin/runner-local-cache-check` and
+`/usr/local/share/runscaler/local-actions-cache.manifest`.
+
+The fork blocks runner self-update while `CUSTOM_ACTIONS_RESULTS_URL` is set.
+For runner upgrades, repeat the compatibility gate and update the base, accepted
+assembly hashes and manifest together. Do not bless a new version by generating
+fresh hashes from unreviewed binaries. Linux arm64 remains gated independently.
+See [operator setup and rollback](../../docs/local-actions-cache.md).

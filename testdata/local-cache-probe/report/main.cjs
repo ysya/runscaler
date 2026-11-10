@@ -1,0 +1,13 @@
+const assert = require('node:assert/strict');
+const expected = process.env.CUSTOM_ACTIONS_RESULTS_URL;
+assert.ok(expected && process.env.ACTIONS_RESULTS_URL === expected, 'explicit local Results endpoint required');
+assert.equal(String(process.env.ACTIONS_CACHE_SERVICE_V2).toLowerCase(), 'true');
+assert.ok(process.env.ACTIONS_RUNTIME_TOKEN, 'runtime token required');
+if (process.env.PROBE_SCENARIO === 'outage') assert.equal(process.env.PROBE_PHASE, 'cold', 'outage acceptance requires a cold phase');
+const fs = require('node:fs');
+const path = require('node:path');
+const file = path.join(process.env.RUNNER_TEMP, 'runscaler-cache-metrics.jsonl');
+const started = Date.now();
+fs.writeFileSync(file, '');
+fs.appendFileSync(process.env.GITHUB_ENV, `CACHE_OBSERVER_FILE=${file}\nEXPECTED_CACHE_URL=${expected}\n`);
+fs.appendFileSync(process.env.GITHUB_STATE, `started=${started}\n`);

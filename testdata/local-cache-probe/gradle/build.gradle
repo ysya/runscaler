@@ -1,0 +1,2 @@
+plugins { id 'java'; id 'application' }
+application { mainClass = 'Probe' }

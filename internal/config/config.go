@@ -111,6 +111,10 @@ type DockerConfig struct {
 	PidsLimit    int64          `mapstructure:"pids-limit"` // Max pids (processes + threads) per container (0 = unlimited)
 	Platform     string         `mapstructure:"platform"`   // e.g. "linux/amd64" to force architecture
 
+	// ActionsCacheURL opts this scale set into a verified local-cache runner image.
+	// Empty disables the override; a stock runner image is not sufficient.
+	ActionsCacheURL string `mapstructure:"actions-cache-url"`
+
 	// Network is the name of a pre-existing Docker network to attach runner
 	// containers to ("" = the daemon's default bridge). Lets operators isolate
 	// runners from the rest of the host network, e.g.
@@ -562,6 +566,9 @@ func (ss *ScaleSetConfig) Validate() error {
 
 	switch ss.Provider {
 	case DefaultProvider:
+		if err := validateActionsCacheURL(ss.Docker.ActionsCacheURL); err != nil {
+			return err
+		}
 		if ss.Docker.Platform != "" {
 			parts := strings.Split(ss.Docker.Platform, "/")
 			if (len(parts) != 2 && len(parts) != 3) || parts[0] == "" || parts[1] == "" || (len(parts) == 3 && parts[2] == "") {

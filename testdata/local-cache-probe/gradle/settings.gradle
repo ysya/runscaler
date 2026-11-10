@@ -1,0 +1,2 @@
+rootProject.name = 'runscaler-cache-probe'
+buildCache { local { enabled = true } }

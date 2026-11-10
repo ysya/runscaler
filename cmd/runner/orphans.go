@@ -12,10 +12,9 @@ import (
 )
 
 // containerAPI is the slice of the Docker client that orphan reconciliation
-// needs: listing and force-removing containers.
+// needs for discovery: listing containers.
 type containerAPI interface {
 	ContainerList(ctx context.Context, options dockerclient.ContainerListOptions) (dockerclient.ContainerListResult, error)
-	ContainerRemove(ctx context.Context, containerID string, options dockerclient.ContainerRemoveOptions) (dockerclient.ContainerRemoveResult, error)
 }
 
 // OrphanContainer is a container runner created that no live process is
@@ -69,14 +68,15 @@ func containerDisplayName(c container.Summary) string {
 	return c.ID
 }
 
-// removeOrphanContainers force-removes each orphan and returns how many were
-// removed. A failure on one container is logged and does not stop the rest —
+// removeOrphanContainers removes each orphan and its explicitly owned child
+// resources, returning the number of runners fully removed. A failure on one
+// container is logged and does not stop the rest —
 // a leftover container is a smaller problem than aborting the sweep, and
 // later this also runs during startup reconciliation, where refusing to
 // start would be worse still.
-func removeOrphanContainers(ctx context.Context, client containerAPI, orphans []OrphanContainer, logger *slog.Logger) (removed int) {
+func removeOrphanContainers(ctx context.Context, client provider.RunnerCleanupAPI, orphans []OrphanContainer, logger *slog.Logger) (removed int) {
 	for _, o := range orphans {
-		if _, err := client.ContainerRemove(ctx, o.ID, dockerclient.ContainerRemoveOptions{Force: true}); err != nil {
+		if err := provider.RemoveRunnerContainer(ctx, client, o.ID, logger); err != nil {
 			logger.Warn("Failed to remove orphaned container",
 				slog.String("container", o.Name),
 				slog.String("id", o.ID),

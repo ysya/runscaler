@@ -2,7 +2,8 @@
 // Generates disposable RSA keys in memory; never prints tokens or signed URLs.
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, randomUUID, sign, createHash } from 'node:crypto';
-import { createServer } from 'node:http';
+import { createServer, request as httpRequest } from 'node:http';
+import { request as httpsRequest } from 'node:https';
 
 const base = process.env.PROBE_CACHE_URL ?? 'http://gate-server:3000/';
 const issuer = process.env.PROBE_ISSUER_URL ?? 'http://gate-client:4080';
@@ -15,6 +16,7 @@ const version = 'runscaler-protocol-fixture-v1';
 const payload = Buffer.from(Array.from({ length: 300000 }, (_, i) => i % 251));
 let artifactRequests = 0;
 let busy = false;
+const cancelledKeys = [];
 
 function token(overrides = {}, signingKey = privateKey) {
   const now = Math.floor(Date.now() / 1000);
@@ -41,8 +43,53 @@ function localPayloadURL(value) {
   assert.equal(url.origin, new URL(base).origin, 'payload must stay on the configured local origin');
   return url;
 }
+async function assertCancelledUploadsHidden() {
+  assert.ok(cancelledKeys.length > 0, 'cancelled upload must have been exercised');
+  for (const cancelledKey of cancelledKeys) {
+    assert.equal((await lookup(token(), cancelledKey)).ok, false, 'cancelled exact key must miss');
+    assert.equal((await lookup(token(), 'missing-cancelled-primary', [cancelledKey])).ok, false,
+      'cancelled prefix must miss');
+  }
+}
+async function cancelUpload() {
+  const cancelledKey = 'runscaler-cancelled-' + randomUUID();
+  const reserved = await rpc('CreateCacheEntry', { key: cancelledKey, version });
+  assert.equal(reserved.status, 200, 'reserve cancellation fixture');
+  const entry = await reserved.json(); assert.equal(entry.ok, true, 'reserve succeeds');
+  const upload = localPayloadURL(entry.signed_upload_url);
+  const block = new URL(upload); block.searchParams.set('comp', 'block');
+  block.searchParams.set('blockid', Buffer.from(randomUUID() + '000000000000').toString('base64'));
+  const staged = await fetch(block, { method: 'PUT', body: payload.subarray(0, 65536), redirect: 'error' });
+  assert.equal(staged.status, 201, 'first block staged'); await staged.arrayBuffer();
+  block.searchParams.set('blockid', Buffer.from(randomUUID() + '000000000001').toString('base64'));
+  // Send part of a declared block, then terminate its socket without end/commit/finalize.
+  await new Promise((resolve, reject) => {
+    let cancelled = false;
+    const request = (block.protocol === 'https:' ? httpsRequest : httpRequest)(block, {
+      method: 'PUT', agent: false, headers: { 'content-length': '65536' },
+    });
+    request.setTimeout(3000, () => request.destroy(new Error('cancellation fixture timed out')));
+    request.on('response', response => { response.resume(); reject(new Error('partial block unexpectedly completed')); });
+    request.on('error', error => {
+      if (cancelled && error.message === 'controlled upload cancellation') resolve(); else reject(error);
+    });
+    request.write(payload.subarray(0, 4096), error => {
+      if (error) { reject(error); return; }
+      setTimeout(() => { cancelled = true; request.destroy(new Error('controlled upload cancellation')); }, 100);
+    });
+  });
+  cancelledKeys.push(cancelledKey);
+  await assertCancelledUploadsHidden();
+  return ['complete block staged', 'next block socket cancelled after partial write',
+    'unfinalized exact/prefix restores: miss'];
+}
 async function run(phase) {
   const started = performance.now();
+  if (phase === 'cancellation' || phase === 'cancellation-restore') {
+    const results = phase === 'cancellation' ? await cancelUpload() :
+      (await assertCancelledUploadsHidden(), ['cancelled exact/prefix restores after recreation: miss']);
+    return { schema: 1, phase, ms: Math.round(performance.now() - started), results };
+  }
   if (phase === 'roundtrip') key = 'runscaler-controlled-' + randomUUID();
   const results = [];
   const body = { key, version };

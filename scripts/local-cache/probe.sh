@@ -142,13 +142,15 @@ if $execute; then
     }
     start_server
     fixture roundtrip
+    fixture cancellation
     case "$suite" in
         lifecycle)
             d stop "$server" >/dev/null
             [[ $(d inspect --format "$container_owner_format" "$server") == "$prefix" ]] || fail 'server ownership changed'
             d rm "$server" >/dev/null
             start_server
-            fixture restore ;;
+            fixture restore
+            fixture cancellation-restore ;;
         benchmark)
             # Protocol timings are not language build/client benchmarks.
             for pair in 1 2 3; do

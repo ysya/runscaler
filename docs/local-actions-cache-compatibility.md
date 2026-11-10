@@ -396,3 +396,15 @@ on a fresh JIT runner and checked exact bytes. The standard actions/cache
 post-save/restore and artifact upload/download also passed in these jobs.
 The container fixture explicitly enables v2 and calls its write helper from
 post-entrypoint; endpoint/authentication checks alone are not evidence of a save.
+
+### Interrupted upload acceptance
+
+The controlled-auth lifecycle suite also passed an actual partial HTTP upload
+cancellation on the pinned amd64 service. It staged one complete block, wrote
+4 KiB of a second declared 64-KiB block, and destroyed that request's socket
+without ending the body, committing blocks or finalizing the cache entry. Exact
+and prefix lookups both missed immediately and after service recreation on the
+same data volume; the independently finalized payload still restored with its
+original checksum. This verifies invisibility of the unfinished entry, not
+immediate reclamation of temporary disk space or every action's cancellation
+handler. The explicit probe lifecycle suite reproduces these assertions.

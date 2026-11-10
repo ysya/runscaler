@@ -212,8 +212,10 @@ service container was pruned and recreated against the external volume.
 
 ## Remaining acceptance work
 
-- Go, Node package-manager, Gradle basic and Rust workload fixtures and revisions.
-- Workload client acceptance, outage/cancellation/concurrency and measured traffic/timings.
+The isolated language-client, outage, concurrency, post-handler and partial-upload
+cancellation checks are complete; the dated results below record their scope
+and measurements. Remaining promotion work is:
+
 - Publication/inspection of the final immutable image and operator rollout approval.
 - Linux arm64 runtime/handler/client parity. Do not imply it from the OCI index.
 - Actual deployment address, disk budget and operator-reviewed download capability limitation.

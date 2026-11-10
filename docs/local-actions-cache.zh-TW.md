@@ -156,6 +156,16 @@ v10 是單向遷移：比 v9.10 更舊的資料庫會被刪除並清空 storage�
 並把整個原生目錄中的資料庫、WAL、物件及 capability key 一起處理。
 `runner status --json` 回報就緒狀態；`runner cache` 唯讀查詢已完成的項目數與容量。
 
+本機協定驗證需安裝 Node.js，然後執行：
+
+```sh
+RUNSCALER_NATIVE_FIXTURE=1 go test -race ./internal/actionscache -run '^TestNativeProtocolFixture$' -count=1
+```
+
+此測試只在 loopback 啟動一次性的 issuer 與 cache HTTP listener，檢查授權後的
+分塊上傳、逐位元組還原、取消、重新開啟 store，以及受控的 artifact 轉送。
+它不註冊 runner，也不證明真實 GitHub 簽名 job 的相容性。
+
 目前 Rust 服務與資料仍是正式回復端點。既有 runner fork 對舊版 v1 client
 仍提供 GitHub 的 `ACTIONS_CACHE_URL`；要宣稱所有 cache payload 都留在本機，
 還須另行驗證並固定一版拒絕 v1 外送的 runner 映像。原生協定測試不能取代

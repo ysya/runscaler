@@ -193,6 +193,17 @@ manager is stopped; the database, WAL, objects, and capability key belong
 together. `runner status --json` reports readiness and `runner cache` reads
 completed-entry counts/bytes without creating a missing store.
 
+For local protocol verification, install Node.js and run:
+
+```sh
+RUNSCALER_NATIVE_FIXTURE=1 go test -race ./internal/actionscache -run '^TestNativeProtocolFixture$' -count=1
+```
+
+This starts only a disposable issuer and cache HTTP listener on loopback. It
+checks authenticated block uploads, exact-byte restore, cancellation, store
+reopen, and controlled artifact passthrough. It does not register a runner or
+prove compatibility with signed GitHub jobs.
+
 The Rust service and its data remain the live rollback endpoint. The existing
 runner fork still gives legacy v1 clients GitHub's `ACTIONS_CACHE_URL`; a new
 verified and pinned fail-closed image is required before promising that *all*

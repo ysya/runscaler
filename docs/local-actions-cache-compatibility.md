@@ -216,7 +216,7 @@ The isolated language-client, outage, concurrency, post-handler and partial-uplo
 cancellation checks are complete; the dated results below record their scope
 and measurements. Remaining promotion work is:
 
-- Publication/inspection of the final immutable image and operator rollout approval.
+- Host-specific provider-managed canary, maintenance restart and recovery validation before expansion. The assembled amd64 image is already published; see below.
 - Linux arm64 runtime/handler/client parity. Do not imply it from the OCI index.
 - Actual deployment address, disk budget and operator-reviewed download capability limitation.
 
@@ -224,6 +224,28 @@ Legacy v1 clients remain unsupported. A shell command does not automatically
 receive Node-action runtime exports. Do not promise transparent support for
 arbitrary existing actions or shell scripts. There is no approved cloud-cache
 fallback or cloud baseline upload.
+
+## Published assembled image and current server semantics (2026-11-11)
+
+The assembled Linux amd64 image is published at
+`ghcr.io/ysya/actions-runner-local-cache@sha256:ce94d981fbd73f15788bf98af0055d8ccea29a50932484e50c962c67cd45d577`.
+Anonymous registry reads and strict GitHub build-provenance verification passed
+against source `5cab9dff768d5974e4ae59da416ae9a1a585ad2d` and the cache-image workflow.
+Publication is separate from each host's rollout acceptance.
+
+A supplemental isolated test used different 1 MiB payloads for the same cache
+identity while reading concurrently: three saves completed, four reservations
+were rejected, and 35 successful reads each matched one entire known payload.
+No mixed or partial payload was observed. Auth negatives, repository/branch
+isolation, controlled Results passthrough and interrupted-upload invisibility
+also passed in that fixture. These are scoped results, not an immutable-key or
+universal concurrency guarantee.
+
+The v10 source explicitly supports replacement of completed entries; its upload
+reservation only excludes concurrent in-progress uploads. A transactional
+promotion replaces the published storage location. Unlike GitHub cache keys,
+completed entries are therefore mutable, and a stale download capability can
+return 404 after replacement. See [operator implications](local-actions-cache.md#cache-semantics).
 
 ## Read-only probe
 
@@ -387,7 +409,7 @@ The service/data ownership boundary also passed normal/orphan cleanup tests.
   full application CI is faster. Tool installation and package-registry
   metadata traffic remain outside cache payload routing.
 - Full assembled-image live acceptance, production filesystem measurements,
-  operator-approved endpoint/budget, image publication and rollout remain gated.
+  operator-approved endpoint/budget and rollout remain per-host gates.
   No existing host scale set or business CI configuration was changed.
 
 ### Post-handler payload retest

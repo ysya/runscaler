@@ -1,18 +1,45 @@
 # Host-local Actions cache
 
 Run one persistent cache service on the same Linux host as disposable Docker
-runners. Supported cache-v2 clients retain their standard Actions cache keys and
-restore behavior; archive creation/extraction and local HTTP transfers still
-happen. This is not a zero-copy cache.
+runners. Accepted cache-v2 clients keep their existing workflow steps, cache keys and
+restore-key matching. Archive creation/extraction and local HTTP transfers still
+happen. Completed keys can be replaced on this server; see [cache semantics](#cache-semantics).
+This is not a zero-copy cache.
 
 The current compatibility gate covers Linux amd64, the pinned server/runner
 candidates, actions/cache v6.1.0, setup-go, setup-node/npm, Gradle basic,
 Rust GitHub-provider cache, artifact passthrough and BuildKit v2 export/import.
 See [immutable revisions, three-pair measurements and limits](local-actions-cache-compatibility.md).
 The isolated real-job tests, provider guard and full toolchain image build passed.
-This is not production rollout evidence: publication of the assembled image and
-a provider-managed host canary remain gated on operator approval. Arm64 and
-other clients are unverified. The standard runner image is unchanged.
+The assembled Linux amd64 image is published with v0.17.0; each host still needs
+its own provider-managed canary and route/storage validation before expansion.
+Arm64 and other clients are unverified. The standard runner image is unchanged.
+
+## Components and workflow changes
+
+The cache service is the third-party, Rust-based
+[falcondev-oss/github-actions-cache-server](https://github.com/falcondev-oss/github-actions-cache-server),
+not a GitHub-operated service. This bundle uses its filesystem storage and SQLite
+on a persistent volume. The opt-in runner uses an accepted fork of GitHub's runner
+to direct cache-v2 clients to that service. Artifacts remain on GitHub but pass
+through the service; keep the service available for artifact operations too.
+
+For accepted clients already using Actions cache v2, enable the feature centrally
+in Runscaler rather than replacing cache actions across repositories. This does
+not add caching to workflows that have no cache steps, redirect registry/S3 cache
+backends, or establish compatibility with every third-party helper.
+
+Use Runscaler v0.17.0 or later and the separately published cache-capable image:
+
+```text
+ghcr.io/ysya/actions-runner-local-cache@sha256:ce94d981fbd73f15788bf98af0055d8ccea29a50932484e50c962c67cd45d577
+```
+
+The ordinary `actions-runner` package and the `actions-runner-local-cache` package
+share a Dockerfile, but have different runner sources and architecture support.
+Version/source tags identify builds; deploy a reviewed immutable digest. The
+cache workflow currently publishes a source/run/attempt tag, not a `latest`,
+`stable-amd64`, or release-version alias.
 
 ## Ownership and storage
 
@@ -126,6 +153,23 @@ continuing builds; the artifact action failed. Docker's optional export required
 asserted that an invalid build failed. This does not promise arbitrary cache
 imports or other clients tolerate outages. No automatic cloud fallback exists.
 
+## Cache semantics
+
+The pinned v10 server reserves a key/version/repository/scope identity while an
+upload is in progress and rejects competing reservations. Once that upload is
+complete, a later upload of the same identity can replace the entry. Promotion
+updates the published entry in a database transaction; it is not GitHub's
+[immutable-cache-key contract](https://docs.github.com/en/actions/reference/workflows-and-actions/dependency-caching).
+Do not interpret several successful same-key saves as proof that payload bytes
+were mixed, or assume the first writer will remain the winner.
+
+An isolated test with distinct payloads verified complete-version reads during
+replacement. This does not guarantee every timing or preserve an old download
+capability after replacement: a previously resolved URL may return 404. Keep
+cache keys scoped by toolchain, lockfile, platform and compatible workload, and
+use artifacts for outputs required by another job. The cache is reclaimable
+build data, not a required handoff store.
+
 ## Download capabilities, backup and rollback
 
 For filesystem storage, returned `/download/<UUIDv4>` paths are bearer
@@ -160,7 +204,7 @@ limit cannot accommodate the new default two-hour drain. See
 [service deadline handling](deployment.md#graceful-shutdown).
 Never force-kill business jobs to finish rollout.
 
-After explicit deployment approval, publish the separately tagged amd64 image,
+After explicit deployment approval, select the published amd64 image,
 verify its digest/attestation, start the independent service and append a
 dedicated canary entry with a unique label and one-runner maximum. Disable
 overlapping shared writable language-cache mounts without deleting their data.

@@ -57,6 +57,27 @@ docker build -t actions-runner:latest images/actions-runner/
 
 ## Opt-in host-local Actions cache variant
 
+| Package | Runner source | Supported execution platforms |
+|---|---|---|
+| `ghcr.io/ysya/actions-runner` | Official GitHub runner plus toolchains | Linux amd64, arm64 |
+| `ghcr.io/ysya/actions-runner-local-cache` | Accepted runner fork plus the same toolchains and capability check | Linux amd64 only |
+
+Both variants share this Dockerfile. The cache variant requires a separately
+operated third-party Rust cache service; it is not a GitHub-provided cache server.
+Accepted existing cache-v2 workflow steps can stay unchanged when the endpoint
+is configured centrally. See the [service setup and semantic limits](../../docs/local-actions-cache.md).
+
+The published v0.17.0 cache image is:
+
+```text
+ghcr.io/ysya/actions-runner-local-cache@sha256:ce94d981fbd73f15788bf98af0055d8ccea29a50932484e50c962c67cd45d577
+```
+
+Use the digest for deployment. The workflow's source/run/attempt tag is available
+for build identification; release-version and stable aliases are not currently
+published. The standard package's `latest` tag continues to select the ordinary
+image.
+
 The standard build still defaults to the official digest-pinned runner and
 `LOCAL_ACTIONS_CACHE=0`. It does not contain a valid local-cache capability
 manifest or installed checker. The optional cache variant uses the separately

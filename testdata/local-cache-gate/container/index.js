@@ -1,4 +1,5 @@
 const assert = require('node:assert/strict');
+let stage = 'runtime check';
 (async () => {
   const expected = process.env.EXPECTED_CACHE_URL;
   assert.ok(expected, 'verified endpoint required');
@@ -13,9 +14,16 @@ const assert = require('node:assert/strict');
   assert.equal(response.status, 200, 'container runtime authentication');
   assert.equal((await response.json()).ok, false, 'random container key must miss');
   if (process.argv[2] === 'post' && process.env.PROBE_POST_CACHE_KIND) {
-    await require(require('node:path').resolve('testdata/local-cache-gate/node/post-cache.js')).savePost(
+    stage = 'post cache save';
+    await require('./post-cache.js').savePost(
       process.env.PROBE_POST_CACHE_KIND, { endpoint: expected, token: process.env.ACTIONS_RUNTIME_TOKEN,
         runId: process.env.GITHUB_RUN_ID, attempt: process.env.GITHUB_RUN_ATTEMPT });
   }
   console.log('container Results endpoint and runtime authentication verified');
-})().catch(() => { console.error('Local cache container gate failed.'); process.exitCode = 1; });
+})().catch((error) => {
+  const detail = error instanceof assert.AssertionError
+    ? error.message
+    : [error?.name, error?.code, error?.cause?.code].filter(Boolean).join('/');
+  console.error('Local cache container gate failed at ' + stage + ': ' + detail);
+  process.exitCode = 1;
+});

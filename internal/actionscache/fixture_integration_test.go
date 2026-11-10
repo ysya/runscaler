@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -44,7 +45,8 @@ func TestNativeProtocolFixture(t *testing.T) {
 	}
 	cacheURL := "http://" + cacheListener.Addr().String()
 
-	store, err := OpenStore(filepath.Join(t.TempDir(), "native"))
+	storeDir := filepath.Join(t.TempDir(), "native")
+	store, err := OpenStore(storeDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,24 +57,33 @@ func TestNativeProtocolFixture(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler, err := NewHandler(HandlerConfig{
-		Store: store, Verifier: verifier, BaseURL: cacheURL + "/",
-		UpstreamURL: "https://results.example", UpstreamTransport: transportFunc(func(r *http.Request) (*http.Response, error) {
-			if r.URL.Host != "results.example" {
-				return nil, fmt.Errorf("unexpected upstream %q", r.URL.Host)
-			}
-			forward := r.Clone(r.Context())
-			forward.URL.Scheme = parsedIssuer.Scheme
-			forward.URL.Host = parsedIssuer.Host
-			forward.Host = parsedIssuer.Host
-			return http.DefaultTransport.RoundTrip(forward)
-		}),
-		MaxSizeBytes: 32 << 20, MaxIdle: 24 * time.Hour,
+	upstreamTransport := transportFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Host != "results.example" {
+			return nil, fmt.Errorf("unexpected upstream %q", r.URL.Host)
+		}
+		forward := r.Clone(r.Context())
+		forward.URL.Scheme = parsedIssuer.Scheme
+		forward.URL.Host = parsedIssuer.Host
+		forward.Host = parsedIssuer.Host
+		return http.DefaultTransport.RoundTrip(forward)
 	})
-	if err != nil {
-		t.Fatal(err)
+	newHandler := func(current *Store) *cacheHandler {
+		t.Helper()
+		handler, err := NewHandler(HandlerConfig{
+			Store: current, Verifier: verifier, BaseURL: cacheURL + "/",
+			UpstreamURL: "https://results.example", UpstreamTransport: upstreamTransport,
+			MaxSizeBytes: 32 << 20, MaxIdle: 24 * time.Hour,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return handler.(*cacheHandler)
 	}
-	cacheServer := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second}
+	var active atomic.Pointer[cacheHandler]
+	active.Store(newHandler(store))
+	cacheServer := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		active.Load().ServeHTTP(w, r)
+	}), ReadHeaderTimeout: 5 * time.Second}
 	go func() { _ = cacheServer.Serve(cacheListener) }()
 	t.Cleanup(func() { _ = cacheServer.Close() })
 
@@ -115,7 +126,8 @@ func TestNativeProtocolFixture(t *testing.T) {
 		content, _ := os.ReadFile(logFile.Name())
 		t.Fatalf("fixture did not start: %s", content)
 	}
-	for _, phase := range []string{"roundtrip", "restore", "cancellation", "cancellation-restore"} {
+	runPhase := func(phase string) {
+		t.Helper()
 		input, _ := json.Marshal(map[string]string{"phase": phase})
 		response, err := client.Post(issuerURL+"/run", "application/json", bytes.NewReader(input))
 		if err != nil {
@@ -135,4 +147,16 @@ func TestNativeProtocolFixture(t *testing.T) {
 		}
 		t.Logf("fixture %s: %v", phase, result.Results)
 	}
+	runPhase("roundtrip")
+	runPhase("cancellation")
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = OpenStore(storeDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	active.Store(newHandler(store))
+	runPhase("restore")
+	runPhase("cancellation-restore")
 }

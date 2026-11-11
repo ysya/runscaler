@@ -284,11 +284,11 @@ before switching workflows or deleting old Docker volumes.
 ### Native Go receiver (opt-in)
 
 The manager can host an opt-in cache-v2 receiver on a separate private listener.
-Its [isolated signed-job acceptance](native-actions-cache-v2-acceptance.md)
-and a provider-managed Linux amd64 canary have passed. Each new host still
-needs its own image, endpoint, and workflow validation. Keep the existing Rust
-service and data as a rollback endpoint until its retention is decided. The
-global table is not inherited by scale sets:
+Its isolated signed-job acceptance and a provider-managed Linux amd64 canary
+have passed. Detailed run evidence is kept in private operator notes. Each new
+host still needs its own image, endpoint, and workflow validation. Keep the
+existing Rust service and data as a rollback endpoint until its retention is
+decided. The global table is not inherited by scale sets:
 
 ```toml
 [actions-cache]

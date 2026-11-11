@@ -6,12 +6,12 @@ restore behavior; archive creation/extraction and local HTTP transfers still
 happen. This is not a zero-copy cache.
 
 The [external Rust service compatibility report](local-actions-cache-compatibility.md)
-records the original pinned client/runtime gate. The separate
-[native Go receiver acceptance](native-actions-cache-v2-acceptance.md) records
-the fail-closed runner image, signed client matrix, restart and outage results.
-Both are scoped to Linux amd64 and the listed clients. A provider-managed host
-canary and drain remain separate deployment gates. The standard runner image
-is unchanged.
+records the original pinned client/runtime gate. The native Go receiver also
+passed an isolated signed-job gate covering the fail-closed runner image,
+client matrix, restart, and outage behavior. Detailed run evidence is kept in
+private operator notes. Both gates are scoped to Linux amd64 and the listed
+clients. A provider-managed host canary and drain remain separate deployment
+gates. The standard runner image is unchanged.
 
 ## Ownership and storage
 
@@ -211,6 +211,6 @@ prove compatibility with signed GitHub jobs.
 The Rust service and its data remain the rollback endpoint through cutover.
 The original runner image still gives legacy v1 clients GitHub's
 `ACTIONS_CACHE_URL`; use the verified fail-closed image for native v2 so legacy
-requests are rejected locally. The signed acceptance evidence is recorded
-[separately](native-actions-cache-v2-acceptance.md). Native protocol tests alone
-do not establish real signed-client compatibility.
+requests are rejected locally. Review the private signed-job acceptance record
+before rollout. Native protocol tests alone do not establish real signed-client
+compatibility.

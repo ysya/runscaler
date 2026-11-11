@@ -228,6 +228,9 @@ jobs:
 請在工作排空後修改、驗證設定，再重啟選定服務；這項設定變更不搬移或刪除快取資料。
 舊版 binary 無法偵測其發布後才新增的 sunset 警告，因此更新前仍須閱讀目標版本的
 release notes。
+舊的 `docker.cache-volumes` 與 `[[docker.cache]]` 掛載也在 sunset 期間，
+仍依原有容量設定運作。先把 workflow 遷移至 Actions cache 並驗證熱快取命中，
+再移除掛載或處理舊資料。
 
 歷史更名相容期已結束。後續 release 僅產出 `runner-*` 壓縮檔，不再支援 `migrate` 指令、根指令 `runner --config` 直接啟動、`--backend`、自動搜尋 `runscaler` 設定目錄、舊服務名稱與 `RUNSCALER_TOKEN` 備援。啟動 manager 請使用 `runner run --config /absolute/path/config.toml`。
 

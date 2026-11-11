@@ -208,6 +208,9 @@ and BuildKit containers must be able to reach. Migrate while jobs are drained,
 validate the config, then restart the selected service. This setting change does
 not move or delete cached data. Older binaries cannot report a sunset introduced
 after they were built; read the target release notes before updating.
+Legacy `docker.cache-volumes` and `[[docker.cache]]` mounts are also in their
+sunset period. They remain active with their existing budgets; migrate workflows
+to Actions cache and verify warm hits before removing those mounts or data.
 
 The historical rename transition is retired. Releases contain only `runner-*`
 archives. The `migrate` command, implicit root `runner --config` startup,

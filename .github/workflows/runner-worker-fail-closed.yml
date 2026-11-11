@@ -1,0 +1,62 @@
+name: Build Fail-Closed Cache Runner Worker
+
+on:
+  push:
+    branches: [feat/native-actions-cache-v2-acceptance]
+    paths:
+      - .github/workflows/runner-worker-fail-closed.yml
+      - images/actions-runner/fail-closed-v1.patch
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux-amd64:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Fetch exact reviewed runner source
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_dir="$RUNNER_TEMP/runner-source"
+          git init -q "$source_dir"
+          git -C "$source_dir" remote add origin https://github.com/falcondev-oss/github-actions-runner.git
+          git -C "$source_dir" fetch --depth=1 origin 3efdc9c0d8a5b7a441cba3069b0fdc33d1931adb
+          git -C "$source_dir" checkout --detach FETCH_HEAD
+          test "$(git -C "$source_dir" rev-parse HEAD)" = 3efdc9c0d8a5b7a441cba3069b0fdc33d1931adb
+          git -C "$source_dir" apply --unidiff-zero --check "$GITHUB_WORKSPACE/images/actions-runner/fail-closed-v1.patch"
+          git -C "$source_dir" apply --unidiff-zero "$GITHUB_WORKSPACE/images/actions-runner/fail-closed-v1.patch"
+          git -C "$source_dir" diff --check
+          git -C "$source_dir" diff --name-only > "$RUNNER_TEMP/changed-files"
+          printf '%s\n' \
+            src/Runner.Worker/Handlers/ContainerActionHandler.cs \
+            src/Runner.Worker/Handlers/NodeScriptActionHandler.cs > "$RUNNER_TEMP/expected-files"
+          diff -u "$RUNNER_TEMP/expected-files" "$RUNNER_TEMP/changed-files"
+
+      - name: Build Linux x64 runner layout
+        working-directory: ${{ runner.temp }}/runner-source/src
+        run: ./dev.sh layout Release linux-x64
+
+      - name: Run runner source tests
+        working-directory: ${{ runner.temp }}/runner-source/src
+        run: ./dev.sh test
+
+      - name: Record Worker checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          worker="$RUNNER_TEMP/runner-source/_layout/bin/Runner.Worker.dll"
+          test -s "$worker"
+          sha256sum "$worker"
+          mkdir -p "$RUNNER_TEMP/worker-artifact"
+          cp "$worker" "$RUNNER_TEMP/worker-artifact/Runner.Worker.dll"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: runner-worker-fail-closed-linux-amd64
+          path: ${{ runner.temp }}/worker-artifact/Runner.Worker.dll
+          retention-days: 7

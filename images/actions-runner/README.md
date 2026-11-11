@@ -106,3 +106,5 @@ publishes a run-specific `actions-runner-local-cache` tag and registry
 attestation. Its image checker pins the new Worker, the existing Listener and
 the parent image. Use only the inspected immutable image digest with native v2
 mode; the earlier image does not enforce local-only legacy cache routing.
+See the [native signed-job acceptance](../../docs/native-actions-cache-v2-acceptance.md)
+for the verified digest and scoped client results.

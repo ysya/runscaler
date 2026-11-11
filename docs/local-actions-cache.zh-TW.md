@@ -86,8 +86,9 @@ protocol、source／version、Worker／Listener checksum；缺檔或被修改就
 
 ## Client 使用範圍
 
-僅啟用已驗收的 client 與固定 revision。第一版不支援舊的 v1 client；fork 仍然會
-提供 GitHub 的 `ACTIONS_CACHE_URL`。直接執行 shell 工具時需要明確匯出 runtime
+僅啟用已驗收的 client 與固定 revision。舊的 v1 client 不受支援。原本已驗收的
+映像仍提供 GitHub 的 `ACTIONS_CACHE_URL`；獨立的原生 v2 失效保護映像會將它指向
+本機 receiver，由本機拒絕 v1 請求，不回退到雲端。直接執行 shell 工具時需要明確匯出 runtime
 環境；container handler 未設定 v2 flag 時，也需明確啟用 v2。
 已驗收的 setup-go、setup-node/npm、Gradle basic 與 Rust GitHub provider revision
 列於證據報告；pnpm 與其他 provider 尚未驗證。Rust 還原 crate 後仍可能取得 registry
@@ -166,8 +167,8 @@ RUNSCALER_NATIVE_FIXTURE=1 go test -race ./internal/actionscache -run '^TestNati
 分塊上傳、逐位元組還原、取消、重新開啟 store，以及受控的 artifact 轉送。
 它不註冊 runner，也不證明真實 GitHub 簽名 job 的相容性。
 
-目前 Rust 服務與資料仍是正式回復端點。既有 runner fork 對舊版 v1 client
-仍提供 GitHub 的 `ACTIONS_CACHE_URL`；要宣稱所有 cache payload 都留在本機，
-還須另行驗證並固定一版拒絕 v1 外送的 runner 映像。原生協定測試不能取代
+切換前，Rust 服務與資料仍是正式回復端點。原本 runner 映像對舊版 v1 client
+仍提供 GitHub 的 `ACTIONS_CACHE_URL`；獨立的失效保護映像必須通過真實簽名
+canary 驗收，才能宣稱 cache payload 僅走本機。原生協定測試不能取代
 真實簽名 client 驗收；actions/cache、語言 helper、BuildKit、artifact、重啟與
 上游故障 gate 通過前，不切換主機。

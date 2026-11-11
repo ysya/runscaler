@@ -103,7 +103,9 @@ remain with the service. Empty configuration keeps the original startup behavior
 ## Client boundaries
 
 Use only clients and immutable revisions that passed acceptance. Legacy v1
-clients are unsupported: the fork still supplies GitHub's `ACTIONS_CACHE_URL`.
+clients are unsupported. The original accepted image supplies GitHub's
+`ACTIONS_CACHE_URL`; the separate native v2 fail-closed image points it at the
+local receiver, which rejects legacy v1 requests without a cloud fallback.
 Raw shell tools need explicit runtime exports; container cache-v2 clients need
 an explicit v2 flag if their handler does not set it. The accepted setup-go,
 setup-node/npm, Gradle basic and Rust GitHub-provider revisions are listed in
@@ -204,9 +206,9 @@ checks authenticated block uploads, exact-byte restore, cancellation, store
 reopen, and controlled artifact passthrough. It does not register a runner or
 prove compatibility with signed GitHub jobs.
 
-The Rust service and its data remain the live rollback endpoint. The existing
-runner fork still gives legacy v1 clients GitHub's `ACTIONS_CACHE_URL`; a new
-verified and pinned fail-closed image is required before promising that *all*
-cache payloads stay local. Native protocol tests alone do not establish real
+The Rust service and its data remain the live rollback endpoint until cutover.
+The original runner image still gives legacy v1 clients GitHub's
+`ACTIONS_CACHE_URL`; the separate fail-closed image must pass the signed canary
+gate before claiming local-only cache routing. Native protocol tests alone do not establish real
 signed-client compatibility. Do not switch a host until the separate signed
 actions/cache, language-helper, BuildKit, artifact, restart and outage gates pass.

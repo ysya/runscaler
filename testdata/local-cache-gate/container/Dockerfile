@@ -1,5 +1,5 @@
-FROM ghcr.io/falcondev-oss/actions-runner@sha256:462ebdbc95fabf0bdf264ffe02ff5182665c6d99ac0f870b67d7f649c1ef1746
+FROM docker.io/library/node@sha256:ec318aabf188af4e5488847eea4b24452650b9917140563e140762526a37f1df
 COPY index.js /probe/index.js
 COPY post-cache.js /probe/post-cache.js
 COPY --chmod=755 post.sh /usr/local/bin/post.sh
-ENTRYPOINT ["/home/runner/externals/node24/bin/node", "/probe/index.js"]
+ENTRYPOINT ["node", "/probe/index.js"]

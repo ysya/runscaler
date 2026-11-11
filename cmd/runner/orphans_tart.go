@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"sort"
 
+	"github.com/moby/moby/api/types/container"
 	dockerclient "github.com/moby/moby/client"
 
 	"github.com/ysya/runscaler/internal/provider"
@@ -63,7 +64,9 @@ func removeOrphanTartVMs(ctx context.Context, runner provider.CommandRunner, orp
 // Reconciliation reclaims anonymous and explicitly runner-owned temporary
 // volumes only. Shared/cache volumes outlive the process and may hold data
 // needed by a later job in an in-flight workflow run.
-func reconcileOrphans(ctx context.Context, dockerClients map[string]*dockerclient.Client, tartHomes []string, logger *slog.Logger) {
+func reconcileOrphans(ctx context.Context, dockerClients map[string]*dockerclient.Client, tartHomes []string, logger *slog.Logger, workspaceRoots ...string) {
+	workspacesSafeToRemove := len(dockerClients) > 0
+	var remainingContainers []container.Summary
 	sockets := make([]string, 0, len(dockerClients))
 	for socket := range dockerClients {
 		sockets = append(sockets, socket)
@@ -73,6 +76,7 @@ func reconcileOrphans(ctx context.Context, dockerClients map[string]*dockerclien
 		client := dockerClients[socket]
 		orphans, err := findOrphanContainers(ctx, client)
 		if err != nil {
+			workspacesSafeToRemove = false
 			logger.Warn("Failed to list orphaned Docker containers; continuing startup",
 				slog.String("socket", socket),
 				slog.Any("error", err))
@@ -80,18 +84,35 @@ func reconcileOrphans(ctx context.Context, dockerClients map[string]*dockerclien
 		}
 		if len(orphans) == 0 {
 			logger.Debug("No orphaned Docker containers found", slog.String("socket", socket))
+		} else {
+			names := make([]string, 0, len(orphans))
+			for _, orphan := range orphans {
+				names = append(names, orphan.Name)
+			}
+			removed := removeOrphanContainers(ctx, client, orphans, logger)
+			if removed != len(orphans) {
+				workspacesSafeToRemove = false
+			}
+			logger.Info("Reconciled orphaned Docker containers",
+				slog.String("socket", socket),
+				slog.Int("found", len(orphans)),
+				slog.Int("removed", removed),
+				slog.Any("containers", names))
+		}
+		remaining, err := client.ContainerList(ctx, dockerclient.ContainerListOptions{All: true})
+		if err != nil {
+			workspacesSafeToRemove = false
+			logger.Warn("Failed to inspect Docker mounts before workspace cleanup", slog.String("socket", socket), slog.Any("error", err))
 			continue
 		}
-		names := make([]string, 0, len(orphans))
-		for _, orphan := range orphans {
-			names = append(names, orphan.Name)
+		remainingContainers = append(remainingContainers, remaining.Items...)
+	}
+	if workspacesSafeToRemove {
+		for _, root := range uniqueSortedStrings(workspaceRoots) {
+			if err := provider.CleanupWorkspaceRoot(root, remainingContainers); err != nil {
+				logger.Warn("Failed to remove orphan runner workspaces", slog.String("root", root), slog.Any("error", err))
+			}
 		}
-		removed := removeOrphanContainers(ctx, client, orphans, logger)
-		logger.Info("Reconciled orphaned Docker containers",
-			slog.String("socket", socket),
-			slog.Int("found", len(orphans)),
-			slog.Int("removed", removed),
-			slog.Any("containers", names))
 	}
 
 	for _, home := range uniqueSortedStrings(tartHomes) {

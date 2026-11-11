@@ -35,6 +35,7 @@ health-port = 8080
 [docker]
 socket = "/var/run/docker.sock"
 dind = true
+# workspace-root = "/home/runscaler/runner-workspaces" # Linux: private host directory for Docker workspace binds
 shared-volume = "/shared"
 # shared-volume-max-age = "168h"        # delete shared-volume files older than this; unset = never reclaimed
 # buildx-cleanup = true                 # opt in only on a runner-dedicated daemon
@@ -46,6 +47,17 @@ shared-volume = "/shared"
 # build-cache-max-age = "168h"          # prune build cache entries not used within this window
 # build-cache-budget = 0                # cap daemon build cache to N GB (0 = no cap)
 ```
+
+On a Linux host using the Docker socket, a container action's workspace bind
+otherwise resolves on the host instead of inside its runner container. To
+support those actions, create `workspace-root` as a `0700` directory owned by
+the manager user, then set it in the applicable `[docker]` or
+`[scaleset.docker]` table. The manager gives each runner a private host work
+directory and Unix socket proxy. The proxy translates only Docker container
+bind sources beneath `/home/runner/_work`; the path inside every runner stays
+stable for cache clients. A runner's work directory is removed after its
+containers stop; startup also reclaims directories left by a crashed manager
+after checking for surviving Docker mounts. This option requires `dind = true`.
 
 When runners build images with `docker buildx` (e.g. via
 `docker/setup-buildx-action`), each run can leave behind a BuildKit builder
@@ -435,6 +447,7 @@ pool-size = 2
 | `--runner-image`    | `runner-image`       | `ghcr.io/actions/actions-runner:latest` | Runner image (Docker image or Tart VM image)      |
 | `--docker-socket`   | `[docker] socket`    | `/var/run/docker.sock`                  | Docker socket path (Docker provider)               |
 | `--dind`            | `[docker] dind`      | `true`                                  | Mount Docker socket into runners (Docker provider) |
+| —                   | `[docker] workspace-root` | unset                              | Private Linux host directory for per-runner workspace bind translation |
 | `--shared-volume`   | `[docker] shared-volume` |                                     | Shared Docker volume path (Docker provider)        |
 | `--tart-cpu`        | `[tart] cpu`         | `0` (image default)                     | CPU cores per VM (Tart provider)                   |
 | `--tart-memory`     | `[tart] memory`      | `0` (image default)                     | Memory in MB per VM (Tart provider)                |

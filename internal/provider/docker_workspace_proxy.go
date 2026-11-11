@@ -23,7 +23,7 @@ const maxDockerCreateBody = 16 << 20
 var dockerCreatePath = regexp.MustCompile(`^(/v[0-9.]+)?/containers/create$`)
 
 // workspaceProxy keeps the runner's stable _work path while translating its
-// bind sources to the private host directory visible to the Docker daemon.
+// bind sources to its private volume mountpoint visible to the Docker daemon.
 // The socket lives only on the host and is mounted into one runner.
 type workspaceProxy struct {
 	server    *http.Server
@@ -36,8 +36,10 @@ func startWorkspaceProxy(socketPath, daemonSocket, hostWork string) (*workspaceP
 	if err != nil {
 		return nil, fmt.Errorf("listen on runner Docker socket: %w", err)
 	}
-	if err := os.Chmod(socketPath, 0600); err != nil {
-		return nil, errors.Join(fmt.Errorf("restrict runner Docker socket: %w", err), listener.Close())
+	// The parent directory is 0700 and host-private. The runner has a
+	// different UID and reaches only this bind-mounted socket.
+	if err := os.Chmod(socketPath, 0666); err != nil {
+		return nil, errors.Join(fmt.Errorf("set runner Docker socket permissions: %w", err), listener.Close())
 	}
 	transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 		return (&net.Dialer{}).DialContext(ctx, "unix", daemonSocket)

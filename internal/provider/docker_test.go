@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"slices"
 	"strings"
 	"testing"
 
@@ -35,12 +36,25 @@ type mockDocker struct {
 	containers     []container.Summary
 	volumes        []volume.Volume
 	volumesRemoved []string
+	volumesCreated []dockerclient.VolumeCreateOptions
 
 	// Optional overrides for ContainerWait. When unset, the wait succeeds
 	// immediately with status 0.
-	waitStatus int64
-	waitErr    error
-	removeErr  error
+	waitStatus        int64
+	waitErr           error
+	removeErr         error
+	startErr          error
+	startHook         func()
+	rejectCanceled    bool
+	volumeRemoveErrOn string
+}
+
+func (m *mockDocker) VolumeCreate(_ context.Context, options dockerclient.VolumeCreateOptions) (dockerclient.VolumeCreateResult, error) {
+	m.volumesCreated = append(m.volumesCreated, options)
+	name := fmt.Sprintf("test-workspace-%d", len(m.volumesCreated))
+	v := volume.Volume{Name: name, Driver: "local", Mountpoint: "/var/lib/docker/volumes/" + name + "/_data", Labels: options.Labels}
+	m.volumes = append(m.volumes, v)
+	return dockerclient.VolumeCreateResult{Volume: v}, nil
 }
 
 func (m *mockDocker) ContainerCreate(_ context.Context, options dockerclient.ContainerCreateOptions) (dockerclient.ContainerCreateResult, error) {
@@ -52,17 +66,29 @@ func (m *mockDocker) ContainerCreate(_ context.Context, options dockerclient.Con
 
 func (m *mockDocker) ContainerStart(_ context.Context, id string, _ dockerclient.ContainerStartOptions) (dockerclient.ContainerStartResult, error) {
 	m.started = append(m.started, id)
-	return dockerclient.ContainerStartResult{}, nil
+	if m.startHook != nil {
+		m.startHook()
+	}
+	return dockerclient.ContainerStartResult{}, m.startErr
 }
 
-func (m *mockDocker) ContainerRemove(_ context.Context, id string, _ dockerclient.ContainerRemoveOptions) (dockerclient.ContainerRemoveResult, error) {
+func (m *mockDocker) ContainerRemove(ctx context.Context, id string, _ dockerclient.ContainerRemoveOptions) (dockerclient.ContainerRemoveResult, error) {
+	if m.rejectCanceled && ctx.Err() != nil {
+		return dockerclient.ContainerRemoveResult{}, ctx.Err()
+	}
 	m.removed = append(m.removed, id)
+	if m.removeErr == nil {
+		m.containers = slices.DeleteFunc(m.containers, func(c container.Summary) bool { return c.ID == id })
+	}
 	return dockerclient.ContainerRemoveResult{}, m.removeErr
 }
 
 // These calls support runner-owned resource cleanup; daemon maintenance stays
 // in internal/cachestore.
-func (m *mockDocker) ContainerStop(_ context.Context, _ string, _ dockerclient.ContainerStopOptions) (dockerclient.ContainerStopResult, error) {
+func (m *mockDocker) ContainerStop(ctx context.Context, _ string, _ dockerclient.ContainerStopOptions) (dockerclient.ContainerStopResult, error) {
+	if m.rejectCanceled && ctx.Err() != nil {
+		return dockerclient.ContainerStopResult{}, ctx.Err()
+	}
 	return dockerclient.ContainerStopResult{}, nil
 }
 func (m *mockDocker) ContainerList(_ context.Context, _ dockerclient.ContainerListOptions) (dockerclient.ContainerListResult, error) {
@@ -71,8 +97,15 @@ func (m *mockDocker) ContainerList(_ context.Context, _ dockerclient.ContainerLi
 func (m *mockDocker) VolumeList(_ context.Context, _ dockerclient.VolumeListOptions) (dockerclient.VolumeListResult, error) {
 	return dockerclient.VolumeListResult{Items: m.volumes}, nil
 }
-func (m *mockDocker) VolumeRemove(_ context.Context, name string, _ dockerclient.VolumeRemoveOptions) (dockerclient.VolumeRemoveResult, error) {
+func (m *mockDocker) VolumeRemove(ctx context.Context, name string, _ dockerclient.VolumeRemoveOptions) (dockerclient.VolumeRemoveResult, error) {
+	if m.rejectCanceled && ctx.Err() != nil {
+		return dockerclient.VolumeRemoveResult{}, ctx.Err()
+	}
 	m.volumesRemoved = append(m.volumesRemoved, name)
+	if name == m.volumeRemoveErrOn {
+		return dockerclient.VolumeRemoveResult{}, errors.New("simulated volume removal failure")
+	}
+	m.volumes = slices.DeleteFunc(m.volumes, func(v volume.Volume) bool { return v.Name == name })
 	return dockerclient.VolumeRemoveResult{}, nil
 }
 

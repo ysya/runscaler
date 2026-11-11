@@ -26,6 +26,7 @@ import (
 // its own interface for the daemon-maintenance calls it needs.
 type DockerAPI interface {
 	RunnerCleanupAPI
+	VolumeCreate(ctx context.Context, options dockerclient.VolumeCreateOptions) (dockerclient.VolumeCreateResult, error)
 	ContainerCreate(ctx context.Context, options dockerclient.ContainerCreateOptions) (dockerclient.ContainerCreateResult, error)
 	ContainerStart(ctx context.Context, containerID string, options dockerclient.ContainerStartOptions) (dockerclient.ContainerStartResult, error)
 	ContainerWait(ctx context.Context, containerID string, options dockerclient.ContainerWaitOptions) dockerclient.ContainerWaitResult
@@ -107,7 +108,7 @@ func parsePlatform(s string) *ocispec.Platform {
 
 // StartInstance creates and starts a new ephemeral Docker container runner.
 func (p *DockerProvider) StartInstance(ctx context.Context, name string, jitConfig string) (string, error) {
-	workspace, err := p.prepareWorkspace(name)
+	workspace, err := p.prepareWorkspace(ctx, name)
 	if err != nil {
 		return "", err
 	}
@@ -118,7 +119,7 @@ func (p *DockerProvider) StartInstance(ctx context.Context, name string, jitConf
 		socket := p.dockerSocket
 		if workspace != nil {
 			socket = workspace.socket
-			mounts = append(mounts, mount.Mount{Type: mount.TypeBind, Source: workspace.work, Target: runnerWorkPath})
+			mounts = append(mounts, mount.Mount{Type: mount.TypeVolume, Source: workspace.volume, Target: runnerWorkPath})
 		}
 		mounts = append(mounts, mount.Mount{
 			Type:     mount.TypeBind,
@@ -138,6 +139,9 @@ func (p *DockerProvider) StartInstance(ctx context.Context, name string, jitConf
 	// Named volume mounts (shared + cache); their targets need ownership
 	// fixed before the runner starts.
 	var volumeTargets []string
+	if workspace != nil {
+		volumeTargets = append(volumeTargets, runnerWorkPath)
+	}
 	if p.sharedVolume != "" {
 		mounts = append(mounts, mount.Mount{
 			Type:   mount.TypeVolume,
@@ -178,7 +182,9 @@ func (p *DockerProvider) StartInstance(ctx context.Context, name string, jitConf
 		Name:       name,
 	})
 	if err != nil {
-		if cleanupErr := p.discardWorkspace(workspace); cleanupErr != nil {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		if cleanupErr := p.discardWorkspace(cleanupCtx, workspace); cleanupErr != nil {
 			return "", fmt.Errorf("failed to create runner container: %w; workspace cleanup: %v", err, cleanupErr)
 		}
 		return "", fmt.Errorf("failed to create runner container: %w", err)
@@ -193,12 +199,14 @@ func (p *DockerProvider) StartInstance(ctx context.Context, name string, jitConf
 	}
 
 	if _, err := p.dockerClient.ContainerStart(ctx, c.ID, dockerclient.ContainerStartOptions{}); err != nil {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
 		if workspace != nil {
-			if cleanupErr := p.RemoveInstance(ctx, c.ID); cleanupErr != nil {
+			if cleanupErr := p.RemoveInstance(cleanupCtx, c.ID); cleanupErr != nil {
 				return "", fmt.Errorf("failed to start runner container: %w; cleanup: %v", err, cleanupErr)
 			}
 		} else {
-			_, _ = p.dockerClient.ContainerRemove(ctx, c.ID, dockerclient.ContainerRemoveOptions{Force: true})
+			_, _ = p.dockerClient.ContainerRemove(cleanupCtx, c.ID, dockerclient.ContainerRemoveOptions{Force: true})
 		}
 		return "", fmt.Errorf("failed to start runner container: %w", err)
 	}
@@ -228,7 +236,7 @@ func (p *DockerProvider) RemoveInstance(ctx context.Context, instanceID string) 
 			return fmt.Errorf("runner workspace is still mounted by another Docker container")
 		}
 	}
-	if err := p.discardWorkspace(workspace); err != nil {
+	if err := p.discardWorkspace(ctx, workspace); err != nil {
 		return err
 	}
 	p.workspaceMu.Lock()

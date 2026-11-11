@@ -68,9 +68,17 @@ func RemoveRunnerContainer(ctx context.Context, client RunnerCleanupAPI, instanc
 		return fmt.Errorf("failed to list runner volumes: %w", err)
 	}
 	candidates := make(map[string]bool)
+	var workspaceMountpoints []string
 	for _, v := range volumeResult.Items {
 		if referencesRunner(v.Labels[runnerOwnerLabel], runner, result.Items) {
 			candidates[v.Name] = true
+			if validWorkspaceVolume(v) {
+				for _, m := range runner.Mounts {
+					if m.Type == mount.TypeVolume && m.Name == v.Name && m.Destination == runnerWorkPath {
+						workspaceMountpoints = append(workspaceMountpoints, v.Mountpoint)
+					}
+				}
+			}
 		}
 	}
 
@@ -87,6 +95,12 @@ func RemoveRunnerContainer(ctx context.Context, client RunnerCleanupAPI, instanc
 		}
 		networkRef, sharesContainerNetwork := strings.CutPrefix(c.HostConfig.NetworkMode, "container:")
 		owned := sharesContainerNetwork && referencesRunner(networkRef, runner, result.Items)
+		for _, point := range workspaceMountpoints {
+			if workspaceMountedBy([]container.Summary{c}, point) {
+				owned = true
+				break
+			}
+		}
 		if !owned && !referencesRunner(c.Labels[runnerOwnerLabel], runner, result.Items) {
 			continue
 		}

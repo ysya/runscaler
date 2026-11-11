@@ -93,6 +93,17 @@ func TestWorkspaceProxyRewritesContainerBinds(t *testing.T) {
 	if ping.StatusCode != http.StatusOK {
 		t.Errorf("ping status = %d", ping.StatusCode)
 	}
+	plain, err := client.Post("http://docker/v1.48/containers/create", "application/json", strings.NewReader(`{"Image":"node"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain.Body.Close()
+	if plain.StatusCode != http.StatusCreated {
+		t.Fatalf("plain container create status = %d, want %d", plain.StatusCode, http.StatusCreated)
+	}
+	if got := <-requests; got["Image"] != "node" {
+		t.Errorf("plain container create body = %v", got)
+	}
 }
 
 func TestDockerProviderWorkspaceIsPrivateAndRemoved(t *testing.T) {

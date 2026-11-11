@@ -61,6 +61,9 @@ type Config struct {
 	// single-mode keys mixed with [[scaleset]] entries) surfaced by callers:
 	// `runner run` logs them, `runner validate` fails on them.
 	Warnings []string `mapstructure:"-"`
+	// Deprecations are advisory. They never make validation or service
+	// installation fail while older configurations remain supported.
+	Deprecations []string `mapstructure:"-"`
 }
 
 // ScaleSetConfig holds per-scale-set configuration.
@@ -140,6 +143,7 @@ type DockerConfig struct {
 	//
 	// This is the short form. See Cache for the long form, which adds an
 	// optional retention budget; ParseCacheVolumes merges the two.
+	// Sunset: migrate tool caches to workflow Actions cache for new deployments.
 	CacheVolumes []string `mapstructure:"cache-volumes"`
 
 	// Cache is the long form of CacheVolumes — [[docker.cache]] tables
@@ -147,6 +151,8 @@ type DockerConfig struct {
 	// budget. An entry here whose Name also appears in CacheVolumes replaces
 	// it entirely (see ParseCacheVolumes); the two are never merged field by
 	// field.
+	// Sunset: retained for existing configurations; its budget does not map
+	// directly to the native Actions cache's global byte limit.
 	Cache []CacheVolumeSpec `mapstructure:"cache"`
 
 	// SharedVolumeMaxAge deletes files in shared-volume older than this

@@ -303,11 +303,13 @@ func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) e
 		}
 	}
 
-	// Non-fatal config diagnostics (unknown keys, mixed single/multi mode).
-	// Warn only — a self-updated deployment with an older config must keep
-	// starting; `runner validate` fails on these instead.
+	// A self-updated deployment with an older config must keep starting.
+	// Strict warnings fail `runner validate`; deprecations remain advisory.
 	for _, w := range cfg.Warnings {
 		logger.Warn(w)
+	}
+	for _, d := range cfg.Deprecations {
+		logger.Warn(d)
 	}
 	warnOutdatedService(logger, cfg.EffectiveDrainTimeout())
 

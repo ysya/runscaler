@@ -136,7 +136,7 @@ gh api repos/<owner>/<repo>/actions/runners/deprecations/<version>   # runtime_d
 
 `[docker] actions-cache-url` 空白或未設定時停用。它會繼承 Docker scale-set 預設值；
 在 `[scaleset.docker]` 明確設定 `actions-cache-url = ""` 可取消繼承的端點。
-Linux amd64 pilot 建議逐一 scale set 啟用，並搭配固定 digest、通過驗收的快取專用
+Linux amd64 環境建議逐一 scale set 啟用，並搭配固定 digest、通過驗收的快取專用
 runner 變體。標準 runner 或單純 fork base image 都不夠；最終映像必須提供
 Runscaler 的 capability checker，先驗證能力再接收工作。
 
@@ -166,11 +166,17 @@ cache = []
 原 cache action 會重新使用 GitHub cache。空字串覆寫是設定語意，不是保證資料只留
 本機的回復程序。
 
-### 原生 Go 接收器（開發分支）
+`cache-volumes` 與 `[[docker.cache]]` 已開始 sunset；現有設定仍照常掛載並執行
+原本的容量政策，直到從設定移除為止。切換 workflow 或處理舊 Docker volume 前，
+請先依照[遷移步驟](caching.zh-TW.md#遷移至-actions-cache)驗收。
 
-Manager 可選擇在另一個私有 listener 提供 cache-v2 接收器。此功能尚未通過實際
-簽名 job 與 canary 驗收，不能視為目前 Rust 服務的替代品。以下是全域設定，
-不會繼承至各 scale set：
+<a id="native-go-receiver-opt-in"></a>
+
+### 原生 Go 接收器（opt-in）
+
+Manager 可選擇在另一個私有 listener 提供 cache-v2 接收器。已有實際簽名 job
+與 provider-managed canary 的驗收紀錄；新主機仍須驗證自己的 runner 映像、端點
+及 workflow。以下是全域設定，不會繼承至各 scale set：
 
 ```toml
 [actions-cache]

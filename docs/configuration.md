@@ -237,8 +237,8 @@ needs the `admin:org` scope.
 
 `[docker] actions-cache-url` is disabled when empty/unset. It inherits through
 Docker scale-set defaults; `[scaleset.docker] actions-cache-url = ""` explicitly
-disables an inherited value. Configure it per scale set during the Linux amd64
-pilot, together with an accepted cache-capable runner variant by immutable digest.
+disables an inherited value. On Linux amd64, configure it per scale set with
+an accepted cache-capable runner variant by immutable digest.
 A stock runner or the bare fork base image is insufficient: the final variant
 must provide Runscaler's verified capability checker before accepting work.
 
@@ -270,13 +270,19 @@ simply clearing the endpoint and resuming unchanged actions enables GitHub
 caching again. An empty override is configuration behavior, not a local-only
 rollback procedure.
 
+`cache-volumes` and `[[docker.cache]]` are deprecated for new Docker
+deployments. They continue to mount and enforce their existing budgets until
+removed from the config. See the [migration steps](caching.md#migration-to-actions-cache)
+before switching workflows or deleting old Docker volumes.
+
 ### Native Go receiver (opt-in)
 
 The manager can host an opt-in cache-v2 receiver on a separate private listener.
 Its [isolated signed-job acceptance](native-actions-cache-v2-acceptance.md)
-does not replace the provider-managed host canary. Keep the existing Rust
-service and data as a rollback endpoint. The global table is not inherited by
-scale sets:
+and a provider-managed Linux amd64 canary have passed. Each new host still
+needs its own image, endpoint, and workflow validation. Keep the existing Rust
+service and data as a rollback endpoint until its retention is decided. The
+global table is not inherited by scale sets:
 
 ```toml
 [actions-cache]

@@ -50,10 +50,9 @@ func rejectRetiredKeys(settings map[string]any) error {
 // scaleset entry always wins, even when set to a zero value (e.g.
 // `memory = 0` or `dind = false` override a non-zero default).
 //
-// Non-fatal issues — unknown keys, single-mode keys mixed with [[scaleset]]
-// entries —
-// are collected into Config.Warnings instead of failing, so deployments
-// whose config was written for another version keep starting.
+// Unknown keys and mixed single/multi-mode keys go into Config.Warnings;
+// validation treats them as errors while older deployments can still start.
+// Sunset notices go into Config.Deprecations so they never block validation.
 func Load(v *viper.Viper) (Config, error) {
 	settings := v.AllSettings()
 	// AllSettings drops empty tables while flattening configuration. Preserve
@@ -79,6 +78,7 @@ func Load(v *viper.Viper) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	deprecations := cacheVolumeSunsetWarnings(cfg.Defaults.Docker, settings, "")
 
 	var scaleSetWarnings []string
 
@@ -99,6 +99,8 @@ func Load(v *viper.Viper) (Config, error) {
 			if err != nil {
 				return Config{}, fmt.Errorf("scaleset[%d]: %w", i, err)
 			}
+			deprecations = append(deprecations,
+				cacheVolumeSunsetWarnings(ss.Docker, entry, fmt.Sprintf("scaleset[%d]: ", i))...)
 			for _, key := range unused {
 				// Unknown keys inherited from the top level are already
 				// reported by the top-level decode; only report keys this
@@ -127,10 +129,28 @@ func Load(v *viper.Viper) (Config, error) {
 	warnings = append(warnings, scaleSetWarnings...)
 
 	cfg.Warnings = warnings
+	cfg.Deprecations = deprecations
 	if cfg.HealthAddress == "" {
 		cfg.HealthAddress = DefaultHealthAddress
 	}
 	return cfg, nil
+}
+
+func cacheVolumeSunsetWarnings(docker DockerConfig, source map[string]any, prefix string) []string {
+	var warnings []string
+	for _, field := range []struct {
+		key  string
+		used bool
+	}{
+		{"cache-volumes", len(docker.CacheVolumes) > 0},
+		{"cache", len(docker.Cache) > 0},
+	} {
+		if field.used && hasKeyPath(source, "docker."+field.key) {
+			warnings = append(warnings, prefix+"docker."+field.key+
+				" is deprecated; migrate tool caches to workflow Actions cache before removing this volume mount")
+		}
+	}
+	return warnings
 }
 
 // popScaleSets removes the "scaleset" key from settings and returns its

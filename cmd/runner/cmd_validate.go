@@ -41,6 +41,9 @@ func runValidate(cmd *cobra.Command, args []string) error {
 		}
 		return fmt.Errorf("validation failed")
 	}
+	for _, d := range cfg.Deprecations {
+		fmt.Printf("  ⚠ config: %s\n", d)
+	}
 	if err := cfg.ValidateGlobal(); err != nil {
 		fmt.Printf("  ✗ global config: %s\n", err)
 		return fmt.Errorf("validation failed")

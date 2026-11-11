@@ -70,6 +70,9 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	for _, w := range cfg.Warnings {
 		fmt.Printf("  ⚠ config: %s\n", w)
 	}
+	for _, d := range cfg.Deprecations {
+		fmt.Printf("  ⚠ config: %s\n", d)
+	}
 	if fix && len(cfg.Warnings) > 0 {
 		return fmt.Errorf("refusing destructive cleanup with config warnings; run 'runner validate' and fix them first")
 	}

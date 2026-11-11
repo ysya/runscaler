@@ -39,3 +39,18 @@ func TestServicePreparationUsesManagerDefaults(t *testing.T) {
 		})
 	}
 }
+
+func TestServicePreparationAcceptsDeprecatedCacheVolumes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.toml")
+	body := "url='https://github.com/example'\nname='fixture'\ntoken='synthetic-fixture-token'\n[docker]\ncache-volumes=['gradle-cache:/home/runner/.gradle']\n"
+	if err := os.WriteFile(path, []byte(body), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _, err := loadServicePreparationConfig(path)
+	if err != nil {
+		t.Fatalf("deprecated but supported config rejected: %v", err)
+	}
+	if len(cfg.Warnings) != 0 || len(cfg.Deprecations) != 1 {
+		t.Fatalf("Warnings = %q, Deprecations = %q", cfg.Warnings, cfg.Deprecations)
+	}
+}

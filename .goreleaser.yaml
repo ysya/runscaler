@@ -38,4 +38,4 @@ release:
   footer: |
     ## Upgrade and compatibility
 
-    Before restarting a service, review the [upgrade requirements](https://github.com/ysya/runscaler/blob/main/README.md#upgrade-requirements) and validate its configuration with the new binary. The upgrade requirements include current sunset notices and any settings removed by breaking releases.
+    Before restarting a service, review the [upgrade requirements](https://github.com/ysya/runscaler/blob/{{ .Tag }}/README.md#upgrade-requirements) and validate its configuration with the new binary. The upgrade requirements include current sunset notices and any settings removed by breaking releases.

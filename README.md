@@ -211,6 +211,10 @@ after they were built; read the target release notes before updating.
 Legacy `docker.cache-volumes` and `[[docker.cache]]` mounts are also in their
 sunset period. They remain active with their existing budgets; migrate workflows
 to Actions cache and verify warm hits before removing those mounts or data.
+Track the earliest removal reviews and their acceptance gates in
+[issue #41](https://github.com/ysya/runscaler/issues/41): v0.22.0 for the native
+URL alias, v0.24.0 for legacy cache volumes. Neither version removes a setting
+automatically; defer the change if the migration gates are unmet.
 
 The historical rename transition is retired. Releases contain only `runner-*`
 archives. The `migrate` command, implicit root `runner --config` startup,

@@ -243,11 +243,11 @@ func writeStoreError(w http.ResponseWriter, err error) {
 
 func (h *cacheHandler) upload(w http.ResponseWriter, r *http.Request, id string) {
 	if r.Method != http.MethodPut {
-		http.Error(w, "PUT required", 405)
+		http.Error(w, "PUT required", http.StatusMethodNotAllowed)
 		return
 	}
 	if err := h.signer.verify("upload", id, r.URL.Query()); err != nil {
-		http.Error(w, "invalid upload capability", 403)
+		http.Error(w, "invalid upload capability", http.StatusForbidden)
 		return
 	}
 	if _, err := uuid.Parse(id); err != nil {
@@ -285,7 +285,7 @@ func (h *cacheHandler) upload(w http.ResponseWriter, r *http.Request, id string)
 			return
 		}
 		if errors.Is(err, ErrStagingFull) {
-			http.Error(w, "local cache staging budget exceeded", 507)
+			http.Error(w, "local cache staging budget exceeded", http.StatusInsufficientStorage)
 			return
 		}
 		if errors.Is(err, ErrIncomplete) {
@@ -348,11 +348,11 @@ func parseBlockList(body io.Reader) ([]string, error) {
 
 func (h *cacheHandler) download(w http.ResponseWriter, r *http.Request, id string) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		http.Error(w, "GET or HEAD required", 405)
+		http.Error(w, "GET or HEAD required", http.StatusMethodNotAllowed)
 		return
 	}
 	if err := h.signer.verify("download", id, r.URL.Query()); err != nil {
-		http.Error(w, "invalid download capability", 403)
+		http.Error(w, "invalid download capability", http.StatusForbidden)
 		return
 	}
 	entry, err := h.store.EntryByID(r.Context(), id)

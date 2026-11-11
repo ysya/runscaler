@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"text/tabwriter"
@@ -224,6 +225,9 @@ func runCache(cmd *cobra.Command, args []string) error {
 	}
 	for _, w := range cfg.Warnings {
 		fmt.Printf("  ⚠ config: %s\n", w)
+	}
+	for _, d := range cfg.Deprecations {
+		fmt.Fprintf(os.Stderr, "  ⚠ config: %s\n", d)
 	}
 
 	scaleSets := cfg.ResolveScaleSets()

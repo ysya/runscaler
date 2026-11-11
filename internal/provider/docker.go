@@ -178,7 +178,9 @@ func (p *DockerProvider) StartInstance(ctx context.Context, name string, jitConf
 		Name:       name,
 	})
 	if err != nil {
-		p.discardWorkspace(workspace)
+		if cleanupErr := p.discardWorkspace(workspace); cleanupErr != nil {
+			return "", fmt.Errorf("failed to create runner container: %w; workspace cleanup: %v", err, cleanupErr)
+		}
 		return "", fmt.Errorf("failed to create runner container: %w", err)
 	}
 	if workspace != nil {

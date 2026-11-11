@@ -37,8 +37,7 @@ func startWorkspaceProxy(socketPath, daemonSocket, hostWork string) (*workspaceP
 		return nil, fmt.Errorf("listen on runner Docker socket: %w", err)
 	}
 	if err := os.Chmod(socketPath, 0600); err != nil {
-		listener.Close()
-		return nil, fmt.Errorf("restrict runner Docker socket: %w", err)
+		return nil, errors.Join(fmt.Errorf("restrict runner Docker socket: %w", err), listener.Close())
 	}
 	transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 		return (&net.Dialer{}).DialContext(ctx, "unix", daemonSocket)
@@ -68,14 +67,14 @@ func (p *workspaceProxy) Close() error {
 
 func rewriteDockerCreate(r *http.Request, hostWork string) error {
 	if r.ContentLength > maxDockerCreateBody {
-		return errors.New("Docker create body too large")
+		return errors.New("docker create body too large")
 	}
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxDockerCreateBody+1))
 	if err != nil {
 		return err
 	}
 	if len(body) > maxDockerCreateBody {
-		return errors.New("Docker create body too large")
+		return errors.New("docker create body too large")
 	}
 	var request map[string]json.RawMessage
 	if err := json.Unmarshal(body, &request); err != nil {

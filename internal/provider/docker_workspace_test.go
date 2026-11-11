@@ -25,7 +25,7 @@ func TestWorkspaceProxyRewritesContainerBinds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 	requests := make(chan map[string]any, 2)
 	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/_ping" {
@@ -47,8 +47,8 @@ func TestWorkspaceProxyRewritesContainerBinds(t *testing.T) {
 		requests <- request
 		w.WriteHeader(http.StatusCreated)
 	})}
-	go server.Serve(listener)
-	defer server.Close()
+	go func() { _ = server.Serve(listener) }()
+	defer func() { _ = server.Close() }()
 
 	hostWork := filepath.Join(root, "runner-a", "work")
 	proxySocket := filepath.Join(root, "runner-a.sock")
@@ -56,7 +56,7 @@ func TestWorkspaceProxyRewritesContainerBinds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer proxy.Close()
+	defer func() { _ = proxy.Close() }()
 	client := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 		return (&net.Dialer{}).DialContext(ctx, "unix", proxySocket)
 	}}}

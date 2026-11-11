@@ -197,6 +197,18 @@ Details for each command are in [docs/commands.md](docs/commands.md).
 
 ## Upgrade requirements
 
+**Actions cache setting sunset (no removal in this release):** Docker scale sets
+using the built-in Go receiver should set `native-actions-cache = true` and
+remove `actions-cache-url` when it equals `[actions-cache].advertise-url`.
+The manager derives that URL automatically. The old native URL setting still
+works for now, but `runner validate`, startup logs and `runner update --check`
+warn about it before a future breaking removal. Explicit URLs for external
+receivers remain supported. Keep `advertise-url`: it is the address that runner
+and BuildKit containers must be able to reach. Migrate while jobs are drained,
+validate the config, then restart the selected service. This setting change does
+not move or delete cached data. Older binaries cannot report a sunset introduced
+after they were built; read the target release notes before updating.
+
 The historical rename transition is retired. Releases contain only `runner-*`
 archives. The `migrate` command, implicit root `runner --config` startup,
 `--backend`, automatic `runscaler` config-directory search, old service names

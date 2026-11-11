@@ -242,6 +242,9 @@ is false, and an inherited true value can be overridden with false. The existing
 external receiver. An inherited or explicit URL alongside `native-actions-cache = true` must
 equal the global advertised URL. On Linux amd64, opt in per scale set with an
 accepted cache-capable runner variant by immutable digest.
+When an old explicit URL points to the built-in receiver, Runscaler emits an
+advisory sunset warning. Remove that duplicate URL after enabling the new
+switch; external receiver URLs are not deprecated.
 A stock runner or the bare fork base image is insufficient: the final variant
 must provide Runscaler's verified capability checker before accepting work.
 

@@ -219,6 +219,16 @@ jobs:
 
 ## 升級前準備
 
+**Actions 快取設定 sunset（本版尚未移除）：** 使用內建 Go 接收器的 Docker scale set
+應設定 `native-actions-cache = true`，並在 `actions-cache-url` 與
+`[actions-cache].advertise-url` 相同時移除前者。管理程序會自動帶入該 URL。
+舊的原生 URL 設定目前仍可運作，但 `runner validate`、啟動日誌與
+`runner update --check` 會提醒在未來的破壞相容版本前完成遷移。外部接收器仍支援
+明確 URL。全域 `advertise-url` 仍須保留，並確保 runner 與 BuildKit 容器可連線。
+請在工作排空後修改、驗證設定，再重啟選定服務；這項設定變更不搬移或刪除快取資料。
+舊版 binary 無法偵測其發布後才新增的 sunset 警告，因此更新前仍須閱讀目標版本的
+release notes。
+
 歷史更名相容期已結束。後續 release 僅產出 `runner-*` 壓縮檔，不再支援 `migrate` 指令、根指令 `runner --config` 直接啟動、`--backend`、自動搜尋 `runscaler` 設定目錄、舊服務名稱與 `RUNSCALER_TOKEN` 備援。啟動 manager 請使用 `runner run --config /absolute/path/config.toml`。
 
 升級前請改用目前的設定名稱：

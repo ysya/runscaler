@@ -129,7 +129,7 @@ func Load(v *viper.Viper) (Config, error) {
 	warnings = append(warnings, scaleSetWarnings...)
 
 	cfg.Warnings = warnings
-	cfg.Deprecations = deprecations
+	cfg.Deprecations = append(deprecations, nativeActionsCacheURLSunsetWarnings(cfg)...)
 	if cfg.HealthAddress == "" {
 		cfg.HealthAddress = DefaultHealthAddress
 	}
@@ -148,6 +148,26 @@ func cacheVolumeSunsetWarnings(docker DockerConfig, source map[string]any, prefi
 		if field.used && hasKeyPath(source, "docker."+field.key) {
 			warnings = append(warnings, prefix+"docker."+field.key+
 				" is deprecated; migrate tool caches to workflow Actions cache before removing this volume mount")
+		}
+	}
+	return warnings
+}
+
+func nativeActionsCacheURLSunsetWarnings(cfg Config) []string {
+	if !cfg.ActionsCache.Enabled || cfg.ActionsCache.AdvertiseURL == "" {
+		return nil
+	}
+	warning := "docker.actions-cache-url is deprecated when it points to [actions-cache].advertise-url; use docker.native-actions-cache = true and remove the duplicate URL before a future breaking release"
+	if len(cfg.ScaleSets) == 0 {
+		if (cfg.Defaults.Provider == "" || cfg.Defaults.Provider == DefaultProvider) && cfg.Defaults.Docker.ActionsCacheURL == cfg.ActionsCache.AdvertiseURL {
+			return []string{warning}
+		}
+		return nil
+	}
+	var warnings []string
+	for i, ss := range cfg.ScaleSets {
+		if ss.Provider == DefaultProvider && ss.Docker.ActionsCacheURL == cfg.ActionsCache.AdvertiseURL {
+			warnings = append(warnings, fmt.Sprintf("scaleset[%d]: %s", i, warning))
 		}
 	}
 	return warnings

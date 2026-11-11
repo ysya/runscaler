@@ -1226,3 +1226,86 @@ advertise-url = "http://192.168.50.10:3001/"
 		t.Errorf("single-mode endpoint = %q", got)
 	}
 }
+
+func TestLoad_NativeActionsCacheURLSunsetWarnings(t *testing.T) {
+	tests := []struct {
+		name string
+		toml string
+		want []string
+	}{
+		{
+			name: "single legacy native endpoint",
+			toml: `[actions-cache]
+enabled = true
+advertise-url = "http://192.168.50.10:3001/"
+[docker]
+actions-cache-url = "http://192.168.50.10:3001/"`,
+			want: []string{`docker.actions-cache-url is deprecated when it points to [actions-cache].advertise-url; use docker.native-actions-cache = true and remove the duplicate URL before a future breaking release`},
+		},
+		{
+			name: "inherited native endpoint but external override remains supported",
+			toml: `[actions-cache]
+enabled = true
+advertise-url = "http://192.168.50.10:3001/"
+[docker]
+actions-cache-url = "http://192.168.50.10:3001/"
+[[scaleset]]
+name = "native"
+url = "https://github.com/org"
+token = "test-only"
+[[scaleset]]
+name = "external"
+url = "https://github.com/org"
+token = "test-only"
+[scaleset.docker]
+actions-cache-url = "https://cache.example/"`,
+			want: []string{`scaleset[0]: docker.actions-cache-url is deprecated when it points to [actions-cache].advertise-url; use docker.native-actions-cache = true and remove the duplicate URL before a future breaking release`},
+		},
+		{
+			name: "new native opt-in",
+			toml: `[actions-cache]
+enabled = true
+advertise-url = "http://192.168.50.10:3001/"
+[docker]
+native-actions-cache = true`,
+		},
+		{
+			name: "redundant URL with native opt-in",
+			toml: `[actions-cache]
+enabled = true
+advertise-url = "http://192.168.50.10:3001/"
+[docker]
+native-actions-cache = true
+actions-cache-url = "http://192.168.50.10:3001/"`,
+			want: []string{`docker.actions-cache-url is deprecated when it points to [actions-cache].advertise-url; use docker.native-actions-cache = true and remove the duplicate URL before a future breaking release`},
+		},
+		{
+			name: "external endpoint",
+			toml: `[actions-cache]
+enabled = true
+advertise-url = "http://192.168.50.10:3001/"
+[docker]
+actions-cache-url = "https://cache.example/"`,
+		},
+		{
+			name: "unused docker field on tart scale set",
+			toml: `provider = "tart"
+[actions-cache]
+enabled = true
+advertise-url = "http://192.168.50.10:3001/"
+[docker]
+actions-cache-url = "http://192.168.50.10:3001/"`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := loadTOML(t, tt.toml)
+			if !slices.Equal(cfg.Deprecations, tt.want) {
+				t.Errorf("Deprecations = %q, want %q", cfg.Deprecations, tt.want)
+			}
+			if len(cfg.Warnings) != 0 {
+				t.Errorf("sunset notices must remain advisory: %q", cfg.Warnings)
+			}
+		})
+	}
+}

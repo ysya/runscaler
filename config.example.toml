@@ -85,7 +85,7 @@ max-runners = 10
 socket = "/var/run/docker.sock"
 dind = true
 # native-actions-cache = false # use the manager's [actions-cache] receiver when true
-# actions-cache-url = "" # legacy explicit endpoint, including an external receiver
+# actions-cache-url = "" # explicit external receiver; matching the native URL is deprecated
 # shared-volume = "/shared"
 # shared-volume-name = "runner-shared"     # named volume backing shared-volume; distinct names isolate scalesets (or two runner processes)
 # memory = 0     # MB, 0 = unlimited (e.g. 8192 for 8GB)

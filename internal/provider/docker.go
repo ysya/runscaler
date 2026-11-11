@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -42,6 +43,9 @@ type DockerProvider struct {
 	runnerImage      string
 	dockerSocket     string
 	dind             bool
+	workspaceRoot    string
+	workspaceMu      sync.Mutex
+	workspaces       map[string]*runnerWorkspace
 	sharedVolume     string                    // container path of the shared volume ("" = disabled)
 	sharedVolumeName string                    // named volume backing the shared-volume mount
 	cacheVolumes     []config.CacheVolumeMount // persistent named cache volumes (never cleaned up)
@@ -66,6 +70,7 @@ func NewDockerProvider(ss config.ScaleSetConfig, client DockerAPI, logger *slog.
 		actionsCacheURL:  ss.Docker.ActionsCacheURL,
 		dockerSocket:     ss.Docker.Socket,
 		dind:             ss.IsDinD(),
+		workspaceRoot:    ss.Docker.WorkspaceRoot,
 		sharedVolume:     ss.Docker.SharedVolume,
 		sharedVolumeName: ss.SharedVolumeName(),
 		network:          ss.Docker.Network,
@@ -102,22 +107,33 @@ func parsePlatform(s string) *ocispec.Platform {
 
 // StartInstance creates and starts a new ephemeral Docker container runner.
 func (p *DockerProvider) StartInstance(ctx context.Context, name string, jitConfig string) (string, error) {
+	workspace, err := p.prepareWorkspace(name)
+	if err != nil {
+		return "", err
+	}
 	// Build mounts and group membership.
 	var mounts []mount.Mount
 	var groupAdd []string
 	if p.dind {
+		socket := p.dockerSocket
+		if workspace != nil {
+			socket = workspace.socket
+			mounts = append(mounts, mount.Mount{Type: mount.TypeBind, Source: workspace.work, Target: runnerWorkPath})
+		}
 		mounts = append(mounts, mount.Mount{
 			Type:     mount.TypeBind,
-			Source:   p.dockerSocket,
+			Source:   socket,
 			Target:   "/var/run/docker.sock",
 			ReadOnly: false,
 		})
-		// Add socket's owning group (works on native Linux where socket is root:docker).
-		// Also add GID 0 for macOS/OrbStack where virtiofs maps the socket to root:root.
-		if gid, err := socketGroupID(p.dockerSocket); err == nil && gid != 0 {
-			groupAdd = append(groupAdd, strconv.Itoa(gid))
+		if workspace == nil {
+			// Add socket's owning group (works on native Linux where socket is root:docker).
+			// Also add GID 0 for macOS/OrbStack where virtiofs maps the socket to root:root.
+			if gid, err := socketGroupID(p.dockerSocket); err == nil && gid != 0 {
+				groupAdd = append(groupAdd, strconv.Itoa(gid))
+			}
+			groupAdd = append(groupAdd, "0")
 		}
-		groupAdd = append(groupAdd, "0")
 	}
 	// Named volume mounts (shared + cache); their targets need ownership
 	// fixed before the runner starts.
@@ -162,11 +178,26 @@ func (p *DockerProvider) StartInstance(ctx context.Context, name string, jitConf
 		Name:       name,
 	})
 	if err != nil {
+		p.discardWorkspace(workspace)
 		return "", fmt.Errorf("failed to create runner container: %w", err)
+	}
+	if workspace != nil {
+		p.workspaceMu.Lock()
+		if p.workspaces == nil {
+			p.workspaces = make(map[string]*runnerWorkspace)
+		}
+		p.workspaces[c.ID] = workspace
+		p.workspaceMu.Unlock()
 	}
 
 	if _, err := p.dockerClient.ContainerStart(ctx, c.ID, dockerclient.ContainerStartOptions{}); err != nil {
-		_, _ = p.dockerClient.ContainerRemove(ctx, c.ID, dockerclient.ContainerRemoveOptions{Force: true})
+		if workspace != nil {
+			if cleanupErr := p.RemoveInstance(ctx, c.ID); cleanupErr != nil {
+				return "", fmt.Errorf("failed to start runner container: %w; cleanup: %v", err, cleanupErr)
+			}
+		} else {
+			_, _ = p.dockerClient.ContainerRemove(ctx, c.ID, dockerclient.ContainerRemoveOptions{Force: true})
+		}
 		return "", fmt.Errorf("failed to start runner container: %w", err)
 	}
 
@@ -180,7 +211,28 @@ func (p *DockerProvider) StartInstance(ctx context.Context, name string, jitConf
 
 // RemoveInstance removes a runner and its explicitly owned child resources.
 func (p *DockerProvider) RemoveInstance(ctx context.Context, instanceID string) error {
-	return RemoveRunnerContainer(ctx, p.dockerClient, instanceID, p.logger)
+	if err := RemoveRunnerContainer(ctx, p.dockerClient, instanceID, p.logger); err != nil {
+		return err
+	}
+	p.workspaceMu.Lock()
+	workspace := p.workspaces[instanceID]
+	p.workspaceMu.Unlock()
+	if workspace != nil {
+		inUse, err := workspaceStillMounted(ctx, p.dockerClient, workspace.work)
+		if err != nil {
+			return err
+		}
+		if inUse {
+			return fmt.Errorf("runner workspace is still mounted by another Docker container")
+		}
+	}
+	if err := p.discardWorkspace(workspace); err != nil {
+		return err
+	}
+	p.workspaceMu.Lock()
+	delete(p.workspaces, instanceID)
+	p.workspaceMu.Unlock()
+	return nil
 }
 
 // WaitInstance returns when a runner container is no longer running. The controller uses

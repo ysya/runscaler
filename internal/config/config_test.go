@@ -167,6 +167,36 @@ func TestScaleSetConfigValidateRejectsMalformedDockerPlatform(t *testing.T) {
 	}
 }
 
+func TestScaleSetConfigValidateWorkspaceRoot(t *testing.T) {
+	no := false
+	tests := []struct {
+		name string
+		root string
+		dind *bool
+		want string
+	}{
+		{"absolute root", "/srv/runscaler/workspaces", nil, ""},
+		{"relative root", "workspaces", nil, "clean absolute"},
+		{"filesystem root", "/", nil, "clean absolute"},
+		{"unclean root", "/srv/../workspaces", nil, "clean absolute"},
+		{"socket unavailable", "/srv/runscaler/workspaces", &no, "requires docker.dind"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validScaleSetConfig()
+			cfg.Docker.WorkspaceRoot = tt.root
+			cfg.Docker.DinD = tt.dind
+			err := cfg.Validate()
+			if tt.want == "" && err != nil {
+				t.Fatalf("Validate() = %v", err)
+			}
+			if tt.want != "" && (err == nil || !strings.Contains(err.Error(), tt.want)) {
+				t.Fatalf("Validate() = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
 func TestValidateGlobal(t *testing.T) {
 	valid := Config{LogLevel: "info", LogFormat: "text", HealthPort: 8080}
 	if err := valid.ValidateGlobal(); err != nil {

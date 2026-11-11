@@ -6,7 +6,7 @@
 
 **Architecture:** A separate private HTTP listener in the manager serves cache RPC and local signed payload URLs, and forwards non-cache Results calls to a fixed GitHub upstream. SQLite plus filesystem objects provide durable, atomic, immutable cache entries; the receiver survives until scale-set drain finishes.
 
-**Tech Stack:** Go 1.27.3, `net/http`, `database/sql` with one justified pure-Go SQLite driver, generated protobuf messages plus `google.golang.org/protobuf`, existing `github.com/golang-jwt/jwt/v5`, filesystem storage.
+**Tech Stack:** Go 1.27.4, `net/http`, `database/sql` with one justified pure-Go SQLite driver, generated protobuf messages plus `google.golang.org/protobuf`, existing `github.com/golang-jwt/jwt/v5`, filesystem storage.
 
 **Spec:** `docs/specs-native-actions-cache-v2-design.md`. Implementation is in an isolated feature worktree; host cutover remains a separate approval gate.
 

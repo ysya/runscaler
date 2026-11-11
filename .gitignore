@@ -8,6 +8,7 @@ config.toml
 # Build output
 /runner
 dist/
+/images/actions-runner/worker/
 
 # IDE
 .idea/

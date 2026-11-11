@@ -16,6 +16,9 @@
 此外，也會以 `in_use / limit` 顯示整台主機的 `concurrent` 容量。
 接著，各 runner 規模集會分別顯示連線狀態、上次成功連線時間與最近一次錯誤。
 磁碟區段會顯示可快速取得的檔案系統剩餘空間；若需要較耗時的各儲存區用量測量，請使用 `runner cache`。
+啟用原生 Actions 快取時，獨立的快取區段會顯示就緒狀態、已完成項目數與用量。
+用量條對照共用保留目標，並非檔案系統的硬性配額；接收器故障時只顯示狀態，
+避免將無法取得的數據誤顯示為零。
 
 ```bash
 # Human-readable dashboard; color is enabled automatically in a terminal
@@ -27,6 +30,11 @@ runner status --json
 # Plain dashboard for logs or terminals where color is undesirable
 runner status --no-color
 ```
+
+`runner update --check` 也會讀取選定服務的設定，在更換 binary 前顯示不阻斷操作的
+sunset 提醒。使用 `--binary-path` 而未選服務時，無法檢查其他服務設定。
+破壞相容變更請查看目標版本的 release notes 與[升級前準備](../README.zh-TW.md#upgrade-requirements)。
+舊版 binary 無法偵測其發布後才新增的提醒。
 
 `/healthz`（以及 `status --json`）中各 runner 規模集的選用 `runtime` 物件，
 會回報啟動嘗試次數、失敗次數、連續失敗次數、上次嘗試與成功啟動時間、

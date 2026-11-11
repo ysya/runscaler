@@ -134,11 +134,15 @@ gh api repos/<owner>/<repo>/actions/runners/deprecations/<version>   # runtime_d
 
 ## 主機本機 Actions 快取（opt-in）
 
-`[docker] actions-cache-url` 空白或未設定時停用。它會繼承 Docker scale-set 預設值；
-在 `[scaleset.docker]` 明確設定 `actions-cache-url = ""` 可取消繼承的端點。
+使用內建 Go 接收器時，在 `[scaleset.docker]` 設定 `native-actions-cache = true`；
+管理程序會自動採用 `[actions-cache].advertise-url`。預設為 false，也可以在 scale set
+用 false 覆寫繼承的 true。既有的 `actions-cache-url` 仍可指定外部接收器等明確端點；
+若與 `native-actions-cache = true` 同時設定或繼承，URL 必須與全域 advertise URL 相同。
 Linux amd64 環境建議逐一 scale set 啟用，並搭配固定 digest、通過驗收的快取專用
 runner 變體。標準 runner 或單純 fork base image 都不夠；最終映像必須提供
 Runscaler 的 capability checker，先驗證能力再接收工作。
+舊的明確 URL 若指向內建接收器，Runscaler 會顯示不阻斷執行的 sunset 警告；
+啟用新開關後可移除重複的 URL。外部接收器 URL 不列入淘汰範圍。
 
 端點必須是有 host 與結尾實際斜線的完整 HTTP(S) URL，不能有帳密、query 或 fragment。
 驗證錯誤不會回顯輸入的敏感值，也不會自動修正或正規化 URL。實際 runner 與旁系
@@ -155,14 +159,14 @@ runner-image = "<verified-local-cache-image>@sha256:<accepted-digest>"
 
 [scaleset.docker]
 platform = "linux/amd64"
-actions-cache-url = "http://<private-host-reachable-from-containers>:3000/"
-cache-volumes = []
-cache = []
+native-actions-cache = true
+# cache-volumes = [] # 只有需要關閉繼承的掛載時才設定
+# cache = []         # 只有需要關閉繼承的掛載時才設定
 ```
 
 服務與資料不可歸屬於 runner，也不可放進一般可清空的快取掛載。
 詳見[服務設定、client 範圍與回復方式](local-actions-cache.zh-TW.md)。
-回復時先 drain 並停用受影響的 opt-in scale set，再還原設定；直接清空端點並恢復
+回復時先 drain 並停用受影響的 opt-in scale set，再還原設定；直接關閉原生快取開關並恢復
 原 cache action 會重新使用 GitHub cache。空字串覆寫是設定語意，不是保證資料只留
 本機的回復程序。
 
@@ -193,10 +197,11 @@ max-idle-days = 30
 BuildKit 容器連通。資料目錄須為全新、私有，且與 Rust volume 分開。預設使用
 GitHub token issuer／JWKS 與 Results 上游；可信任的 HTTPS issuer 可同時設定
 `token-issuer` 與 `jwks-url`，`upstream-results-url` 則是固定 HTTPS 來源。
-沒有略過 token 驗證的開關。只有選用原生快取的 scale set，才需將既有
-`docker.actions-cache-url` 設為與 `advertise-url` 相同；其他 scale set 保留
-原有端點。啟用後，`runner status --json` 與 `runner cache` 會回報原生快取的
-就緒狀態與已完成資料量。
+沒有略過 token 驗證的開關。`native-actions-cache = true` 必須搭配已啟用的全域
+接收器；scale set 會自動取得 advertise URL。其他 scale set 保留原有端點。
+啟用後，文字版與 JSON 版 `runner status` 會回報原生快取的就緒狀態、項目數與容量；
+文字版也會顯示相對於共用保留目標的用量。`runner cache` 可查看更詳細的儲存資訊。
+只有需要關閉繼承的掛載時，才需設定空的 `cache-volumes = []` 與 `cache = []`。
 
 ## GitHub App 驗證
 

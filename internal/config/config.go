@@ -116,9 +116,12 @@ type DockerConfig struct {
 	PidsLimit     int64          `mapstructure:"pids-limit"` // Max pids (processes + threads) per container (0 = unlimited)
 	Platform      string         `mapstructure:"platform"`   // e.g. "linux/amd64" to force architecture
 
-	// ActionsCacheURL opts this scale set into a verified local-cache runner image.
-	// Empty disables the override; a stock runner image is not sufficient.
+	// ActionsCacheURL selects an explicit cache receiver. NativeActionsCache
+	// fills an empty value from the manager's advertised URL.
+	// A stock runner image is not sufficient for either endpoint.
 	ActionsCacheURL string `mapstructure:"actions-cache-url"`
+	// NativeActionsCache uses the manager's advertised native receiver URL.
+	NativeActionsCache bool `mapstructure:"native-actions-cache"`
 
 	// Network is the name of a pre-existing Docker network to attach runner
 	// containers to ("" = the daemon's default bridge). Lets operators isolate
@@ -431,6 +434,7 @@ func (c *Config) ResolveScaleSets() []ScaleSetConfig {
 		for i := range c.ScaleSets {
 			c.ScaleSets[i].applyDefaults()
 			c.ScaleSets[i].resolveEnvToken()
+			c.resolveNativeActionsCache(&c.ScaleSets[i])
 		}
 		return c.ScaleSets
 	}
@@ -439,7 +443,14 @@ func (c *Config) ResolveScaleSets() []ScaleSetConfig {
 	ss := c.Defaults
 	ss.applyDefaults()
 	ss.resolveEnvToken()
+	c.resolveNativeActionsCache(&ss)
 	return []ScaleSetConfig{ss}
+}
+
+func (c *Config) resolveNativeActionsCache(ss *ScaleSetConfig) {
+	if ss.Provider == DefaultProvider && ss.Docker.NativeActionsCache && ss.Docker.ActionsCacheURL == "" {
+		ss.Docker.ActionsCacheURL = c.ActionsCache.AdvertiseURL
+	}
 }
 
 // applyDefaults fills in provider-specific defaults that depend on

@@ -84,7 +84,8 @@ max-runners = 10
 # ready-timeout = "5m"                 # marker + 5s alive, or GitHub work evidence
 socket = "/var/run/docker.sock"
 dind = true
-# actions-cache-url = "" # disabled; requires a verified local-cache runner variant
+# native-actions-cache = false # use the manager's [actions-cache] receiver when true
+# actions-cache-url = "" # explicit external receiver; matching the native URL is deprecated
 # shared-volume = "/shared"
 # shared-volume-name = "runner-shared"     # named volume backing shared-volume; distinct names isolate scalesets (or two runner processes)
 # memory = 0     # MB, 0 = unlimited (e.g. 8192 for 8GB)
@@ -184,9 +185,9 @@ dind = true
 # runner-image = "<verified-local-cache-image>@sha256:<accepted-digest>"
 # [scaleset.docker]
 # platform = "linux/amd64"
-# actions-cache-url = "http://<private-host-reachable-from-containers>:3000/"
-# cache-volumes = [] # disable overlapping inherited language-cache mounts
-# cache = []
+# native-actions-cache = true # uses [actions-cache].advertise-url below
+# cache-volumes = [] # only if overriding inherited language-cache mounts
+# cache = []         # only if overriding inherited [[docker.cache]] mounts
 
 # Native Go receiver: global settings, not inherited by scale sets. Configure
 # a private listener, a verified cache-capable image above, and workflow cache

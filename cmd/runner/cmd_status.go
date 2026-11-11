@@ -28,7 +28,7 @@ var statusCmd = &cobra.Command{
 	SilenceErrors: true,
 	SilenceUsage:  true,
 	Long: `Query the local health endpoint and show runner capacity, scale-set
-connections, job activity, queue depth, and filesystem headroom.`,
+connections, job activity, queue depth, native cache usage, and filesystem headroom.`,
 	Example: `  runner status
   runner status --health-port 9090
   runner status --no-color
@@ -322,6 +322,28 @@ func formatStatus(h health.HealthResponse, endpoint string, now time.Time, color
 			fmt.Fprintf(&b, "    %s%s\n", styles.field("Connection"), formatLastConnected(ss.LastConnected, now))
 			if ss.LastError != "" {
 				fmt.Fprintf(&b, "    %s%s\n", styles.field("Error"), indentContinuation(ss.LastError, 16))
+			}
+		}
+	}
+
+	if cache := h.Cache; cache != nil {
+		fmt.Fprintln(&b)
+		fmt.Fprintln(&b, styles.section("CACHE"))
+		switch {
+		case !cache.Enabled:
+			fmt.Fprintf(&b, "  %s\n", styles.render(styles.warn, "○ DISABLED"))
+		case cache.Degraded:
+			fmt.Fprintf(&b, "  %s\n", styles.render(styles.bad, "● DEGRADED"))
+		case !cache.Ready:
+			fmt.Fprintf(&b, "  %s\n", styles.render(styles.warn, "○ NOT READY"))
+		default:
+			fmt.Fprintf(&b, "  %s · %d entries\n", styles.render(styles.good, "● READY"), cache.Entries)
+			if cache.RetentionTargetBytes > 0 {
+				percent := float64(cache.Bytes) / float64(cache.RetentionTargetBytes) * 100
+				fmt.Fprintf(&b, "    %s  %s used / %s retention target (%.1f%%)\n",
+					diskBar(percent, 16), bytesize.Format(uint64(cache.Bytes)), bytesize.Format(uint64(cache.RetentionTargetBytes)), percent)
+			} else {
+				fmt.Fprintf(&b, "    %s used\n", bytesize.Format(uint64(cache.Bytes)))
 			}
 		}
 	}

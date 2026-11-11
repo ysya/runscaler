@@ -92,7 +92,10 @@ dind = true
 # platform = ""  # force the container platform, e.g. "linux/amd64" on an arm64 host; "" = daemon default
 # pids-limit = 0 # max pids (processes + threads) per container; 0 = unlimited (e.g. 4096 to stop fork bombs)
 # network = ""   # pre-existing docker network to attach runners to; "" = default bridge (e.g. one created with icc disabled)
-# cache-volumes = [                        # named volumes mounted at tool cache paths; persistent, never TTL-swept
+# Deprecated for new deployments: migrate tool caches to workflow Actions
+# cache and configure the native receiver's shared byte/idle limits below.
+# Existing cache volumes remain supported until removed from the config.
+# cache-volumes = [                        # legacy named volumes mounted at tool cache paths
 #   "gradle-cache:/home/runner/.gradle",
 #   "pnpm-store:/home/runner/.local/share/pnpm/store",
 # ]
@@ -107,8 +110,9 @@ dind = true
 # build-cache-max-age = "168h"             # prune build cache entries not used within this window
 # build-cache-budget = 0                   # cap daemon build cache to N GB (LRU-evicted down to the cap); 0 = no cap
 
-# Long form of cache-volumes, for an entry that needs a retention budget. A
-# name also listed in cache-volumes above is replaced entirely by its
+# Deprecated long form of cache-volumes, for an entry that needs a per-volume
+# budget. The native Actions cache uses one shared byte/idle retention policy.
+# A name also listed in cache-volumes above is replaced entirely by its
 # [[docker.cache]] entry, not merged field by field. Keep this the LAST
 # [docker] entry in the file: TOML has no way to "close" a table other than
 # opening the next one, so every bare key below an array-of-tables header
@@ -167,7 +171,7 @@ dind = true
 # max-runners = 2
 # runner-image = "ghcr.io/cirruslabs/macos-golden-gate-xcode:latest"
 
-# --- Host-local Actions cache pilot (Linux amd64, opt-in) ---
+# --- Host-local Actions cache (Linux amd64, opt-in) ---
 # A stock runner or bare fork image does not provide Runscaler's capability check.
 # Use the accepted cache-capable variant's immutable digest after image validation.
 # Do not put the cache service's data volume in cache-volumes or [[docker.cache]].
@@ -183,3 +187,15 @@ dind = true
 # actions-cache-url = "http://<private-host-reachable-from-containers>:3000/"
 # cache-volumes = [] # disable overlapping inherited language-cache mounts
 # cache = []
+
+# Native Go receiver: global settings, not inherited by scale sets. Configure
+# a private listener, a verified cache-capable image above, and workflow cache
+# steps before removing legacy cache-volume mounts. The byte limit is shared
+# across all cached entries; it is not a per-tool limit or hard disk quota.
+# [actions-cache]
+# enabled = true
+# listen-address = "172.18.0.1:32500"
+# advertise-url = "http://cache.internal:32500/"
+# data-dir = "/var/lib/runner/native-actions-cache"
+# max-size-bytes = 53687091200
+# max-idle-days = 30

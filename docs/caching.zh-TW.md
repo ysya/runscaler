@@ -80,7 +80,11 @@ budget    = "20GB"
 on-exceed = "warn"   # warn (default): log only, leave eviction to the tool's own LRU | wipe: delete everything over budget
 ```
 
-簡短格式已足以應付大多數快取：首次使用時建立、持久保存，且永遠不會因任何 TTL 而被清理。不同 runner 規模集使用相同磁碟區名稱即可共用快取；使用不同名稱則可隔離。完整格式另外提供選填的 `budget`，其限制不受磁碟空間壓力影響；防護機制每次清理都會檢查，無論 `max-tier` 為何，或檔案系統是否真的空間吃緊。這裡不會局部淘汰資料：一旦超出容量上限，`wipe` 就會刪除磁碟區的全部內容。細緻的 LRU 淘汰刻意交由工具本身處理（例如 ccache 自己的 `max_size`）；無論是以內容定址的 pnpm 儲存區，還是 Gradle 的 `modules-2` 中繼資料索引，都可能因通用的逐檔清理而損壞。
+新 Docker 部署不再建議使用這兩個設定；現有設定仍會照常運作。簡短格式會建立持久磁碟區，且永遠不會因任何 TTL 而被清理。不同 runner 規模集使用相同磁碟區名稱即可共用快取；使用不同名稱則可隔離。完整格式另外提供選填的 `budget`，其限制不受磁碟空間壓力影響；防護機制每次清理都會檢查，無論 `max-tier` 為何，或檔案系統是否真的空間吃緊。這裡不會局部淘汰資料：一旦超出容量上限，`wipe` 就會刪除磁碟區的全部內容。細緻的 LRU 淘汰刻意交由工具本身處理（例如 ccache 自己的 `max_size`）；無論是以內容定址的 pnpm 儲存區，還是 Gradle 的 `modules-2` 中繼資料索引，都可能因通用的逐檔清理而損壞。
+
+### 遷移至 Actions cache
+
+先設定並驗證[原生 cache-v2 接收器](configuration.zh-TW.md#native-go-receiver-opt-in)及可使用本機快取的 runner 映像，確保工作流程不會默默改用 GitHub 雲端快取。將每個工具快取磁碟區改為在 workflow 使用明確的 `actions/cache` 步驟，或使用已支援快取的 setup action，並設定合適的路徑與 key（參閱 [GitHub 相依快取指南](https://docs.github.com/en/actions/concepts/workflows-and-actions/dependency-caching)）。Buildx 可用 [`type=gha`](https://docs.docker.com/build/cache/backends/gha/) 匯出與匯入；Docker 映像、建置器狀態與磁碟防護仍由主機另外管理。原生接收器的 `max-size-bytes` 與 `max-idle-days` 是所有項目共用的保留策略，不等同逐磁碟區限額，也不是檔案系統的硬性配額。逐卷的 `budget` 與 `on-exceed` 沒有直接對應設定；接收器會先淘汰閒置項目，再依全域最近使用時間淘汰。舊磁碟區資料不會自動轉換：先預期首次冷啟動，確認新 runner 的熱快取命中，再從設定移除舊掛載。舊 Docker volume 的保留或刪除應另行決定。空的 `cache-volumes = []` 或 `cache = []` 覆寫值仍可用來關閉繼承的掛載，不會顯示棄用提示。
 
 **共用磁碟區（`shared-volume`、`shared-volume-max-age`）。** 這是掛載至每個 runner 相同路徑的一般用途磁碟區（透過 `$SHARED_DIR` 提供），供工作流程明確在同一次執行的工作之間傳遞檔案：
 

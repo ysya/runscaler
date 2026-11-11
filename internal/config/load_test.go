@@ -584,6 +584,71 @@ nested-bad = 3
 	}
 }
 
+func TestLoad_CacheVolumeSunsetWarnings(t *testing.T) {
+	tests := []struct {
+		name string
+		toml string
+		want []string
+	}{
+		{
+			name: "single scale set short form",
+			toml: `[docker]
+cache-volumes = ["gradle-cache:/home/runner/.gradle"]`,
+			want: []string{`docker.cache-volumes is deprecated; migrate tool caches to workflow Actions cache before removing this volume mount`},
+		},
+		{
+			name: "inherited and explicit long form",
+			toml: `[docker]
+cache-volumes = ["gradle-cache:/home/runner/.gradle"]
+
+[[scaleset]]
+url = "https://github.com/org"
+name = "runner-a"
+token = "private-test-token"
+[scaleset.docker]
+cache-volumes = []
+[[scaleset.docker.cache]]
+name = "ccache"
+path = "/home/runner/.ccache"
+budget = "20GB"`,
+			want: []string{
+				`docker.cache-volumes is deprecated; migrate tool caches to workflow Actions cache before removing this volume mount`,
+				`scaleset[0]: docker.cache is deprecated; migrate tool caches to workflow Actions cache before removing this volume mount`,
+			},
+		},
+		{
+			name: "empty overrides",
+			toml: `[docker]
+cache-volumes = []
+cache = []
+
+[[scaleset]]
+url = "https://github.com/org"
+name = "runner-a"
+token = "private-test-token"
+[scaleset.docker]
+cache-volumes = []
+cache = []`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := loadTOML(t, tt.toml)
+			if !slices.Equal(cfg.Deprecations, tt.want) {
+				t.Errorf("Deprecations = %q, want %q", cfg.Deprecations, tt.want)
+			}
+			if len(cfg.Warnings) != 0 {
+				t.Errorf("deprecations must not block validation: Warnings = %q", cfg.Warnings)
+			}
+			for _, warning := range cfg.Deprecations {
+				if strings.Contains(warning, "private-test-token") {
+					t.Errorf("warning includes config value: %q", warning)
+				}
+			}
+		})
+	}
+}
+
 // TestLoad_DiskSettings pins that [disk] — a top-level-only section, never
 // part of ScaleSetConfig — decodes into Config.Disk directly, independent of
 // [[scaleset]] entries.
@@ -675,7 +740,6 @@ cpu = 4
 pids-limit = 4096
 platform = "linux/amd64"
 network = "runners"
-cache-volumes = ["gradle-cache:/home/runner/.gradle", "pnpm-store:/home/runner/.local/share/pnpm/store"]
 shared-volume-max-age = "168h"
 shared-volume-cleanup-interval = "6h"
 buildx-cleanup = true
@@ -686,12 +750,6 @@ prune-interval = "6h"
 prune-ttl = "24h"
 build-cache-max-age = "168h"
 build-cache-budget = 50
-
-[[docker.cache]]
-name = "ccache"
-path = "/home/runner/.ccache"
-budget = "20GB"
-on-exceed = "wipe"
 
 [tart]
 home = "/Volumes/tart"

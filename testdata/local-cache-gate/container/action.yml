@@ -2,5 +2,8 @@ name: Verify container local cache runtime
 description: Exercise container and post-container Results endpoint overrides.
 runs:
   using: docker
-  image: Dockerfile
-  post-entrypoint: post.sh
+  image: docker://docker.io/library/node@sha256:ec318aabf188af4e5488847eea4b24452650b9917140563e140762526a37f1df
+  entrypoint: node
+  post-entrypoint: node
+  args:
+    - /github/workspace/testdata/local-cache-gate/container/index.js

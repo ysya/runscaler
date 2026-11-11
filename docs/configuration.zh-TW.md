@@ -141,6 +141,8 @@ gh api repos/<owner>/<repo>/actions/runners/deprecations/<version>   # runtime_d
 Linux amd64 環境建議逐一 scale set 啟用，並搭配固定 digest、通過驗收的快取專用
 runner 變體。標準 runner 或單純 fork base image 都不夠；最終映像必須提供
 Runscaler 的 capability checker，先驗證能力再接收工作。
+舊的明確 URL 若指向內建接收器，Runscaler 會顯示不阻斷執行的 sunset 警告；
+啟用新開關後可移除重複的 URL。外部接收器 URL 不列入淘汰範圍。
 
 端點必須是有 host 與結尾實際斜線的完整 HTTP(S) URL，不能有帳密、query 或 fragment。
 驗證錯誤不會回顯輸入的敏感值，也不會自動修正或正規化 URL。實際 runner 與旁系

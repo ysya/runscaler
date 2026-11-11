@@ -30,6 +30,12 @@ runner status --json
 runner status --no-color
 ```
 
+`runner update --check` also reads the selected service's config and reports
+advisory sunset notices before any binary replacement. It cannot inspect an
+unselected service in `--binary-path` mode. Check the target release notes and
+[upgrade requirements](../README.md#upgrade-requirements) for breaking changes;
+an older binary cannot detect notices added after it was released.
+
 Each scale set's optional `runtime` object in `/healthz` (and `status --json`)
 reports startup attempts, failures, consecutive failures, the last attempt and
 successful start, global-capacity waiting, and draining. Counters last for the

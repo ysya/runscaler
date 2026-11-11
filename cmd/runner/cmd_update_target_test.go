@@ -43,7 +43,7 @@ func TestUpdateUsesInstalledBinaryAndItsVersion(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := os.WriteFile(configPath, []byte("health-port=0\n"), 0600); err != nil {
+	if err := os.WriteFile(configPath, []byte("health-port=0\n[actions-cache]\nenabled=true\nadvertise-url='http://192.168.50.10:3001/'\n[docker]\nactions-cache-url='http://192.168.50.10:3001/'\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	discoverInstallations = func(context.Context) []installationCandidate {
@@ -64,7 +64,7 @@ func TestUpdateUsesInstalledBinaryAndItsVersion(t *testing.T) {
 	installedCalls := 0
 	installUpdateRelease = func(_ context.Context, tag, path string) error {
 		installedCalls++
-		if !strings.Contains(out.String(), "does not check the config") || !strings.Contains(out.String(), "#upgrade-requirements") {
+		if !strings.Contains(out.String(), "does not check the config") || !strings.Contains(out.String(), "#upgrade-requirements") || !strings.Contains(out.String(), "docker.native-actions-cache = true") || !strings.Contains(out.String(), "breaking changes") {
 			t.Fatal("compatibility notice was not printed before replacement")
 		}
 		if tag != "v2.0.0" || path != installed {

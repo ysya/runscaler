@@ -49,8 +49,9 @@ type Config struct {
 	// Disk configures the periodic disk-pressure guard (see DiskConfig).
 	// Global like the fields above: one guard watches every scale set's
 	// stores host-wide, grouped by filesystem rather than by scale set.
-	Disk        DiskConfig        `mapstructure:"disk"`
-	Diagnostics DiagnosticsConfig `mapstructure:"diagnostics"`
+	Disk         DiskConfig         `mapstructure:"disk"`
+	Diagnostics  DiagnosticsConfig  `mapstructure:"diagnostics"`
+	ActionsCache ActionsCacheConfig `mapstructure:"actions-cache"`
 
 	// Multi-scaleset mode: entries as produced by Load, with map-level
 	// inheritance from the top-level defaults already applied.
@@ -639,6 +640,9 @@ func (c *Config) ValidateGlobal() error {
 	}
 	if c.Concurrent < 0 {
 		return fmt.Errorf("concurrent must be >= 0")
+	}
+	if err := c.ActionsCache.Validate(c.HealthPort); err != nil {
+		return err
 	}
 	if err := c.Disk.Validate(); err != nil {
 		return fmt.Errorf("disk: %w", err)

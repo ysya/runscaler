@@ -37,7 +37,7 @@ test('post-handler cache writes restore exact bytes and refuse foreign capabilit
     await new Promise((resolve, reject) => {
       const child = spawn(process.execPath, [path.join(__dirname, '../container/index.js'), 'post'], {
         cwd: path.join(__dirname, '../../..'),
-        env: { ...process.env, EXPECTED_CACHE_URL: endpoint, ACTIONS_RESULTS_URL: endpoint,
+        env: { ...process.env, EXPECTED_CACHE_URL: endpoint, ACTIONS_RESULTS_URL: endpoint, ACTIONS_CACHE_URL: endpoint,
           ACTIONS_CACHE_SERVICE_V2: 'true', ACTIONS_RUNTIME_TOKEN: options.token,
           PROBE_POST_CACHE_KIND: 'container', GITHUB_RUN_ID: options.runId, GITHUB_RUN_ATTEMPT: options.attempt },
         stdio: ['ignore', 'pipe', 'pipe'],

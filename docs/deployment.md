@@ -177,3 +177,10 @@ reload, per-set disable switch, or second-manager exception to the host lock.
 Preserve unrelated entries and check the running version's drain behavior and
 service stop deadline before any restart. Runner/doctor cleanup preserves the
 external cache data volume; it is not a generic wipeable job cache.
+
+The native Go receiver is being developed behind separate acceptance gates.
+Its `[actions-cache]` listener starts before runner listeners and stays available
+through normal drain; a manager restart also interrupts cache and artifact
+passthrough. Test it with a fresh directory and separate port in an isolated
+environment. Preserve the Rust service, external volume, and backups for
+rollback. A host cutover needs its own reviewed maintenance approval.

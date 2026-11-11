@@ -27,6 +27,7 @@ import (
 	"github.com/spf13/viper"
 	"golang.org/x/term"
 
+	"github.com/ysya/runscaler/internal/actionscache"
 	"github.com/ysya/runscaler/internal/backoff"
 	"github.com/ysya/runscaler/internal/cachestore"
 	"github.com/ysya/runscaler/internal/capacity"
@@ -441,10 +442,38 @@ func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) e
 	}
 	reconcileOrphans(ctx, dockerClients, tartHomes, logger)
 
+	// Keep the local Results receiver available until every scale set finishes
+	// draining. Its separate listener has no streaming write timeout.
+	var nativeCache *actionscache.Service
+	if cfg.ActionsCache.Enabled {
+		var err error
+		nativeCache, err = actionscache.NewService(cfg.ActionsCache, logger)
+		if err != nil {
+			return fmt.Errorf("native cache startup: %w", err)
+		}
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if err := nativeCache.Shutdown(shutdownCtx); err != nil {
+				logger.Error("Native cache shutdown failed", slog.Any("error", err))
+			}
+		}()
+		if err := nativeCache.Start(ctx); err != nil {
+			return fmt.Errorf("native cache startup: %w", err)
+		}
+		logger.Info("Native Actions cache started", slog.String("address", cfg.ActionsCache.ListenAddress))
+	}
+
 	// Start health check server
 	var healthServer *health.HealthServer
 	if cfg.HealthPort > 0 {
 		healthServer = health.NewHealthServer(cfg.HealthPort, version, logger)
+		if nativeCache != nil {
+			healthServer.SetCacheProvider(func() health.CacheStatus {
+				status := nativeCache.Status()
+				return health.CacheStatus{Enabled: true, Ready: status.Ready, Degraded: status.Degraded, Entries: status.Entries, Bytes: status.Bytes}
+			})
+		}
 		ln, err := net.Listen("tcp", net.JoinHostPort(cfg.HealthAddress, fmt.Sprintf("%d", cfg.HealthPort)))
 		if err != nil {
 			return fmt.Errorf("failed to start health server on port %d: %w", cfg.HealthPort, err)
@@ -540,9 +569,13 @@ func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) e
 
 	// Run each scale set in its own goroutine
 	var wg sync.WaitGroup
-	errs := make(chan error, len(scaleSets))
+	errs := make(chan error, len(scaleSets)+1)
 	runCtx, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
+	var cacheMonitorDone <-chan struct{}
+	if nativeCache != nil {
+		cacheMonitorDone = watchNativeCacheFailure(runCtx, nativeCache.Failures(), cancelRun, errs)
+	}
 
 	for i, ss := range scaleSets {
 		wg.Add(1)
@@ -557,6 +590,10 @@ func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) e
 	}
 
 	wg.Wait()
+	cancelRun()
+	if cacheMonitorDone != nil {
+		<-cacheMonitorDone
+	}
 	close(errs)
 
 	// Nothing is reclaimed here at exit, by design. Every store has a
@@ -576,6 +613,22 @@ func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) e
 		return errors.Join(errsSlice...)
 	}
 	return nil
+}
+
+func watchNativeCacheFailure(ctx context.Context, failures <-chan error, cancelRun context.CancelFunc, errs chan<- error) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		select {
+		case err, ok := <-failures:
+			if ok && err != nil {
+				errs <- fmt.Errorf("native cache listener: %w", err)
+				cancelRun()
+			}
+		case <-ctx.Done():
+		}
+	}()
+	return done
 }
 
 // runScaleSetController manages the lifecycle of a single scale set. guard is the

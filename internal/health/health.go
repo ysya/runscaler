@@ -46,6 +46,7 @@ type HealthServer struct {
 	states      map[string]connectionState
 	diskFn      func() []DiskStatus
 	capacityFn  func() CapacityStatus
+	cacheFn     func() CacheStatus
 }
 
 type connectionState struct {
@@ -99,6 +100,14 @@ type CapacityStatus struct {
 	InUse int `json:"in_use"`
 }
 
+type CacheStatus struct {
+	Enabled  bool  `json:"enabled"`
+	Ready    bool  `json:"ready"`
+	Entries  int64 `json:"entries"`
+	Bytes    int64 `json:"bytes"`
+	Degraded bool  `json:"degraded,omitempty"`
+}
+
 // HealthResponse is the JSON response for /healthz.
 type HealthResponse struct {
 	Status    string           `json:"status"`
@@ -107,6 +116,7 @@ type HealthResponse struct {
 	ScaleSets []ScaleSetStatus `json:"scale_sets"`
 	Disk      []DiskStatus     `json:"disk,omitempty"`
 	Capacity  *CapacityStatus  `json:"capacity,omitempty"`
+	Cache     *CacheStatus     `json:"cache,omitempty"`
 }
 
 // NewHealthServer creates a new health check HTTP server.
@@ -208,6 +218,12 @@ func (h *HealthServer) SetCapacityProvider(fn func() CapacityStatus) {
 	h.mu.Unlock()
 }
 
+func (h *HealthServer) SetCacheProvider(fn func() CacheStatus) {
+	h.mu.Lock()
+	h.cacheFn = fn
+	h.mu.Unlock()
+}
+
 func (h *HealthServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -224,6 +240,13 @@ func (h *HealthServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	if h.capacityFn != nil {
 		capacity := h.capacityFn()
 		resp.Capacity = &capacity
+	}
+	if h.cacheFn != nil {
+		cache := h.cacheFn()
+		resp.Cache = &cache
+		if !cache.Ready || cache.Degraded {
+			resp.Status = "degraded"
+		}
 	}
 
 	names := make([]string, 0, len(h.controllers))
@@ -285,6 +308,10 @@ func (h *HealthServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
 func (h *HealthServer) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	h.mu.RLock()
 	ready := len(h.controllers) > 0
+	if h.cacheFn != nil {
+		cache := h.cacheFn()
+		ready = ready && cache.Ready && !cache.Degraded
+	}
 	for name := range h.controllers {
 		if !h.states[name].Ready {
 			ready = false

@@ -4,12 +4,11 @@
 已驗收的 cache-v2 client 維持標準 Actions cache key 與還原行為，資料留在本機；
 仍然需要壓縮、解壓及本機 HTTP 傳輸。
 
-目前相容性 gate 涵蓋 Linux amd64、釘選的 server／runner、actions/cache v6.1.0、
-setup-go、setup-node/npm、Gradle basic、Rust GitHub provider、artifact 轉送及
-BuildKit v2 匯出／匯入。請閱讀[固定 revision、三組量測與限制](local-actions-cache-compatibility.md)。
-隔離環境真實 job、provider guard 與完整工具鏈映像建置已通過。
-這些結果尚未涵蓋正式部署：完整映像發布與 provider 管理的主機 canary 仍待操作者核准。
-Arm64 與其他 client 尚未驗證；標準 runner 映像維持原行為。
+[外部 Rust 服務相容性報告](local-actions-cache-compatibility.md)記錄原先釘選的
+client 與 runtime gate；[原生 Go 接收器驗收](native-actions-cache-v2-acceptance.md)
+另記錄失效保護 runner 映像、真實簽名 client、重啟與斷線結果。兩者都只涵蓋
+Linux amd64 與列出的 client。Provider 管理的主機 canary 和工作排空仍是
+獨立的部署關卡；標準 runner 映像維持原行為。
 
 ## 資源歸屬與資料保存
 
@@ -86,8 +85,9 @@ protocol、source／version、Worker／Listener checksum；缺檔或被修改就
 
 ## Client 使用範圍
 
-僅啟用已驗收的 client 與固定 revision。第一版不支援舊的 v1 client；fork 仍然會
-提供 GitHub 的 `ACTIONS_CACHE_URL`。直接執行 shell 工具時需要明確匯出 runtime
+僅啟用已驗收的 client 與固定 revision。舊的 v1 client 不受支援。原本已驗收的
+映像仍提供 GitHub 的 `ACTIONS_CACHE_URL`；獨立的原生 v2 失效保護映像會將它指向
+本機 receiver，由本機拒絕 v1 請求，不回退到雲端。直接執行 shell 工具時需要明確匯出 runtime
 環境；container handler 未設定 v2 flag 時，也需明確啟用 v2。
 已驗收的 setup-go、setup-node/npm、Gradle basic 與 Rust GitHub provider revision
 列於證據報告；pnpm 與其他 provider 尚未驗證。Rust 還原 crate 後仍可能取得 registry
@@ -132,16 +132,43 @@ v10 是單向遷移：比 v9.10 更舊的資料庫會被刪除並清空 storage�
 90 秒上限無法容納新版預設兩小時 drain。詳見[服務期限處理](deployment.zh-TW.md#graceful-shutdown)。
 不可為了部署而強制終止業務 job。
 
-獲得明確部署核准後，發布獨立 tag 的 amd64 映像並驗證 digest／attestation，啟動
-獨立快取服務，加入獨立 label、最多一個 runner 的 canary entry。停用重疊的共用
-可寫語言快取掛載並保留其資料。擴大前，實測 runner 與旁系 BuildKit 的上傳／下載、
-服務重建後全新 runner 的還原及總耗時。隔離環境已通過兩個並行 job，正式容量仍需確認。
+獲得明確部署核准後，使用已驗證 digest 的失效保護映像。在另一個私有連接埠
+與全新私有資料目錄啟動原生 Go listener，同時保留 Rust 服務。新增只帶獨立
+label、最多一個 runner 的 canary scale set，避免一般組織工作被派入。
+在 provider 管理的 runner 上驗證簽名保存／還原、artifact 轉送及旁系 BuildKit
+上傳／下載後，再排空並切換選定的現有 scale set。停用重疊的共用可寫語言快取
+掛載並保留其資料。正式容量與磁碟效能仍需另行觀察。
 
-回復時停止派發 canary 工作並排空。在 manager 停止期間，只移除 canary 設定 entry，
-還原已審閱的舊 binary／設定與相容服務定義，再以原值重啟其他 entry。保留外部
-資料 volume 與私有備份；一般回復不刪除 GitHub scale-set 註冊。隔離 JIT 測試
-不代表已演練正式 manager 重啟。
+回復時停止派發 canary 工作並排空。在 manager 停止期間，還原已審閱的舊
+binary／設定與相容服務定義，包括選定 scale set 的 Rust endpoint 與舊 runner
+映像。保留兩份快取資料與私有備份；一般回復不刪除 GitHub scale-set 註冊。
+隔離 JIT 測試不代表已演練正式 manager 重啟。
 
 直接清空端點後恢復原 cache action，會重新將 payload 傳到 GitHub。除非操作者
 明確選擇已審閱、略過所有相關 cache 操作的 workflow，否則維持 canary 工作暫停。
 本次未驗證適用於所有 helper 的停用配方，因此不提供自動復跑路徑。
+
+## 原生 Go 接收器
+
+可選用的原生接收器位於 manager 程序內，使用獨立私有連接埠與全新資料目錄。
+它根據已驗證 token 的 repository／scope 授權，完成後的 key 不可覆蓋，
+依序提交 Azure block，並發出有期限的本機 payload URL。SQLite 與私有檔案
+一起保存資料；非 cache 的 Results 請求仍轉送至固定 GitHub 上游供 artifact
+使用。正常 drain 期間 listener 保持運作。備份或還原時，須先停止 manager，
+並把整個原生目錄中的資料庫、WAL、物件及 capability key 一起處理。
+`runner status --json` 回報就緒狀態；`runner cache` 唯讀查詢已完成的項目數與容量。
+
+本機協定驗證需安裝 Node.js，然後執行：
+
+```sh
+RUNSCALER_NATIVE_FIXTURE=1 go test -race ./internal/actionscache -run '^TestNativeProtocolFixture$' -count=1
+```
+
+此測試只在 loopback 啟動一次性的 issuer 與 cache HTTP listener，檢查授權後的
+分塊上傳、逐位元組還原、取消、重新開啟 store，以及受控的 artifact 轉送。
+它不註冊 runner，也不證明真實 GitHub 簽名 job 的相容性。
+
+切換期間保留 Rust 服務與資料作為回復端點。原本 runner 映像對舊版 v1 client
+仍提供 GitHub 的 `ACTIONS_CACHE_URL`；原生 v2 應使用已驗證的失效保護映像，
+讓舊版請求在本機遭拒。[真實簽名驗收證據](native-actions-cache-v2-acceptance.md)
+另行記錄；本機協定測試不能取代真實簽名 client 驗收。

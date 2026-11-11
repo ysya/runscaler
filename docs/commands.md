@@ -14,6 +14,10 @@ process-lifetime job counters. It also shows host-wide `concurrent` capacity as
 successful connection, and last error. The disk section shows cheap
 filesystem-level free-space readings; use `runner cache` when you need the
 slower per-store usage measurements.
+When the native Actions cache is enabled, a separate cache section shows its
+readiness, completed-entry count, and used bytes. The usage bar compares bytes
+with the shared retention target; it is not a hard filesystem quota. A degraded
+receiver shows its state without stale-looking zero counts.
 
 ```bash
 # Human-readable dashboard; color is enabled automatically in a terminal

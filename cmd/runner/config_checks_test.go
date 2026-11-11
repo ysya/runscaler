@@ -39,3 +39,23 @@ func TestCheckScaleSetsRejectsWhatRunRejects(t *testing.T) {
 		t.Errorf("an invalid scale set = %v, want it named", err)
 	}
 }
+
+func TestCheckScaleSetsNativeActionsCacheRequiresMatchingReceiver(t *testing.T) {
+	ss := validScaleSet("native", 0)
+	ss.Docker.NativeActionsCache = true
+	ss.Docker.ActionsCacheURL = "http://192.168.50.10:3001/"
+	for _, tc := range []struct {
+		name string
+		cfg  config.Config
+		want string
+	}{
+		{name: "disabled", want: "actions-cache.enabled"},
+		{name: "mismatch", cfg: config.Config{ActionsCache: config.ActionsCacheConfig{Enabled: true, AdvertiseURL: "http://192.168.50.10:3002/"}}, want: "actions-cache.advertise-url"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := checkScaleSets(tc.cfg, []config.ScaleSetConfig{ss}); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("checkScaleSets() = %v, want %s error", err, tc.want)
+			}
+		})
+	}
+}

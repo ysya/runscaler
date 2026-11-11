@@ -1173,3 +1173,56 @@ token="test-only"
 		t.Fatal("legacy configuration must keep local cache disabled")
 	}
 }
+
+func TestLoad_NativeActionsCacheUsesGlobalAdvertiseURL(t *testing.T) {
+	cfg := loadTOML(t, `
+[actions-cache]
+enabled = true
+advertise-url = "http://192.168.50.10:3001/"
+
+[docker]
+native-actions-cache = true
+
+[[scaleset]]
+name = "native"
+url = "https://github.com/test-org"
+token = "test-only"
+
+[[scaleset]]
+name = "external"
+url = "https://github.com/test-org"
+token = "test-only"
+[scaleset.docker]
+native-actions-cache = false
+actions-cache-url = "https://cache.example/"
+
+[[scaleset]]
+name = "disabled"
+url = "https://github.com/test-org"
+token = "test-only"
+[scaleset.docker]
+native-actions-cache = false
+`)
+	if len(cfg.Warnings) != 0 {
+		t.Fatalf("unexpected warnings: %v", cfg.Warnings)
+	}
+	sets := cfg.ResolveScaleSets()
+	for i, want := range []string{"http://192.168.50.10:3001/", "https://cache.example/", ""} {
+		if got := sets[i].Docker.ActionsCacheURL; got != want {
+			t.Errorf("set %d endpoint = %q, want %q", i, got, want)
+		}
+	}
+	legacy := loadTOML(t, `
+url = "https://github.com/test-org"
+name = "single"
+token = "test-only"
+[docker]
+native-actions-cache = true
+[actions-cache]
+enabled = true
+advertise-url = "http://192.168.50.10:3001/"
+`)
+	if got := legacy.ResolveScaleSets()[0].Docker.ActionsCacheURL; got != "http://192.168.50.10:3001/" {
+		t.Errorf("single-mode endpoint = %q", got)
+	}
+}

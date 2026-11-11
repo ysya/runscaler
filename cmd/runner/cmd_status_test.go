@@ -177,3 +177,36 @@ func TestFormatStatusIncludesGlobalCapacity(t *testing.T) {
 		t.Fatalf("status output missing global capacity:\n%s", got)
 	}
 }
+
+func TestFormatStatusShowsNativeCacheSnapshot(t *testing.T) {
+	got := formatStatus(health.HealthResponse{
+		Status: "ok",
+		Cache:  &health.CacheStatus{Enabled: true, Ready: true, Entries: 29, Bytes: 25 << 30, RetentionTargetBytes: 50 << 30},
+	}, "endpoint", time.Time{}, false)
+	for _, want := range []string{"CACHE", "● READY", "29 entries", "[████████░░░░░░░░]", "25.0 GiB used / 50.0 GiB retention target (50.0%)"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("status output missing %q:\n%s", want, got)
+		}
+	}
+
+	degraded := formatStatus(health.HealthResponse{
+		Status: "degraded",
+		Cache:  &health.CacheStatus{Enabled: true, Degraded: true},
+	}, "endpoint", time.Time{}, false)
+	if !strings.Contains(degraded, "● DEGRADED") || strings.Contains(degraded, "0 entries") {
+		t.Errorf("degraded cache reported misleading metrics:\n%s", degraded)
+	}
+	withoutCache := formatStatus(health.HealthResponse{Status: "ok"}, "endpoint", time.Time{}, false)
+	if strings.Contains(withoutCache, "CACHE") {
+		t.Errorf("cache section appeared without a cache provider:\n%s", withoutCache)
+	}
+}
+
+func TestFormatStatusAcceptsOlderCacheSnapshotWithoutTarget(t *testing.T) {
+	got := formatStatus(health.HealthResponse{
+		Cache: &health.CacheStatus{Enabled: true, Ready: true, Entries: 2, Bytes: 150339389},
+	}, "endpoint", time.Time{}, false)
+	if !strings.Contains(got, "143.4 MiB used") || strings.Contains(got, "retention target") {
+		t.Errorf("older cache snapshot rendered incorrectly:\n%s", got)
+	}
+}

@@ -16,6 +16,9 @@
 此外，也會以 `in_use / limit` 顯示整台主機的 `concurrent` 容量。
 接著，各 runner 規模集會分別顯示連線狀態、上次成功連線時間與最近一次錯誤。
 磁碟區段會顯示可快速取得的檔案系統剩餘空間；若需要較耗時的各儲存區用量測量，請使用 `runner cache`。
+啟用原生 Actions 快取時，獨立的快取區段會顯示就緒狀態、已完成項目數與用量。
+用量條對照共用保留目標，並非檔案系統的硬性配額；接收器故障時只顯示狀態，
+避免將無法取得的數據誤顯示為零。
 
 ```bash
 # Human-readable dashboard; color is enabled automatically in a terminal

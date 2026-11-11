@@ -189,7 +189,7 @@ jobs:
 | `runner run` | 啟動 runner 管理程序 |
 | `runner init` | 互動式產生設定檔 |
 | `runner validate` | 驗證設定與連線 |
-| `runner status` | 顯示容量、連線、工作、佇列與磁碟剩餘空間 |
+| `runner status` | 顯示容量、工作、原生快取與磁碟剩餘空間 |
 | `runner doctor` | 診斷 GitHub 連線與孤立的容器／VM |
 | `runner cache` | 顯示各快取儲存區的磁碟用量與保留原則 |
 | `runner logs` | 顯示／持續追蹤 runner 的輪替日誌檔 |

@@ -171,7 +171,7 @@ jobs:
 | `runner run`             | Start the runner manager                               |
 | `runner init`            | Generate a config file interactively                   |
 | `runner validate`        | Validate configuration and connectivity                |
-| `runner status`          | Show capacity, connections, jobs, queues, and disk headroom |
+| `runner status`          | Show capacity, jobs, native cache, and disk headroom |
 | `runner doctor`          | Diagnose GitHub connectivity and orphaned containers/VMs |
 | `runner cache`           | Show disk usage and retention policy for every cache store |
 | `runner logs`            | Show/follow runner's rotating log file                  |

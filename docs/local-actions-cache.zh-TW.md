@@ -70,7 +70,8 @@ docker compose --env-file deploy/local-cache/.env -f deploy/local-cache/compose.
 
 ## Opt-in runner 啟動
 
-只在選定的 Docker scale set 設定 `actions-cache-url`，並使用通過驗證、固定 digest 的
+使用原生接收器時，只在選定的 Docker scale set 設定 `native-actions-cache = true`，
+並設定全域 `[actions-cache].advertise-url`。使用通過驗證、固定 digest 的
 快取專用變體。詳見[設定](configuration.zh-TW.md)與
 [映像建置及維護](../images/actions-runner/README.md#opt-in-host-local-actions-cache-variant)。
 單純 fork base image 或標準映像不會提供已安裝的 capability checker。
@@ -156,7 +157,7 @@ binary／設定與相容服務定義，包括選定 scale set 的 Rust endpoint 
 一起保存資料；非 cache 的 Results 請求仍轉送至固定 GitHub 上游供 artifact
 使用。正常 drain 期間 listener 保持運作。備份或還原時，須先停止 manager，
 並把整個原生目錄中的資料庫、WAL、物件及 capability key 一起處理。
-`runner status --json` 回報就緒狀態；`runner cache` 唯讀查詢已完成的項目數與容量。
+`runner status` 回報就緒狀態與用量；`runner cache` 唯讀查詢已完成的項目數與容量。
 
 本機協定驗證需安裝 Node.js，然後執行：
 

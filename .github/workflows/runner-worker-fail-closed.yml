@@ -6,10 +6,17 @@ on:
     paths:
       - .github/workflows/runner-worker-fail-closed.yml
       - images/actions-runner/fail-closed-v1.patch
+      - images/actions-runner/check-fail-closed.sh
+      - images/actions-runner/Dockerfile.fail-closed
   workflow_dispatch:
 
 permissions:
   contents: read
+
+env:
+  CACHE_IMAGE: ghcr.io/${{ github.repository_owner }}/actions-runner-local-cache
+  CACHE_TAG: sha-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}-failclosed-amd64
+  DOCKER_BUILD_RECORD_UPLOAD: 'false'
 
 jobs:
   linux-amd64:
@@ -23,6 +30,7 @@ jobs:
         run: |
           set -euo pipefail
           source_dir="$RUNNER_TEMP/runner-source"
+          printf '%s  %s\n' 5c801dea0cbed7265cfa0e716d2f126ae1ed934c96000046cf89c89b701ccde0 "$GITHUB_WORKSPACE/images/actions-runner/fail-closed-v1.patch" | sha256sum --check
           git init -q "$source_dir"
           git -C "$source_dir" remote add origin https://github.com/falcondev-oss/github-actions-runner.git
           git -C "$source_dir" fetch --depth=1 origin 3efdc9c0d8a5b7a441cba3069b0fdc33d1931adb
@@ -52,6 +60,7 @@ jobs:
           worker="$RUNNER_TEMP/runner-source/_layout/bin/Runner.Worker.dll"
           test -s "$worker"
           sha256sum "$worker"
+          printf '%s  %s\n' e7a2751d8a55743583582457c4ac746b09f4a0401a891327acede6ea9d7c14e5 "$worker" | sha256sum --check
           mkdir -p "$RUNNER_TEMP/worker-artifact"
           cp "$worker" "$RUNNER_TEMP/worker-artifact/Runner.Worker.dll"
 
@@ -60,3 +69,62 @@ jobs:
           name: runner-worker-fail-closed-linux-amd64
           path: ${{ runner.temp }}/worker-artifact/Runner.Worker.dll
           retention-days: 7
+
+  publish:
+    needs: linux-amd64
+    if: github.ref == 'refs/heads/feat/native-actions-cache-v2-acceptance'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.1
+        with:
+          name: runner-worker-fail-closed-linux-amd64
+          path: images/actions-runner/worker
+      - name: Verify exact Worker and source patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s  %s\n' e7a2751d8a55743583582457c4ac746b09f4a0401a891327acede6ea9d7c14e5 images/actions-runner/worker/Runner.Worker.dll | sha256sum --check
+          printf '%s  %s\n' 5c801dea0cbed7265cfa0e716d2f126ae1ed934c96000046cf89c89b701ccde0 images/actions-runner/fail-closed-v1.patch | sha256sum --check
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+        with:
+          cache-binary: false
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish the fail-closed image
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: images/actions-runner
+          file: images/actions-runner/Dockerfile.fail-closed
+          platforms: linux/amd64
+          push: true
+          tags: ${{ env.CACHE_IMAGE }}:${{ env.CACHE_TAG }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            io.runscaler.local-actions-cache.protocol=v2
+            io.runscaler.local-actions-cache.runner-source=3efdc9c0d8a5b7a441cba3069b0fdc33d1931adb
+            io.runscaler.local-actions-cache.legacy-v1=local-reject
+          provenance: mode=max
+      - name: Attest the published image digest
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
+        with:
+          subject-name: ${{ env.CACHE_IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+      - name: Record the pinned image
+        env:
+          IMAGE: ${{ env.CACHE_IMAGE }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          printf 'Fail-closed cache image: `%s@%s`\n' "$IMAGE" "$DIGEST" >> "$GITHUB_STEP_SUMMARY"

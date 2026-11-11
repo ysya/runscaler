@@ -10,8 +10,14 @@ module.exports = async function check(post = false) {
   assert.equal(local.username + local.password + local.search + local.hash, '', 'endpoint must not contain credentials or query parameters');
   assert.ok(!local.hostname.endsWith('githubusercontent.com') && !local.hostname.endsWith('github.com'), 'GitHub cannot be the cache endpoint');
   assert.equal(process.env.ACTIONS_RESULTS_URL, expected, 'runner overwrote local Results endpoint');
+  assert.equal(process.env.ACTIONS_CACHE_URL, expected, 'legacy cache endpoint must be local');
   assert.equal(String(process.env.ACTIONS_CACHE_SERVICE_V2).toLowerCase(), 'true', 'v2 required before any cache action runs');
   assert.ok(process.env.ACTIONS_RUNTIME_TOKEN, 'runtime token required');
+  const legacy = await fetch(new URL('_apis/artifactcache/cache?keys=runscaler-canary', expected), {
+    redirect: 'error', signal: AbortSignal.timeout(10000),
+    headers: { authorization: 'Bearer ' + process.env.ACTIONS_RUNTIME_TOKEN },
+  });
+  assert.equal(legacy.status, 404, 'legacy v1 cache must be rejected locally');
   const response = await fetch(new URL('twirp/github.actions.results.api.v1.CacheService/GetCacheEntryDownloadURL', expected), {
     method: 'POST', redirect: 'error', signal: AbortSignal.timeout(10000),
     headers: { 'content-type': 'application/json', authorization: 'Bearer ' + process.env.ACTIONS_RUNTIME_TOKEN },

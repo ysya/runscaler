@@ -4,6 +4,7 @@ let stage = 'runtime check';
   const expected = process.env.EXPECTED_CACHE_URL;
   assert.ok(expected, 'verified endpoint required');
   assert.equal(process.env.ACTIONS_RESULTS_URL, expected, 'container Results endpoint');
+  assert.equal(process.env.ACTIONS_CACHE_URL, expected, 'container legacy cache endpoint must be local');
   assert.equal(String(process.env.ACTIONS_CACHE_SERVICE_V2).toLowerCase(), 'true', 'explicit container v2 mode required');
   assert.ok(process.env.ACTIONS_RUNTIME_TOKEN, 'container runtime token required');
   const response = await fetch(new URL('twirp/github.actions.results.api.v1.CacheService/GetCacheEntryDownloadURL', expected), {

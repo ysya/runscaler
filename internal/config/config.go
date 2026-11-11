@@ -102,15 +102,16 @@ type ScaleSetConfig struct {
 
 // DockerConfig holds Docker-specific provider settings.
 type DockerConfig struct {
-	Readiness    *bool          `mapstructure:"readiness"`
-	ReadyTimeout *time.Duration `mapstructure:"ready-timeout"`
-	Socket       string         `mapstructure:"socket"`
-	DinD         *bool          `mapstructure:"dind"` // pointer: nil = inherit default (true)
-	SharedVolume string         `mapstructure:"shared-volume"`
-	Memory       int            `mapstructure:"memory"`     // Memory limit in MB (0 = unlimited)
-	CPU          int            `mapstructure:"cpu"`        // CPU cores (0 = unlimited)
-	PidsLimit    int64          `mapstructure:"pids-limit"` // Max pids (processes + threads) per container (0 = unlimited)
-	Platform     string         `mapstructure:"platform"`   // e.g. "linux/amd64" to force architecture
+	Readiness     *bool          `mapstructure:"readiness"`
+	ReadyTimeout  *time.Duration `mapstructure:"ready-timeout"`
+	Socket        string         `mapstructure:"socket"`
+	DinD          *bool          `mapstructure:"dind"`           // pointer: nil = inherit default (true)
+	WorkspaceRoot string         `mapstructure:"workspace-root"` // private host directory for per-runner Docker bind translation
+	SharedVolume  string         `mapstructure:"shared-volume"`
+	Memory        int            `mapstructure:"memory"`     // Memory limit in MB (0 = unlimited)
+	CPU           int            `mapstructure:"cpu"`        // CPU cores (0 = unlimited)
+	PidsLimit     int64          `mapstructure:"pids-limit"` // Max pids (processes + threads) per container (0 = unlimited)
+	Platform      string         `mapstructure:"platform"`   // e.g. "linux/amd64" to force architecture
 
 	// ActionsCacheURL opts this scale set into a verified local-cache runner image.
 	// Empty disables the override; a stock runner image is not sufficient.
@@ -569,6 +570,14 @@ func (ss *ScaleSetConfig) Validate() error {
 	case DefaultProvider:
 		if err := validateActionsCacheURL(ss.Docker.ActionsCacheURL); err != nil {
 			return err
+		}
+		if root := ss.Docker.WorkspaceRoot; root != "" {
+			if !ss.IsDinD() {
+				return fmt.Errorf("docker.workspace-root requires docker.dind=true")
+			}
+			if !filepath.IsAbs(root) || filepath.Clean(root) != root || root == "/" {
+				return fmt.Errorf("docker.workspace-root must be a clean absolute host path other than /")
+			}
 		}
 		if ss.Docker.Platform != "" {
 			parts := strings.Split(ss.Docker.Platform, "/")

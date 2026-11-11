@@ -37,6 +37,7 @@ health-port = 8080
 [docker]
 socket = "/var/run/docker.sock"
 dind = true
+# workspace-root = "/home/runscaler/runner-workspaces" # Linux：Docker workspace bind 專用主機目錄
 shared-volume = "/shared"
 # shared-volume-max-age = "168h"        # delete shared-volume files older than this; unset = never reclaimed
 # buildx-cleanup = true                 # opt in only on a runner-dedicated daemon
@@ -48,6 +49,15 @@ shared-volume = "/shared"
 # build-cache-max-age = "168h"          # prune build cache entries not used within this window
 # build-cache-budget = 0                # cap daemon build cache to N GB (0 = no cap)
 ```
+
+在使用主機 Docker socket 的 Linux 主機上，container action 的 workspace bind
+原本會由主機解析，無法讀到 runner 容器內的檔案。若要支援這類 action，先建立由管理程式
+使用者擁有、權限為 `0700` 的 `workspace-root` 目錄，再於適用的 `[docker]` 或
+`[scaleset.docker]` 設定。管理程式會為每個 runner 建立獨立的主機工作目錄與 Unix
+socket 代理；代理只轉換 `/home/runner/_work` 下的 Docker 容器 bind 來源，runner
+內的路徑仍固定，讓快取用戶端維持相同的版本鍵。runner 的容器停止後才會移除其工作目錄；
+管理程式重啟時也會檢查存活的 Docker 掛載，再清理上次異常結束留下的目錄。此選項需
+搭配 `dind = true`。
 
 當 runner 使用 `docker buildx` 建置映像檔（例如透過 `docker/setup-buildx-action`）時，每次執行都可能留下 BuildKit builder 容器，以及容量達數 GB 的 `buildx_buildkit_*_state` 磁碟區。在持續運作、共用同一個 Docker daemon 的主機上，這些資源會不斷累積，直到磁碟空間耗盡。若 daemon 專供 runner 使用，可設定 `buildx-cleanup = true` 啟用清理；runner 接著會移除建立時間超過 `buildx-cleanup-ttl` 的 builder。若持續保留的 builder 或其他工作負載也共用該 daemon，請勿啟用。
 
@@ -310,6 +320,7 @@ pool-size = 2
 | `--runner-image` | `runner-image` | `ghcr.io/actions/actions-runner:latest` | runner 映像檔（Docker 映像檔或 Tart VM 映像檔） |
 | `--docker-socket` | `[docker] socket` | `/var/run/docker.sock` | Docker socket 路徑（Docker 供應器） |
 | `--dind` | `[docker] dind` | `true` | 將 Docker socket 掛載至 runner（Docker 供應器） |
+| — | `[docker] workspace-root` | 未設定 | Linux 主機上的私人目錄，供各 runner 轉換 workspace bind 路徑 |
 | `--shared-volume` | `[docker] shared-volume` | | Docker 共用磁碟區路徑（Docker 供應器） |
 | `--tart-cpu` | `[tart] cpu` | `0`（映像檔預設值） | 每個 VM 的 CPU 核心數（Tart 供應器） |
 | `--tart-memory` | `[tart] memory` | `0`（映像檔預設值） | 每個 VM 的記憶體大小，單位為 MB（Tart 供應器） |

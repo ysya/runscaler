@@ -435,12 +435,15 @@ func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) e
 	// previous process. Reconcile them before any new scale set can start.
 	// Dry-run returns above because it must not perform destructive cleanup.
 	var tartHomes []string
+	var workspaceRoots []string
 	for _, ss := range scaleSets {
 		if ss.IsTart() {
 			tartHomes = append(tartHomes, ss.Tart.Home)
+		} else if ss.Docker.WorkspaceRoot != "" {
+			workspaceRoots = append(workspaceRoots, ss.Docker.WorkspaceRoot)
 		}
 	}
-	reconcileOrphans(ctx, dockerClients, tartHomes, logger)
+	reconcileOrphans(ctx, dockerClients, tartHomes, logger, workspaceRoots...)
 
 	// Keep the local Results receiver available until every scale set finishes
 	// draining. Its separate listener has no streaming write timeout.

@@ -80,12 +80,15 @@ func rewriteDockerCreate(r *http.Request, hostWork string) error {
 	if err := json.Unmarshal(body, &request); err != nil {
 		return err
 	}
-	var host map[string]json.RawMessage
-	if err := json.Unmarshal(request["HostConfig"], &host); err != nil {
-		return err
+	rawHost, ok := request["HostConfig"]
+	if !ok || string(rawHost) == "null" {
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		r.ContentLength = int64(len(body))
+		return nil
 	}
-	if len(host) == 0 {
-		return errors.New("missing Docker HostConfig")
+	var host map[string]json.RawMessage
+	if err := json.Unmarshal(rawHost, &host); err != nil {
+		return err
 	}
 	if raw, ok := host["Binds"]; ok && string(raw) != "null" {
 		var binds []string

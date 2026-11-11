@@ -1,8 +1,12 @@
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+let stage = 'runtime check';
 (async () => {
+  const post = process.argv[2] === 'post' || process.env.STATE_container_main_done === 'true';
   const expected = process.env.EXPECTED_CACHE_URL;
   assert.ok(expected, 'verified endpoint required');
   assert.equal(process.env.ACTIONS_RESULTS_URL, expected, 'container Results endpoint');
+  assert.equal(process.env.ACTIONS_CACHE_URL, expected, 'container legacy cache endpoint must be local');
   assert.equal(String(process.env.ACTIONS_CACHE_SERVICE_V2).toLowerCase(), 'true', 'explicit container v2 mode required');
   assert.ok(process.env.ACTIONS_RUNTIME_TOKEN, 'container runtime token required');
   const response = await fetch(new URL('twirp/github.actions.results.api.v1.CacheService/GetCacheEntryDownloadURL', expected), {
@@ -12,10 +16,18 @@ const assert = require('node:assert/strict');
   });
   assert.equal(response.status, 200, 'container runtime authentication');
   assert.equal((await response.json()).ok, false, 'random container key must miss');
-  if (process.argv[2] === 'post' && process.env.PROBE_POST_CACHE_KIND) {
-    await require(require('node:path').resolve('testdata/local-cache-gate/node/post-cache.js')).savePost(
+  if (post && process.env.PROBE_POST_CACHE_KIND) {
+    stage = 'post cache save';
+    await require('./post-cache.js').savePost(
       process.env.PROBE_POST_CACHE_KIND, { endpoint: expected, token: process.env.ACTIONS_RUNTIME_TOKEN,
         runId: process.env.GITHUB_RUN_ID, attempt: process.env.GITHUB_RUN_ATTEMPT });
   }
+  if (!post && process.env.GITHUB_STATE) fs.appendFileSync(process.env.GITHUB_STATE, 'container_main_done=true\n');
   console.log('container Results endpoint and runtime authentication verified');
-})().catch(() => { console.error('Local cache container gate failed.'); process.exitCode = 1; });
+})().catch((error) => {
+  const detail = error instanceof assert.AssertionError
+    ? error.message
+    : [error?.name, error?.code, error?.cause?.code].filter(Boolean).join('/');
+  console.error('Local cache container gate failed at ' + stage + ': ' + detail);
+  process.exitCode = 1;
+});

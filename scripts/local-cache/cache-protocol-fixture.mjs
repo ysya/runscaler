@@ -7,6 +7,8 @@ import { request as httpsRequest } from 'node:https';
 
 const base = process.env.PROBE_CACHE_URL ?? 'http://gate-server:3000/';
 const issuer = process.env.PROBE_ISSUER_URL ?? 'http://gate-client:4080';
+const issuerBindHost = process.env.PROBE_BIND_HOST ?? '0.0.0.0';
+const unknownDownloadStatus = Number(process.env.PROBE_UNKNOWN_DOWNLOAD_STATUS ?? 404);
 const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
 const kid = randomUUID();
 const jwk = { ...publicKey.export({ format: 'jwk' }), kid, alg: 'RS256', use: 'sig' };
@@ -153,10 +155,10 @@ async function run(phase) {
   assert.deepEqual(Buffer.from(await response.arrayBuffer()), payload, 'restored bytes');
   assert.equal((await lookup(token(), 'missing-primary', ['runscaler-controlled-'])).ok, true, 'restore prefix');
   results.push('local restore: checksum verified');
-  // Filesystem downloads use a random UUID path as a bearer capability, not a query signature.
+  // Altering a signed download path must reject the capability.
   const malformed = new URL(download); malformed.pathname = '/download/00000000-0000-0000-0000-000000000000';
   const forbidden = await fetch(malformed, { redirect: 'error' });
-  assert.equal(forbidden.status, 404, 'unknown download capability rejected'); await forbidden.arrayBuffer();
+  assert.equal(forbidden.status, unknownDownloadStatus, 'unknown download capability rejected'); await forbidden.arrayBuffer();
   results.push('unknown download capability: rejected');
   const artifactBefore = artifactRequests;
   const artifact = await fetch(new URL('fixture-artifact', base), { method: 'POST', body: 'synthetic-artifact', redirect: 'error' });
@@ -192,4 +194,4 @@ createServer(async (request, response) => {
     response.writeHead(500, { 'content-type': 'application/json' });
     response.end(JSON.stringify({ error: error.message }));
   }
-}).listen(4080, '0.0.0.0', () => console.log('controlled issuer fixture ready'));
+}).listen(Number(new URL(issuer).port || 4080), issuerBindHost, () => console.log('controlled issuer fixture ready'));

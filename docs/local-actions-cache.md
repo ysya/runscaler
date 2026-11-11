@@ -5,14 +5,13 @@ runners. Supported cache-v2 clients retain their standard Actions cache keys and
 restore behavior; archive creation/extraction and local HTTP transfers still
 happen. This is not a zero-copy cache.
 
-The current compatibility gate covers Linux amd64, the pinned server/runner
-candidates, actions/cache v6.1.0, setup-go, setup-node/npm, Gradle basic,
-Rust GitHub-provider cache, artifact passthrough and BuildKit v2 export/import.
-See [immutable revisions, three-pair measurements and limits](local-actions-cache-compatibility.md).
-The isolated real-job tests, provider guard and full toolchain image build passed.
-This is not production rollout evidence: publication of the assembled image and
-a provider-managed host canary remain gated on operator approval. Arm64 and
-other clients are unverified. The standard runner image is unchanged.
+The [external Rust service compatibility report](local-actions-cache-compatibility.md)
+records the original pinned client/runtime gate. The separate
+[native Go receiver acceptance](native-actions-cache-v2-acceptance.md) records
+the fail-closed runner image, signed client matrix, restart and outage results.
+Both are scoped to Linux amd64 and the listed clients. A provider-managed host
+canary and drain remain separate deployment gates. The standard runner image
+is unchanged.
 
 ## Ownership and storage
 
@@ -103,7 +102,9 @@ remain with the service. Empty configuration keeps the original startup behavior
 ## Client boundaries
 
 Use only clients and immutable revisions that passed acceptance. Legacy v1
-clients are unsupported: the fork still supplies GitHub's `ACTIONS_CACHE_URL`.
+clients are unsupported. The original accepted image supplies GitHub's
+`ACTIONS_CACHE_URL`; the separate native v2 fail-closed image points it at the
+local receiver, which rejects legacy v1 requests without a cloud fallback.
 Raw shell tools need explicit runtime exports; container cache-v2 clients need
 an explicit v2 flag if their handler does not set it. The accepted setup-go,
 setup-node/npm, Gradle basic and Rust GitHub-provider revisions are listed in
@@ -160,23 +161,55 @@ limit cannot accommodate the new default two-hour drain. See
 [service deadline handling](deployment.md#graceful-shutdown).
 Never force-kill business jobs to finish rollout.
 
-After explicit deployment approval, publish the separately tagged amd64 image,
-verify its digest/attestation, start the independent service and append a
-dedicated canary entry with a unique label and one-runner maximum. Disable
+After explicit deployment approval, pin the published fail-closed image by its
+verified digest. Start the native Go listener on a separate private port and
+fresh private data directory while the Rust service remains available. Add a
+canary scale set with only a unique label and one-runner maximum, so generic
+organization jobs cannot match it. Verify signed save/restore, artifact
+passthrough and sibling BuildKit upload/download on provider-managed runners
+before draining and switching the selected existing scale set. Disable
 overlapping shared writable language-cache mounts without deleting their data.
-Verify real runner and sibling BuildKit upload/download paths, a fresh-runner
-restore after service recreation, and end-to-end timings before expansion.
-Two concurrent isolated jobs passed; live capacity still needs checking.
+Live capacity and production disk performance need their own observations.
 
-Rollback stops canary dispatch and drains work. With the manager stopped, remove
-only the canary configuration entry and restore the reviewed prior binary/config
-and compatible service definition, then restart the remaining entries unchanged.
-Retain the external data volume and private backups; do not delete a GitHub
-scale-set registration as routine rollback. An isolated JIT test is not a
-rehearsal of this production manager restart.
+Rollback stops canary dispatch and drains work. With the manager stopped,
+restore the reviewed prior binary/config and compatible service definition,
+including the selected scale set's Rust endpoint and old runner image. Retain
+both cache data stores and private backups; do not delete a GitHub scale-set
+registration as routine rollback. An isolated JIT test is not a rehearsal of
+this production manager restart.
 
 Simply unsetting the endpoint and resuming unchanged cache actions sends payloads
 back to GitHub. Keep canary workloads stopped unless the operator explicitly
 chooses a reviewed workflow that omits all applicable cache operations. A shared
 helper-disable recipe has not been validated here; no automatic resume path is
 provided.
+
+## Native Go receiver
+
+The optional native receiver is implemented in the manager on a separate private
+port and fresh data directory. It uses token-derived repository/scope permissions,
+an immutable completed key, ordered Azure blocks, expiring local payload URLs,
+and SQLite plus private files. It forwards non-cache Results calls to the fixed
+GitHub upstream for artifacts. Its listener remains available during normal
+manager drain. Back up or restore the entire native directory only while the
+manager is stopped; the database, WAL, objects, and capability key belong
+together. `runner status --json` reports readiness and `runner cache` reads
+completed-entry counts/bytes without creating a missing store.
+
+For local protocol verification, install Node.js and run:
+
+```sh
+RUNSCALER_NATIVE_FIXTURE=1 go test -race ./internal/actionscache -run '^TestNativeProtocolFixture$' -count=1
+```
+
+This starts only a disposable issuer and cache HTTP listener on loopback. It
+checks authenticated block uploads, exact-byte restore, cancellation, store
+reopen, and controlled artifact passthrough. It does not register a runner or
+prove compatibility with signed GitHub jobs.
+
+The Rust service and its data remain the rollback endpoint through cutover.
+The original runner image still gives legacy v1 clients GitHub's
+`ACTIONS_CACHE_URL`; use the verified fail-closed image for native v2 so legacy
+requests are rejected locally. The signed acceptance evidence is recorded
+[separately](native-actions-cache-v2-acceptance.md). Native protocol tests alone
+do not establish real signed-client compatibility.

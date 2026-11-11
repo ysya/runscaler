@@ -5,8 +5,8 @@
 仍然需要壓縮、解壓及本機 HTTP 傳輸。
 
 [外部 Rust 服務相容性報告](local-actions-cache-compatibility.md)記錄原先釘選的
-client 與 runtime gate；[原生 Go 接收器驗收](native-actions-cache-v2-acceptance.md)
-另記錄失效保護 runner 映像、真實簽名 client、重啟與斷線結果。兩者都只涵蓋
+client 與 runtime gate。原生 Go 接收器另經隔離的真實簽名工作驗收，涵蓋失效保護
+runner 映像、client、重啟與斷線結果；詳細執行證據保存在私有操作紀錄。兩者都只涵蓋
 Linux amd64 與列出的 client。Provider 管理的主機 canary 和工作排空仍是
 獨立的部署關卡；標準 runner 映像維持原行為。
 
@@ -171,5 +171,5 @@ RUNSCALER_NATIVE_FIXTURE=1 go test -race ./internal/actionscache -run '^TestNati
 
 切換期間保留 Rust 服務與資料作為回復端點。原本 runner 映像對舊版 v1 client
 仍提供 GitHub 的 `ACTIONS_CACHE_URL`；原生 v2 應使用已驗證的失效保護映像，
-讓舊版請求在本機遭拒。[真實簽名驗收證據](native-actions-cache-v2-acceptance.md)
-另行記錄；本機協定測試不能取代真實簽名 client 驗收。
+讓舊版請求在本機遭拒。切換前應檢查私有的真實簽名工作驗收紀錄；本機協定測試
+不能取代真實簽名 client 驗收。

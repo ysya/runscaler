@@ -189,7 +189,7 @@ jobs:
 | `runner run` | 啟動 runner 管理程序 |
 | `runner init` | 互動式產生設定檔 |
 | `runner validate` | 驗證設定與連線 |
-| `runner status` | 顯示容量、連線、工作、佇列與磁碟剩餘空間 |
+| `runner status` | 顯示容量、工作、原生快取與磁碟剩餘空間 |
 | `runner doctor` | 診斷 GitHub 連線與孤立的容器／VM |
 | `runner cache` | 顯示各快取儲存區的磁碟用量與保留原則 |
 | `runner logs` | 顯示／持續追蹤 runner 的輪替日誌檔 |
@@ -218,6 +218,22 @@ jobs:
 <a id="upgrade-requirements"></a>
 
 ## 升級前準備
+
+**Actions 快取設定 sunset（本版尚未移除）：** 使用內建 Go 接收器的 Docker scale set
+應設定 `native-actions-cache = true`，並在 `actions-cache-url` 與
+`[actions-cache].advertise-url` 相同時移除前者。管理程序會自動帶入該 URL。
+舊的原生 URL 設定目前仍可運作，但 `runner validate`、啟動日誌與
+`runner update --check` 會提醒在未來的破壞相容版本前完成遷移。外部接收器仍支援
+明確 URL。全域 `advertise-url` 仍須保留，並確保 runner 與 BuildKit 容器可連線。
+請在工作排空後修改、驗證設定，再重啟選定服務；這項設定變更不搬移或刪除快取資料。
+舊版 binary 無法偵測其發布後才新增的 sunset 警告，因此更新前仍須閱讀目標版本的
+release notes。
+舊的 `docker.cache-volumes` 與 `[[docker.cache]]` 掛載也在 sunset 期間，
+仍依原有容量設定運作。先把 workflow 遷移至 Actions cache 並驗證熱快取命中，
+再移除掛載或處理舊資料。
+最早移除檢討版與驗收條件記在 [issue #41](https://github.com/ysya/runscaler/issues/41)：
+原生 URL 舊用法為 v0.22.0、舊快取 volumes 為 v0.24.0。到版號不會自動移除；
+若遷移條件未達成，就延後破壞相容變更。
 
 歷史更名相容期已結束。後續 release 僅產出 `runner-*` 壓縮檔，不再支援 `migrate` 指令、根指令 `runner --config` 直接啟動、`--backend`、自動搜尋 `runscaler` 設定目錄、舊服務名稱與 `RUNSCALER_TOKEN` 備援。啟動 manager 請使用 `runner run --config /absolute/path/config.toml`。
 

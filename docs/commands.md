@@ -14,6 +14,10 @@ process-lifetime job counters. It also shows host-wide `concurrent` capacity as
 successful connection, and last error. The disk section shows cheap
 filesystem-level free-space readings; use `runner cache` when you need the
 slower per-store usage measurements.
+When the native Actions cache is enabled, a separate cache section shows its
+readiness, completed-entry count, and used bytes. The usage bar compares bytes
+with the shared retention target; it is not a hard filesystem quota. A degraded
+receiver shows its state without stale-looking zero counts.
 
 ```bash
 # Human-readable dashboard; color is enabled automatically in a terminal
@@ -25,6 +29,12 @@ runner status --json
 # Plain dashboard for logs or terminals where color is undesirable
 runner status --no-color
 ```
+
+`runner update --check` also reads the selected service's config and reports
+advisory sunset notices before any binary replacement. It cannot inspect an
+unselected service in `--binary-path` mode. Check the target release notes and
+[upgrade requirements](../README.md#upgrade-requirements) for breaking changes;
+an older binary cannot detect notices added after it was released.
 
 Each scale set's optional `runtime` object in `/healthz` (and `status --json`)
 reports startup attempts, failures, consecutive failures, the last attempt and

@@ -171,7 +171,7 @@ jobs:
 | `runner run`             | Start the runner manager                               |
 | `runner init`            | Generate a config file interactively                   |
 | `runner validate`        | Validate configuration and connectivity                |
-| `runner status`          | Show capacity, connections, jobs, queues, and disk headroom |
+| `runner status`          | Show capacity, jobs, native cache, and disk headroom |
 | `runner doctor`          | Diagnose GitHub connectivity and orphaned containers/VMs |
 | `runner cache`           | Show disk usage and retention policy for every cache store |
 | `runner logs`            | Show/follow runner's rotating log file                  |
@@ -196,6 +196,25 @@ Details for each command are in [docs/commands.md](docs/commands.md).
 | [Development](docs/development.md) | Building from source, architecture |
 
 ## Upgrade requirements
+
+**Actions cache setting sunset (no removal in this release):** Docker scale sets
+using the built-in Go receiver should set `native-actions-cache = true` and
+remove `actions-cache-url` when it equals `[actions-cache].advertise-url`.
+The manager derives that URL automatically. The old native URL setting still
+works for now, but `runner validate`, startup logs and `runner update --check`
+warn about it before a future breaking removal. Explicit URLs for external
+receivers remain supported. Keep `advertise-url`: it is the address that runner
+and BuildKit containers must be able to reach. Migrate while jobs are drained,
+validate the config, then restart the selected service. This setting change does
+not move or delete cached data. Older binaries cannot report a sunset introduced
+after they were built; read the target release notes before updating.
+Legacy `docker.cache-volumes` and `[[docker.cache]]` mounts are also in their
+sunset period. They remain active with their existing budgets; migrate workflows
+to Actions cache and verify warm hits before removing those mounts or data.
+Track the earliest removal reviews and their acceptance gates in
+[issue #41](https://github.com/ysya/runscaler/issues/41): v0.22.0 for the native
+URL alias, v0.24.0 for legacy cache volumes. Neither version removes a setting
+automatically; defer the change if the migration gates are unmet.
 
 The historical rename transition is retired. Releases contain only `runner-*`
 archives. The `migrate` command, implicit root `runner --config` startup,

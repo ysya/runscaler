@@ -92,6 +92,7 @@ func runUpdate(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("could not check for updates: %w", err)
 	}
+	printUpdateConfigNotices(cmd, target)
 
 	if !versioncheck.IsNewer(current, release.TagName) {
 		fmt.Fprintf(cmd.OutOrStdout(), "Installed binary is up to date (%s).\n", normalizeVersion(current))
@@ -129,6 +130,27 @@ func runUpdate(cmd *cobra.Command, _ []string) error {
 	}
 	printRestartSteps(cmd, release.TagName, target, true)
 	return nil
+}
+
+// printUpdateConfigNotices reports advisory migrations from the selected
+// service's config before any binary replacement. Binary-only updates have no
+// selected service and must not inspect an unrelated configuration.
+func printUpdateConfigNotices(cmd *cobra.Command, target *installationTarget) {
+	if target == nil || target.ConfigPath == "" {
+		return
+	}
+	cfg, err := loadConfigAtPath(cmd, target.ConfigPath)
+	if err != nil {
+		fmt.Fprintln(cmd.OutOrStdout(), "Could not inspect the selected service config for migration notices; run runner validate before restarting it.")
+		return
+	}
+	if len(cfg.Deprecations) == 0 {
+		return
+	}
+	fmt.Fprintln(cmd.OutOrStdout(), "Configuration sunset notices:")
+	for _, notice := range cfg.Deprecations {
+		fmt.Fprintf(cmd.OutOrStdout(), "  ⚠ %s\n", notice)
+	}
 }
 
 // updateRestartAllowed checks, before anything is downloaded, that --restart

@@ -476,7 +476,7 @@ func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) e
 		if nativeCache != nil {
 			healthServer.SetCacheProvider(func() health.CacheStatus {
 				status := nativeCache.Status()
-				return health.CacheStatus{Enabled: true, Ready: status.Ready, Degraded: status.Degraded, Entries: status.Entries, Bytes: status.Bytes}
+				return health.CacheStatus{Enabled: true, Ready: status.Ready, Degraded: status.Degraded, Entries: status.Entries, Bytes: status.Bytes, RetentionTargetBytes: cfg.ActionsCache.MaxSizeBytes}
 			})
 		}
 		ln, err := net.Listen("tcp", net.JoinHostPort(cfg.HealthAddress, fmt.Sprintf("%d", cfg.HealthPort)))
@@ -849,6 +849,14 @@ func checkScaleSets(cfg config.Config, scaleSets []config.ScaleSetConfig) error 
 	for i := range scaleSets {
 		if err := scaleSets[i].Validate(); err != nil {
 			return fmt.Errorf("scaleset[%d] %q: %w", i, scaleSets[i].ScaleSetName, err)
+		}
+		if scaleSets[i].Provider == config.DefaultProvider && scaleSets[i].Docker.NativeActionsCache {
+			if !cfg.ActionsCache.Enabled {
+				return fmt.Errorf("scaleset[%d] %q: docker.native-actions-cache requires actions-cache.enabled", i, scaleSets[i].ScaleSetName)
+			}
+			if scaleSets[i].Docker.ActionsCacheURL != cfg.ActionsCache.AdvertiseURL {
+				return fmt.Errorf("scaleset[%d] %q: docker.native-actions-cache requires docker.actions-cache-url to match actions-cache.advertise-url", i, scaleSets[i].ScaleSetName)
+			}
 		}
 	}
 	if err := cfg.ValidateConcurrent(scaleSets); err != nil {

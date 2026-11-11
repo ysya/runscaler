@@ -86,7 +86,8 @@ the restored checksum from both client paths.
 
 ## Opt-in runner startup
 
-Set `actions-cache-url` only on the selected Docker scale set, with a verified
+For the native receiver, set `native-actions-cache = true` on the selected Docker
+scale set and configure the global `[actions-cache].advertise-url`. Use a verified
 cache-capable variant by immutable digest; see [configuration](configuration.md#host-local-actions-cache-opt-in)
 and [image construction/maintenance](../images/actions-runner/README.md#opt-in-host-local-actions-cache-variant).
 The bare fork or a standard image does not provide the installed capability check.
@@ -193,7 +194,7 @@ and SQLite plus private files. It forwards non-cache Results calls to the fixed
 GitHub upstream for artifacts. Its listener remains available during normal
 manager drain. Back up or restore the entire native directory only while the
 manager is stopped; the database, WAL, objects, and capability key belong
-together. `runner status --json` reports readiness and `runner cache` reads
+together. `runner status` reports readiness and usage; `runner cache` reads
 completed-entry counts/bytes without creating a missing store.
 
 For local protocol verification, install Node.js and run:

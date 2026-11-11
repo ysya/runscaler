@@ -235,10 +235,16 @@ needs the `admin:org` scope.
 
 ## Host-local Actions cache (opt-in)
 
-`[docker] actions-cache-url` is disabled when empty/unset. It inherits through
-Docker scale-set defaults; `[scaleset.docker] actions-cache-url = ""` explicitly
-disables an inherited value. On Linux amd64, configure it per scale set with
-an accepted cache-capable runner variant by immutable digest.
+For the built-in Go receiver, set `[scaleset.docker] native-actions-cache = true`.
+The manager uses `[actions-cache].advertise-url` for that scale set. The default
+is false, and an inherited true value can be overridden with false. The existing
+`actions-cache-url` remains available for an explicit endpoint, including an
+external receiver. An inherited or explicit URL alongside `native-actions-cache = true` must
+equal the global advertised URL. On Linux amd64, opt in per scale set with an
+accepted cache-capable runner variant by immutable digest.
+When an old explicit URL points to the built-in receiver, Runscaler emits an
+advisory sunset warning. Remove that duplicate URL after enabling the new
+switch; external receiver URLs are not deprecated.
 A stock runner or the bare fork base image is insufficient: the final variant
 must provide Runscaler's verified capability checker before accepting work.
 
@@ -258,15 +264,15 @@ runner-image = "<verified-local-cache-image>@sha256:<accepted-digest>"
 
 [scaleset.docker]
 platform = "linux/amd64"
-actions-cache-url = "http://<private-host-reachable-from-containers>:3000/"
-cache-volumes = []
-cache = []
+native-actions-cache = true
+# cache-volumes = [] # only if overriding inherited mounts
+# cache = []         # only if overriding inherited mounts
 ```
 
 Keep the service/data outside runner-owned resources and generic wipeable cache
 mounts. Read [service setup, supported clients and recovery](local-actions-cache.md).
 For rollback, drain and disable affected opt-in sets before reverting settings;
-simply clearing the endpoint and resuming unchanged actions enables GitHub
+simply disabling the native cache opt-in and resuming unchanged actions enables GitHub
 caching again. An empty override is configuration behavior, not a local-only
 rollback procedure.
 
@@ -300,10 +306,13 @@ both runner and sibling BuildKit containers. The directory must be new, private,
 and separate from the Rust volume. The receiver uses GitHub's token issuer/JWKS
 and Results upstream by default. `token-issuer` and `jwks-url` may be set together
 for a trusted HTTPS issuer; `upstream-results-url` is a fixed HTTPS origin.
-There is no token-validation bypass. The existing `docker.actions-cache-url` must
-match `advertise-url` only for a scale set selected for native cache. Other scale
-sets retain their configured endpoint. `runner status --json` and `runner cache`
-report native readiness and completed bytes when enabled.
+There is no token-validation bypass. `native-actions-cache = true` requires the
+global receiver to be enabled; the scale set gets its advertised URL automatically.
+Other scale sets retain their configured endpoint. The text and JSON forms of
+`runner status` report native readiness, completed entries and bytes when enabled;
+the text view also compares usage with the shared retention target. `runner cache`
+provides more detailed storage information. Empty `cache-volumes = []` and
+`cache = []` overrides are only needed when inherited mounts must be disabled.
 
 ## GitHub App Authentication
 

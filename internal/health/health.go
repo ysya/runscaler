@@ -101,11 +101,12 @@ type CapacityStatus struct {
 }
 
 type CacheStatus struct {
-	Enabled  bool  `json:"enabled"`
-	Ready    bool  `json:"ready"`
-	Entries  int64 `json:"entries"`
-	Bytes    int64 `json:"bytes"`
-	Degraded bool  `json:"degraded,omitempty"`
+	Enabled              bool  `json:"enabled"`
+	Ready                bool  `json:"ready"`
+	Entries              int64 `json:"entries"`
+	Bytes                int64 `json:"bytes"`
+	RetentionTargetBytes int64 `json:"retention_target_bytes,omitempty"`
+	Degraded             bool  `json:"degraded,omitempty"`
 }
 
 // HealthResponse is the JSON response for /healthz.

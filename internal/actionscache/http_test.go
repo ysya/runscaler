@@ -28,7 +28,11 @@ func handlerFixture(t *testing.T) (http.Handler, *Store, *rsa.PrivateKey, *int) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { store.Close() })
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 	verifier, err := NewVerifier(VerifierConfig{Issuer: "https://issuer.example", JWKSURL: "https://issuer.example/keys", Audiences: []string{"cache-test"}, Client: &http.Client{Transport: transportFunc(func(*http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(jwksResponse(key, "key1"))), Header: make(http.Header)}, nil
 	})}})

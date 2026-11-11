@@ -48,7 +48,11 @@ func TestServiceReportsListenerFailureForManagerCancellation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer service.Close()
+	defer func() {
+		if err := service.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
 	key, _ := rsa.GenerateKey(rand.Reader, 2048)
 	service.verifier.client = &http.Client{Transport: transportFunc(func(*http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(jwksResponse(key, "key1"))), Header: make(http.Header)}, nil
@@ -76,7 +80,11 @@ func TestServiceStartBootstrapsBeforeServingAndShutsDown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer service.Close()
+	defer func() {
+		if err := service.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
 	listener := &closedListener{done: make(chan struct{})}
 	listenCalls := 0
 	service.listen = func(network, address string) (net.Listener, error) { listenCalls++; return listener, nil }

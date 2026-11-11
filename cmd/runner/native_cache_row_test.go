@@ -16,7 +16,11 @@ func TestNativeActionsCacheRowReportsCompletedBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() {
+		if err := store.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
 	p := actionscache.Principal{RepositoryID: "repo", Grants: []actionscache.Grant{{Scope: "main", Permission: 3}}}
 	reservation, err := store.Reserve(context.Background(), p, "key", "v1")
 	if err != nil {

@@ -12,6 +12,13 @@ import (
 	"time"
 )
 
+func closeStore(t *testing.T, store *Store) {
+	t.Helper()
+	if err := store.Close(); err != nil {
+		t.Error(err)
+	}
+}
+
 func saveEntry(t *testing.T, store *Store, p Principal, key string, payload string) Entry {
 	t.Helper()
 	ctx := context.Background()
@@ -34,7 +41,7 @@ func TestStoreSweeperPinsReadersAndRemovesStaleReservations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer closeStore(t, store)
 	p := Principal{RepositoryID: "repo", Grants: []Grant{{Scope: "main", Permission: 3}}}
 	first := saveEntry(t, store, p, "first", "12345678")
 	second := saveEntry(t, store, p, "second", "abcdefgh")
@@ -84,7 +91,7 @@ func TestStorePurgesDanglingEntry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer closeStore(t, store)
 	p := Principal{RepositoryID: "repo", Grants: []Grant{{Scope: "main", Permission: 3}}}
 	entry := saveEntry(t, store, p, "dangling", "complete")
 	if err := os.Remove(store.partPath(entry.ID, "__single__")); err != nil {
@@ -103,7 +110,7 @@ func TestStoreStatsCountOnlyCompletedEntries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer closeStore(t, store)
 	p := Principal{RepositoryID: "repo", Grants: []Grant{{Scope: "main", Permission: 3}}}
 	saveEntry(t, store, p, "complete", "12345")
 	if _, err := store.Reserve(context.Background(), p, "partial", "v1"); err != nil {
@@ -120,7 +127,7 @@ func TestStoreFailedBlockReplacementKeepsRecordedBytes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer closeStore(t, store)
 	p := Principal{RepositoryID: "repo", Grants: []Grant{{Scope: "main", Permission: 3}}}
 	ctx := context.Background()
 	reservation, err := store.Reserve(ctx, p, "retry", "v1")
@@ -175,7 +182,7 @@ func TestReadStoreStatsDoesNotCreateMissingStore(t *testing.T) {
 	if err != nil || stats.Entries != 1 || stats.Bytes != 5 {
 		t.Fatalf("read-only stats = %+v, %v", stats, err)
 	}
-	store.Close()
+	closeStore(t, store)
 }
 
 func TestOpenStoreRejectsSymlinkedObjectDirectory(t *testing.T) {
@@ -188,7 +195,7 @@ func TestOpenStoreRejectsSymlinkedObjectDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	if store, err := OpenStore(root); err == nil {
-		store.Close()
+		closeStore(t, store)
 		t.Fatal("followed symlinked object directory")
 	}
 }
@@ -222,7 +229,7 @@ func TestCancelledUploadNeverPublishesAndRestartKeepsItHidden(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer closeStore(t, store)
 	if _, ok, err := store.Lookup(context.Background(), p, "missing", []string{"cancel"}, "v1"); err != nil || ok {
 		t.Fatalf("cancelled prefix hit after restart: %v, %v", ok, err)
 	}
@@ -241,7 +248,7 @@ func TestOpenStoreRejectsUnknownSchemaVersion(t *testing.T) {
 		t.Fatal(err)
 	}
 	if reopened, err := OpenStore(root); err == nil {
-		reopened.Close()
+		closeStore(t, reopened)
 		t.Fatal("unknown schema version accepted")
 	}
 }
@@ -251,7 +258,7 @@ func TestFailedFinalizeReclaimsMovedObjectsAfterReservationExpires(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer closeStore(t, store)
 	p := Principal{RepositoryID: "repo", Grants: []Grant{{Scope: "main", Permission: 3}}}
 	ctx := context.Background()
 	reservation, err := store.Reserve(ctx, p, "failed-finalize", "v1")
@@ -286,7 +293,7 @@ func TestStagingQuotaBoundsUnfinishedUploads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer closeStore(t, store)
 	store.SetStagingLimit(10)
 	p := Principal{RepositoryID: "repo", Grants: []Grant{{Scope: "main", Permission: 3}}}
 	reservation, err := store.Reserve(context.Background(), p, "quota", "v1")
@@ -309,7 +316,7 @@ func TestPrefixLookupPrefersNewestCompletionOverRecentRead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer closeStore(t, store)
 	p := Principal{RepositoryID: "repo", Grants: []Grant{{Scope: "main", Permission: 3}}}
 	saveEntry(t, store, p, "index#1", "old")
 	saveEntry(t, store, p, "index#2", "new")
@@ -344,7 +351,7 @@ func TestOpenStoreCompletesInterruptedInitialSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("partial schema was not recovered: %v", err)
 	}
-	defer store.Close()
+	defer closeStore(t, store)
 	var version int
 	if err := store.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 1 {
 		t.Fatalf("schema version=%d, %v", version, err)
@@ -357,7 +364,7 @@ func TestStorePublishesOnlyCompleteImmutableEntries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer closeStore(t, store)
 	p := Principal{RepositoryID: "repo-a", Grants: []Grant{{Scope: "refs/heads/main", Permission: 3}}}
 	ctx := context.Background()
 	reservation, err := store.Reserve(ctx, p, "archive", "v1")
@@ -419,7 +426,7 @@ func TestStoreScopesPrefixAndConcurrentWriters(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer closeStore(t, store)
 	ctx := context.Background()
 	writer := Principal{RepositoryID: "repo-a", Grants: []Grant{{Scope: "refs/heads/main", Permission: 3}}}
 	var wg sync.WaitGroup

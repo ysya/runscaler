@@ -64,7 +64,7 @@ func NewService(cfg config.ActionsCacheConfig, logger *slog.Logger) (*Service, e
 	store.SetStagingLimit(cfg.MaxSizeBytes)
 	verifier, err := NewVerifier(VerifierConfig{Issuer: cfg.EffectiveTokenIssuer(), JWKSURL: cfg.EffectiveJWKSURL(), Audiences: cfg.Audiences})
 	if err != nil {
-		store.Close()
+		_ = store.Close()
 		return nil, err
 	}
 	service := &Service{cfg: cfg, logger: logger, store: store, verifier: verifier, listen: net.Listen, failures: make(chan error, 1)}
@@ -77,7 +77,7 @@ func NewService(cfg config.ActionsCacheConfig, logger *slog.Logger) (*Service, e
 		},
 	})
 	if err != nil {
-		store.Close()
+		_ = store.Close()
 		return nil, err
 	}
 	service.server = &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 64 << 10}

@@ -80,7 +80,7 @@ func ReadStoreStats(ctx context.Context, root string) (StoreStats, error) {
 	if err != nil {
 		return StoreStats{}, err
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	var version int
 	if err := db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		return StoreStats{}, err
@@ -131,26 +131,26 @@ func OpenStore(root string) (*Store, error) {
 	db.SetMaxOpenConns(1)
 	for _, pragma := range []string{"PRAGMA journal_mode=WAL", "PRAGMA synchronous=FULL", "PRAGMA foreign_keys=ON", "PRAGMA busy_timeout=5000"} {
 		if _, err := db.Exec(pragma); err != nil {
-			db.Close()
+			_ = db.Close()
 			return nil, err
 		}
 	}
 	var version int
 	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, err
 	}
 	if version != 0 && version != 1 {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("unsupported native cache schema version %d", version)
 	}
 	if version == 0 {
 		tx, err := db.Begin()
 		if err != nil {
-			db.Close()
+			_ = db.Close()
 			return nil, err
 		}
-		defer tx.Rollback()
+		defer func() { _ = tx.Rollback() }()
 		for _, statement := range []string{
 			`CREATE TABLE IF NOT EXISTS entries (
 			 id INTEGER PRIMARY KEY, object_id TEXT NOT NULL UNIQUE,
@@ -165,18 +165,18 @@ func OpenStore(root string) (*Store, error) {
 		} {
 			if _, err := tx.Exec(statement); err != nil {
 				_ = tx.Rollback()
-				db.Close()
+				_ = db.Close()
 				return nil, err
 			}
 		}
 		if err := tx.Commit(); err != nil {
 			_ = tx.Rollback()
-			db.Close()
+			_ = db.Close()
 			return nil, err
 		}
 	}
 	if err := os.Chmod(dbPath, 0600); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, err
 	}
 	return &Store{root: root, db: db, pins: make(map[string]int)}, nil
@@ -435,20 +435,22 @@ func (s *Store) Lookup(ctx context.Context, p Principal, key string, restoreKeys
 					var entry Entry
 					var manifest string
 					if err := rows.Scan(&entry.DatabaseID, &entry.ID, &entry.RepositoryID, &entry.Scope, &entry.Key, &entry.Version, &entry.Size, &manifest); err != nil {
-						rows.Close()
+						_ = rows.Close()
 						return Entry{}, false, err
 					}
 					if err := json.Unmarshal([]byte(manifest), &entry.Parts); err != nil {
-						rows.Close()
+						_ = rows.Close()
 						return Entry{}, false, err
 					}
 					found = append(found, entry)
 				}
 				if err := rows.Err(); err != nil {
-					rows.Close()
+					_ = rows.Close()
 					return Entry{}, false, err
 				}
-				rows.Close()
+				if err := rows.Close(); err != nil {
+					return Entry{}, false, err
+				}
 				for _, entry := range found {
 					if s.partsExist(entry) {
 						_, _ = s.db.ExecContext(ctx, `UPDATE entries SET accessed_at=? WHERE object_id=?`, time.Now().Unix(), entry.ID)
@@ -628,16 +630,18 @@ func (s *Store) Sweep(ctx context.Context, maxBytes int64, maxIdle time.Duration
 	for rows.Next() {
 		var entry candidate
 		if err := rows.Scan(&entry.id, &entry.state, &entry.size, &entry.accessed, &entry.expiry); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return err
 		}
 		entries = append(entries, entry)
 	}
 	if err := rows.Err(); err != nil {
-		rows.Close()
+		_ = rows.Close()
 		return err
 	}
-	rows.Close()
+	if err := rows.Close(); err != nil {
+		return err
+	}
 	var total int64
 	for _, entry := range entries {
 		if entry.state == "complete" {

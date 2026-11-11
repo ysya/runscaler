@@ -65,7 +65,7 @@ jobs:
         env:
           NODE_OPTIONS: --require ${{ github.workspace }}/testdata/local-cache-probe/observer.cjs
         with:
-          go-version: '1.27.3'
+          go-version: '1.27.4'
           cache: true
           cache-dependency-path: testdata/local-cache-probe/go/go.sum
       - name: Setup Node and package-store cache

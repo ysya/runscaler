@@ -258,11 +258,13 @@ simply clearing the endpoint and resuming unchanged actions enables GitHub
 caching again. An empty override is configuration behavior, not a local-only
 rollback procedure.
 
-### Native Go receiver (development branch)
+### Native Go receiver (opt-in)
 
 The manager can host an opt-in cache-v2 receiver on a separate private listener.
-This feature has not passed the signed-job/canary gates and is not a replacement
-for the running Rust service. The global table is not inherited by scale sets:
+Its [isolated signed-job acceptance](native-actions-cache-v2-acceptance.md)
+does not replace the provider-managed host canary. Keep the existing Rust
+service and data as a rollback endpoint. The global table is not inherited by
+scale sets:
 
 ```toml
 [actions-cache]

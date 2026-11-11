@@ -12,6 +12,18 @@ make build
 make all
 ```
 
+## Public docs and local notes
+
+`docs/` contains material intended for the public repository. Keep agent
+prompts, implementation plans, and draft designs in the ignored `prompts/`
+directory. Keep host-specific acceptance runs, private repository links,
+configurations, and logs in the ignored `operator-notes/` directory. Neither
+directory belongs in a commit or a PR description.
+
+Before pushing, review the staged diff and run `bash scripts/check-public-tree.sh`.
+CI runs the same path check. `.gitignore` does not remove files already tracked
+by Git; move those files out of the public tree and remove their tracked copies.
+
 ## Architecture
 
 Built on top of [actions/scaleset](https://github.com/actions/scaleset), the official Go client library for GitHub Actions Runner Scale Sets.

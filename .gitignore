@@ -21,5 +21,11 @@ dist/
 .superpowers/
 docs/superpowers/
 
+# Internal prompts and operator evidence belong outside public docs
+/prompts/
+/operator-notes/
+/docs/specs-*.md
+/docs/*-acceptance.md
+
 # Claude Code settings, worktrees and agent files (never committed)
 .claude/

@@ -16,6 +16,16 @@ make build
 make all
 ```
 
+## 公開文件與本機紀錄
+
+`docs/` 只放預計公開的文件。Agent prompt、實作計畫與設計草稿放在已忽略追蹤的
+`prompts/`；主機專屬驗收紀錄、私有儲存庫連結、設定與日誌放在已忽略追蹤的
+`operator-notes/`。兩個資料夾的內容都不可加入 commit 或 PR 描述。
+
+推送前應檢查 staged diff，並執行 `bash scripts/check-public-tree.sh`；CI 也會執行
+同一項路徑檢查。`.gitignore` 不會停止追蹤已納入 Git 的檔案；須先將它們移出
+公開目錄，再移除追蹤中的原檔。
+
 <a id="architecture"></a>
 
 ## 架構

@@ -16,6 +16,14 @@ env:
   GOTOOLCHAIN: local
 
 jobs:
+  public-tree:
+    name: Public tree boundary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Reject internal notes in tracked paths
+        run: bash scripts/check-public-tree.sh
+
   test:
     name: Test (${{ matrix.os }})
     strategy:

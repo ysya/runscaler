@@ -575,7 +575,7 @@ func (ss *ScaleSetConfig) ValidationErrors() []error {
 	if ss.ScaleSetName == "" {
 		add(fmt.Errorf("scale set name (name) is required"))
 	}
-	if err := ss.validateAuthentication(); err != nil {
+	for _, err := range ss.authenticationErrors() {
 		add(err)
 	}
 	if ss.MinRunners < 0 {
@@ -686,10 +686,8 @@ func (c *Config) GlobalValidationErrors() []error {
 	if c.Concurrent < 0 {
 		problems = append(problems, fmt.Errorf("concurrent must be >= 0"))
 	}
-	if err := c.ActionsCache.Validate(c.HealthPort); err != nil {
-		problems = append(problems, err)
-	}
-	if err := c.Disk.Validate(); err != nil {
+	problems = append(problems, c.ActionsCache.ValidationErrors(c.HealthPort)...)
+	for _, err := range c.Disk.ValidationErrors() {
 		problems = append(problems, fmt.Errorf("disk: %w", err))
 	}
 	return problems

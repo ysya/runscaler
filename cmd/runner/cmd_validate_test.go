@@ -80,16 +80,20 @@ func TestPrepareRunnerImagesOnlyCallsEachUniqueTarget(t *testing.T) {
 	tartA := validScaleSet("tart-a", 0)
 	tartA.Provider = "tart"
 	tartA.RunnerImage = "example/tart:latest"
+	tartA.Tart.Home = "/tmp/tart-a"
 	tartB := tartA
 	tartB.ScaleSetName = "tart-b"
+	tartC := tartA
+	tartC.ScaleSetName = "tart-c"
+	tartC.Tart.Home = "/tmp/tart-c"
 	var calls []string
-	err := prepareRunnerImages(context.Background(), []config.ScaleSetConfig{dockerA, dockerB, dockerC, tartA, tartB},
+	err := prepareRunnerImages(context.Background(), []config.ScaleSetConfig{dockerA, dockerB, dockerC, tartA, tartB, tartC},
 		func(_ context.Context, ss config.ScaleSetConfig) error {
 			calls = append(calls, "docker:"+ss.Docker.Socket+":"+ss.RunnerImage+":"+ss.Docker.Platform)
 			return nil
 		},
 		func(_ context.Context, ss config.ScaleSetConfig) error {
-			calls = append(calls, "tart:"+ss.RunnerImage)
+			calls = append(calls, "tart:"+ss.Tart.Home+":"+ss.RunnerImage)
 			return nil
 		})
 	if err != nil {
@@ -98,7 +102,8 @@ func TestPrepareRunnerImagesOnlyCallsEachUniqueTarget(t *testing.T) {
 	want := []string{
 		"docker:" + dockerA.Docker.Socket + ":example/runner:latest:",
 		"docker:" + dockerA.Docker.Socket + ":example/runner:latest:linux/arm64",
-		"tart:example/tart:latest",
+		"tart:/tmp/tart-a:example/tart:latest",
+		"tart:/tmp/tart-c:example/tart:latest",
 	}
 	if strings.Join(calls, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("image preparation calls = %q, want %q", calls, want)

@@ -28,35 +28,44 @@ type GitHubAppConfig struct {
 var appKeyEnvName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 func (ss *ScaleSetConfig) validateAuthentication() error {
+	problems := ss.authenticationErrors()
+	if len(problems) > 0 {
+		return problems[0]
+	}
+	return nil
+}
+
+func (ss *ScaleSetConfig) authenticationErrors() []error {
+	var problems []error
 	app := ss.GitHubApp
 	if app == nil {
 		if ss.Token == "" {
-			return fmt.Errorf("token is required unless github-app is configured")
+			problems = append(problems, fmt.Errorf("token is required unless github-app is configured"))
 		}
-		return nil
+		return problems
 	}
 	if ss.Token != "" {
-		return fmt.Errorf("token and github-app cannot be configured together")
+		problems = append(problems, fmt.Errorf("token and github-app cannot be configured together"))
 	}
 	if strings.TrimSpace(app.ClientID) == "" {
-		return fmt.Errorf("github-app.client-id is required")
+		problems = append(problems, fmt.Errorf("github-app.client-id is required"))
 	}
 	if app.InstallationID <= 0 {
-		return fmt.Errorf("github-app.installation-id must be greater than zero")
+		problems = append(problems, fmt.Errorf("github-app.installation-id must be greater than zero"))
 	}
 	if (app.PrivateKeyFile == "") == (app.PrivateKeyEnv == "") {
-		return fmt.Errorf("github-app requires exactly one of private-key-file or private-key-env")
+		problems = append(problems, fmt.Errorf("github-app requires exactly one of private-key-file or private-key-env"))
 	}
 	if app.PrivateKeyFile != "" && !filepath.IsAbs(app.PrivateKeyFile) {
-		return fmt.Errorf("github-app.private-key-file must be an absolute path")
+		problems = append(problems, fmt.Errorf("github-app.private-key-file must be an absolute path"))
 	}
 	if app.PrivateKeyEnv != "" && !appKeyEnvName.MatchString(app.PrivateKeyEnv) {
-		return fmt.Errorf("github-app.private-key-env must be an environment variable name")
+		problems = append(problems, fmt.Errorf("github-app.private-key-env must be an environment variable name"))
 	}
 	if u, err := url.Parse(ss.RegistrationURL); err == nil && strings.HasPrefix(strings.Trim(u.Path, "/"), "enterprises/") {
-		return fmt.Errorf("GitHub App authentication is unavailable for enterprise-level runners; use a PAT")
+		problems = append(problems, fmt.Errorf("GitHub App authentication is unavailable for enterprise-level runners; use a PAT"))
 	}
-	return nil
+	return problems
 }
 
 const maxAppPrivateKeySize = 64 * 1024

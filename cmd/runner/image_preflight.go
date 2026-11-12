@@ -36,15 +36,17 @@ func prepareRunnerImages(ctx context.Context, scaleSets []config.ScaleSetConfig,
 		}
 		dockerDone[key] = true
 	}
-	tartDone := make(map[string]bool)
+	type tartImage struct{ home, image string }
+	tartDone := make(map[tartImage]bool)
 	for _, ss := range scaleSets {
-		if !ss.IsTart() || tartDone[ss.RunnerImage] {
+		key := tartImage{ss.Tart.Home, ss.RunnerImage}
+		if !ss.IsTart() || tartDone[key] {
 			continue
 		}
 		if err := ensureTart(ctx, ss); err != nil {
 			return err
 		}
-		tartDone[ss.RunnerImage] = true
+		tartDone[key] = true
 	}
 	return nil
 }

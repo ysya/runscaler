@@ -1,0 +1,67 @@
+# config.toml — add credentials locally before validation
+log-level = "info"
+log-format = "text"
+health-port = 8080
+health-address = "127.0.0.1"
+concurrent = 12
+
+[actions-cache]
+enabled = true
+listen-address = "172.18.0.1:32500"
+advertise-url = "http://cache.internal:32500/"
+data-dir = "/var/lib/runner/native-actions-cache"
+max-size-bytes = 53687091200
+max-idle-days = 30
+
+[disk]
+guard = true
+min-free = "10%"
+target-free = "20%"
+interval = "1h"
+max-tier = 3
+
+[diagnostics]
+enabled = true
+capture-logs = true
+
+[[scaleset]]
+url = "https://github.com/example-org"
+name = "linux-runners"
+# Set the PAT on the host.
+token = ""
+provider = "docker"
+max-runners = 10
+runner-image = "ghcr.io/actions/actions-runner:latest"
+
+[scaleset.retry]
+initial = "5s"
+max = "1m"
+cooldown-after = 5
+cooldown = "5m"
+
+[scaleset.docker]
+dind = false
+shared-volume-max-age = "168h"
+native-actions-cache = true
+cache-volumes = ["gradle:/home/runner/.gradle"]
+
+[[scaleset.docker.cache]]
+name = "pip"
+path = "/home/runner/.cache/pip"
+budget = "20GB"
+on-exceed = "warn"
+
+[[scaleset]]
+url = "https://github.com/example-org"
+name = "macos-runners"
+provider = "tart"
+max-runners = 2
+runner-image = "ghcr.io/cirruslabs/macos-golden-gate-xcode:latest"
+github-app.client-id = "Iv1.example"
+github-app.installation-id = 123
+github-app.private-key-env = "RUNNER_APP_KEY"
+
+[scaleset.tart]
+pool-size = 1
+cache-cleanup = true
+cache-budget = 80

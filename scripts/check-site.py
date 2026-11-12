@@ -39,17 +39,11 @@ class Page(HTMLParser):
             self.inputs.append(values)
 
 
-required_ids = {
-    "config-form", "registration-url", "scale-name", "max-runners",
-    "runner-image", "dind", "app-fields", "client-id", "installation-id",
-    "key-file", "config-output", "copy-config", "form-message",
-    "copy-status", "credential-note", "docker-steps", "tart-steps",
-    "workflow-output", "configure", "how",
-}
-
-for filename, html_lang, body_lang in (
-    ("index.html", "en", "en"),
-    ("zh-TW.html", "zh-Hant", "zh-TW"),
+for filename, html_lang, body_lang, required_ids, scripts, styles in (
+    ("index.html", "en", "en", {"configure", "how"}, [], ["./style.css"]),
+    ("zh-TW.html", "zh-Hant", "zh-TW", {"configure", "how"}, [], ["./style.css"]),
+    ("configure/index.html", "en", "en", {"builder-form", "scale-sets", "scale-list", "native-cache-fields", "disk-fields", "global-fields", "config-output", "copy-config", "form-message", "copy-status"}, [{"type": "module", "src": "./app.mjs"}], ["../style.css", "./style.css"]),
+    ("configure/zh-TW.html", "zh-Hant", "zh-TW", {"builder-form", "scale-sets", "scale-list", "native-cache-fields", "disk-fields", "global-fields", "config-output", "copy-config", "form-message", "copy-status"}, [{"type": "module", "src": "./app.mjs"}], ["../style.css", "./style.css"]),
 ):
     source = (SITE / filename).read_text()
     page = Page()
@@ -57,13 +51,18 @@ for filename, html_lang, body_lang in (
     assert page.lang == html_lang and page.body_lang == body_lang, filename
     assert not page.duplicates, (filename, page.duplicates)
     assert required_ids <= page.ids, (filename, required_ids - page.ids)
-    assert page.scripts == [{"type": "module", "src": "./app.mjs"}], filename
-    assert page.styles == ["./style.css"], filename
+    assert page.scripts == scripts, filename
+    assert page.styles == styles, filename
     assert all(field.get("type") != "password" for field in page.inputs), filename
     assert "Content-Security-Policy" in source and "form-action 'none'" in source, filename
     assert "https://github.com/ysya/runscaler" in source, filename
+    if filename.startswith("configure/"):
+        assert "config-output" in page.ids and "builder-form" in page.ids, filename
+    else:
+        assert "config-output" not in page.ids and "config-form" not in page.ids, filename
+        assert "./configure/" in source, filename
 
-for filename in ("app.mjs", "config.mjs"):
+for filename in ("configure/app.mjs", "configure/config.mjs", "configure/schema.mjs", "configure/toml.mjs"):
     source = (SITE / filename).read_text()
     for banned in ("localStorage", "sessionStorage", "fetch(", "XMLHttpRequest", "sendBeacon"):
         assert banned not in source, (filename, banned)

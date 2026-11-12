@@ -25,7 +25,7 @@ also include `macos-sequoia-xcode` (macOS 15) and
 host. Image tags select an Xcode version; pin a tag instead of `latest` for
 reproducible builds. See the image's published requirements before
 adjusting CPU or memory under `[tart]`. The
-[config builder](https://runscaler.ysya.dev/#configure) limits Tart to at
+[config builder](https://runscaler.ysya.dev/configure/) limits Tart to at
 most two VMs per host.
 
 If upgrading from the old `cirruslabs/cli` tap, uninstall its `tart` and

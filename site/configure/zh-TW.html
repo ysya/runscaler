@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="產生完整的 Runscaler config.toml，設定 Docker、Tart、Actions 快取、清理策略與多個規模集。">
+  <meta name="theme-color" content="#0b171c">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'none'; base-uri 'none'; form-action 'none'">
+  <link rel="icon" type="image/svg+xml" href="../favicon.svg">
+  <link rel="stylesheet" href="../style.css">
+  <link rel="stylesheet" href="./style.css">
+  <script type="module" src="./app.mjs"></script>
+  <title>設定產生器 — Runscaler</title>
+</head>
+<body data-lang="zh-TW">
+  <a class="skip-link" href="#main">跳至內容</a>
+  <header class="site-header"><a class="brand" href="../"><span class="brand-mark" aria-hidden="true">r<span>.</span></span><span>runscaler</span></a><nav class="site-nav" aria-label="主選單"><a href="../zh-TW.html">首頁</a><a href="#builder">設定產生器</a><a href="https://github.com/ysya/runscaler/blob/main/docs/configuration.zh-TW.md">設定指南 ↗</a></nav><div class="header-actions"><a class="language-link" href="./" lang="en" hreflang="en">English</a><a class="header-github" href="https://github.com/ysya/runscaler">GitHub ↗</a></div></header>
+  <main id="main">
+    <div class="tool-intro section-shell"><p class="eyebrow">設定工具</p><h1>產生 <em>config.toml。</em></h1><p>選擇規模集、快取和主機設定，複製 TOML 後再於自己的主機加入憑證並驗證。</p><span class="privacy-pill">● 不輸入或傳送憑證</span><a class="mobile-start" href="#scale-sets">開始設定 ↓</a></div>
+    <div class="tool-layout section-shell" id="builder"><div class="editor-column"><nav class="tool-sections" aria-label="設定分類"><a href="#scale-sets">規模集</a><a href="#native-cache">Actions 快取</a><a href="#disk-settings">磁碟保護</a><a href="#global-settings">程序設定</a></nav><form id="builder-form" novalidate><section class="tool-card" id="scale-sets"><div class="card-heading"><div><p class="eyebrow">01 / RUNNERS</p><h2>規模集</h2><p>每個規模集連接一個 GitHub 組織或儲存庫。</p></div><button type="button" class="add-button" id="add-set">＋ 新增規模集</button></div><div id="scale-list"></div></section><section class="tool-card" id="native-cache"><div class="card-heading"><div><p class="eyebrow">02 / CACHE</p><h2>內建 Actions 快取</h2><p>供相容 runner 映像檔使用的私人快取接收端。Docker 規模集也可以使用外部接收端。</p></div></div><div id="native-cache-fields" class="field-grid"></div><p class="section-warning">一般 runner 映像檔不支援這個快取。啟用前請準備相容映像檔和私人位址。<a href="https://github.com/ysya/runscaler/blob/main/docs/local-actions-cache.md">設定指南 ↗</a></p></section><section class="tool-card" id="disk-settings"><div class="card-heading"><div><p class="eyebrow">03 / STORAGE</p><h2>磁碟空間保護</h2><p>主機空間不足時清理快取。第 4 級可能清空舊版 cache volume。</p></div></div><div id="disk-fields" class="field-grid"></div></section><section class="tool-card" id="global-settings"><div class="card-heading"><div><p class="eyebrow">04 / PROCESS</p><h2>全域設定</h2><p>紀錄、健康檢查、同時執行數量與診斷設定會套用至整個程序。</p></div></div><div id="global-fields" class="field-grid"></div><details><summary>診斷</summary><div id="diagnostics-fields" class="field-grid"></div></details></section></form></div><aside class="output-panel tool-output"><div class="output-header"><div><span class="output-kicker">你的設定檔</span><h3>config.toml</h3></div><span class="output-badge">TOML</span></div><p id="form-message" class="form-message" role="status" aria-live="polite"></p><pre class="code-window"><code id="config-output"></code></pre><button id="copy-config" class="button button-primary copy-button" type="button" disabled>複製 TOML ↗</button><p id="copy-status" class="copy-status" role="status" aria-live="polite"></p><div class="output-note"><strong>在主機完成設定</strong><p>存檔後在主機上填入 PAT，或將 GitHub App 私鑰放在指定路徑，接著執行 <code>runner validate</code>。請將檔案權限設為 <code>0600</code>。Linux 系統服務常用 <code>/etc/runner/config.toml</code>；macOS 使用者服務常用 <code>~/.config/runner/config.toml</code>。</p><p>Docker 與 Tart 安裝方式請參閱<a href="https://github.com/ysya/runscaler/blob/main/docs/deployment.zh-TW.md">部署指南 ↗</a>。</p></div></aside></div>
+  </main>
+  <footer class="site-footer"><div class="section-shell footer-inner"><a class="brand" href="../zh-TW.html"><span class="brand-mark" aria-hidden="true">r<span>.</span></span><span>runscaler</span></a><p>在自己的主機管理自架 runner。</p><div><a href="https://github.com/ysya/runscaler">GitHub</a><a href="https://github.com/ysya/runscaler/blob/main/docs/configuration.zh-TW.md">文件</a></div></div></footer>
+</body>
+</html>

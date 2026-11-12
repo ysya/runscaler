@@ -5,7 +5,7 @@
 [![License](https://img.shields.io/github/license/ysya/runscaler)](LICENSE)
 [![Go Report Card](https://goreportcard.com/badge/github.com/ysya/runscaler)](https://goreportcard.com/report/github.com/ysya/runscaler)
 
-[官網與設定產生器](https://runscaler.ysya.dev/zh-TW.html) | [English](README.md) | [繁體中文](README.zh-TW.md)
+[官網](https://runscaler.ysya.dev/zh-TW.html) · [設定產生器](https://runscaler.ysya.dev/configure/zh-TW.html) | [English](README.md) | [繁體中文](README.zh-TW.md)
 
 本文件為 [英文 README](README.md) 的繁體中文版本。更新指令、設定或操作說明時，請同步維護英文與繁體中文版本（包含 `docs/` 內的文件）；若內容有差異，以英文版為準。
 
@@ -82,7 +82,7 @@ Go cache-v2 接收器。具備快取能力的 runner 與 BuildKit 容器透過
 
 ## 快速開始
 
-先用[設定產生器](https://runscaler.ysya.dev/zh-TW.html#configure)選擇主機並複製 TOML。
+先用[設定產生器](https://runscaler.ysya.dev/configure/zh-TW.html)選擇主機並複製 TOML。
 將設定存到下方路徑，在主機上填入 GitHub [App 或 PAT](docs/configuration.zh-TW.md#github-credentials-and-pat-permissions)；
 網頁不會要求輸入憑證內容。Linux 系統服務安裝前會檢查設定、Docker 存取權與 GitHub 憑證。
 
@@ -182,7 +182,7 @@ jobs:
 ## 升級前準備
 
 已移除 `runner init`。既有設定檔與已安裝服務可繼續使用；建立新設定檔請用
-[設定產生器](https://runscaler.ysya.dev/zh-TW.html#configure)，並在主機上填入憑證。
+[設定產生器](https://runscaler.ysya.dev/configure/zh-TW.html)，並在主機上填入憑證。
 
 **Actions 快取設定 sunset（本版尚未移除）：** 使用內建 Go 接收器的 Docker scale set
 應設定 `native-actions-cache = true`，並在 `actions-cache-url` 與

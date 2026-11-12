@@ -111,6 +111,7 @@ h2 { margin: 0; font-size: clamp(36px, 4vw, 52px); line-height: 1.12; letter-spa
 .configure-heading { display: flex; align-items: end; justify-content: space-between; gap: 24px; margin-bottom: 33px; }
 .configure-heading > div { max-width: 670px; }
 .configure-heading .eyebrow { color: #3e826d; }
+.configure-heading .button { margin-top: 24px; }
 .local-only { flex: none; padding: 9px 13px; border: 1px solid #b3c8be; border-radius: 20px; color: #3c6b5c; background: #f6faf5; font-family: var(--mono); font-size: 11px; }
 .local-only span { color: #4aaf78; }
 .configurator { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, .92fr); gap: 21px; align-items: start; }

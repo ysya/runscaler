@@ -31,6 +31,10 @@ main { overflow: visible; }
 .tool-field input:not([type=checkbox]), .tool-field select, .tool-field textarea { width: 100%; min-height: 40px; padding: 9px 10px; border: 1px solid #cbd8ce; border-radius: 7px; outline: none; color: var(--ink); background: #fff; font-size: 12px; }
 .tool-field textarea { resize: vertical; line-height: 1.45; }
 .tool-field input:focus, .tool-field select:focus, .tool-field textarea:focus { border-color: #48987b; box-shadow: 0 0 0 3px #4aa58522; }
+.tool-field [aria-invalid="true"] { border-color: #b84935 !important; box-shadow: 0 0 0 2px #b8493522; }
+.field-error { margin: 6px 0 0; color: #a13c29; font-size: 12px; line-height: 1.45; }
+.error-jump { margin: 0 0 12px; padding: 7px 11px; border: 1px solid #e6a784; border-radius: 7px; color: #ffe3d3; background: #6e3d34; font-size: 12px; font-weight: 700; }
+.error-jump:hover { background: #835047; }
 .tool-field input::placeholder, .tool-field textarea::placeholder { color: #94a59a; }
 .tool-field .field-help { margin-top: 5px; }
 .inline-check { display: flex !important; align-items: center; gap: 5px; margin-top: 8px; font-weight: 500 !important; }

@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -85,6 +86,10 @@ func (r execCommandRunner) Run(ctx context.Context, name string, args ...string)
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
+		// Tart and the guest command can both exit 1; retain stderr to tell them apart.
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			exitErr.Stderr = bytes.Clone(stderr.Bytes())
+		}
 		return nil, fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
 	}
 	return stdout.Bytes(), nil
@@ -766,9 +771,16 @@ func (p *TartProvider) waitRunnerListening(ctx context.Context, vmName string) e
 		if err := backoff.Sleep(ctx, poll); err != nil {
 			return err
 		}
-		if !p.runnerAlive(ctx, vmName) {
-			return fmt.Errorf("runner process exited on %s before connecting to GitHub; runner log:\n%s",
-				vmName, p.runnerLogTail(ctx, vmName))
+		alive, err := p.runnerAlive(ctx, vmName)
+		if err != nil {
+			return fmt.Errorf("runner readiness check failed on %s: %w", vmName, err)
+		}
+		if !alive {
+			// Guest-agent startup and Runner.Listener creation are asynchronous.
+			// A missing process before any log exists is not evidence of failure.
+			if log := p.runnerLogTail(ctx, vmName); strings.TrimSpace(log) != "" {
+				return fmt.Errorf("runner process exited on %s before connecting to GitHub; runner log:\n%s", vmName, log)
+			}
 		}
 		if _, err := p.cmd.Run(ctx, "tart", "exec", vmName, "grep", "-q", readyMarker, "/tmp/runner.log"); err == nil {
 			break
@@ -782,16 +794,39 @@ func (p *TartProvider) waitRunnerListening(ctx context.Context, vmName string) e
 	if err := backoff.Sleep(ctx, cmp.Or(p.runnerSettle, defaultReadySettle)); err != nil {
 		return err
 	}
-	if !p.runnerAlive(ctx, vmName) {
+	alive, err := p.runnerAlive(ctx, vmName)
+	if err != nil {
+		return fmt.Errorf("runner readiness check failed on %s after connecting to GitHub: %w", vmName, err)
+	}
+	if !alive {
 		return fmt.Errorf("runner process exited on %s right after connecting to GitHub; runner log:\n%s",
 			vmName, p.runnerLogTail(ctx, vmName))
 	}
 	return nil
 }
 
-func (p *TartProvider) runnerAlive(ctx context.Context, vmName string) bool {
+func (p *TartProvider) runnerAlive(ctx context.Context, vmName string) (bool, error) {
 	_, err := p.cmd.Run(ctx, "tart", "exec", vmName, "pgrep", "-f", "Runner.Listener")
-	return err == nil
+	if err == nil {
+		return true, nil
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		if exitErr.ExitCode() == 1 && len(bytes.TrimSpace(exitErr.Stderr)) == 0 {
+			return false, nil
+		}
+		return false, err
+	}
+	if marker := strings.LastIndex(err.Error(), "exit status "); marker >= 0 {
+		fields := strings.Fields(err.Error()[marker+len("exit status "):])
+		if len(fields) > 0 {
+			codeText := strings.TrimSuffix(fields[0], ":")
+			if code, parseErr := strconv.Atoi(codeText); parseErr == nil && code == 1 && len(fields) == 1 {
+				return false, nil
+			}
+		}
+	}
+	return false, err
 }
 
 func (p *TartProvider) runnerLogTail(ctx context.Context, vmName string) string {

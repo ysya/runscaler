@@ -202,6 +202,69 @@ func TestTartProvider_StartInstance_RunnerExitsBeforeListening(t *testing.T) {
 	}
 }
 
+func TestTartProvider_StartInstance_WaitsThroughEmptyStartupLog(t *testing.T) {
+	cmd := startupCmdRunner(nil)
+	cmd.sequences = map[string][]cmdResult{
+		"tart exec runner-abc pgrep -f Runner.Listener":                   {{err: errors.New("exit status 1")}, {}, {}},
+		"tart exec runner-abc tail -20 /tmp/runner.log":                   {{}, {}},
+		"tart exec runner-abc grep -q Listening for Jobs /tmp/runner.log": {{err: errors.New("exit status 1")}, {}},
+	}
+	p := newTestTartProvider(cmd)
+	p.runnerPoll = time.Millisecond
+	p.runnerListenTimeout = 100 * time.Millisecond
+	p.runnerSettle = time.Millisecond
+
+	if _, err := p.StartInstance(context.Background(), "runner-abc", "jit"); err != nil {
+		t.Fatalf("StartInstance() failed after transient empty startup log: %v", err)
+	}
+	if got := cmd.callCount("tart exec runner-abc pgrep -f Runner.Listener"); got != 3 {
+		t.Fatalf("pgrep checks = %d, want two readiness polls and the settle check", got)
+	}
+	if got := cmd.callCount("tart exec runner-abc grep -q Listening for Jobs /tmp/runner.log"); got != 2 {
+		t.Fatalf("readiness marker checks = %d, want a missing then present marker", got)
+	}
+	if callIndex(cmd.getCalls(), "tart", "delete", "runner-abc") >= 0 {
+		t.Fatal("VM was deleted during transient runner startup")
+	}
+}
+
+func TestTartProvider_RunnerAliveSurfacesTartTransportError(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "tart")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf 'Error: unavailable (14): Transport became inactive\\n' >&2\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	p := &TartProvider{cmd: execCommandRunner{}}
+
+	alive, err := p.runnerAlive(context.Background(), "runner-abc")
+	if alive {
+		t.Fatal("runnerAlive() reported a Tart transport error as alive")
+	}
+	if err == nil || !strings.Contains(err.Error(), "Transport became inactive") {
+		t.Fatalf("runnerAlive() error = %v, want the Tart transport failure", err)
+	}
+}
+
+func TestTartProvider_RunnerAliveMalformedExitStatusDoesNotPanic(t *testing.T) {
+	cmd := &mockCommandRunner{
+		results: map[string]cmdResult{
+			"tart exec runner-abc pgrep -f Runner.Listener": {
+				err: errors.New("wrapped: exit status "),
+			},
+		},
+	}
+	p := newTestTartProvider(cmd)
+
+	alive, err := p.runnerAlive(context.Background(), "runner-abc")
+	if alive {
+		t.Fatal("runnerAlive() reported a malformed-status process as alive")
+	}
+	if err == nil || !strings.Contains(err.Error(), "exit status") {
+		t.Fatalf("runnerAlive() error = %v, want the original malformed status error", err)
+	}
+}
+
 func TestTartProvider_StartInstance_RunnerNeverConnects(t *testing.T) {
 	cmd := startupCmdRunner(map[string]cmdResult{
 		"tart exec runner-abc grep -q Listening for Jobs /tmp/runner.log": {err: errors.New("exit status 1")},

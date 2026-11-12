@@ -109,7 +109,7 @@ type DockerConfig struct {
 	ReadyTimeout  *time.Duration `mapstructure:"ready-timeout"`
 	Socket        string         `mapstructure:"socket"`
 	DinD          *bool          `mapstructure:"dind"`           // pointer: nil = inherit default (true)
-	WorkspaceRoot string         `mapstructure:"workspace-root"` // private host directory for per-runner Docker bind translation
+	WorkspaceRoot string         `mapstructure:"workspace-root"` // private host directory for per-runner Docker socket proxies
 	SharedVolume  string         `mapstructure:"shared-volume"`
 	Memory        int            `mapstructure:"memory"`     // Memory limit in MB (0 = unlimited)
 	CPU           int            `mapstructure:"cpu"`        // CPU cores (0 = unlimited)

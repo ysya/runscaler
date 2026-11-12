@@ -41,6 +41,15 @@ jobs:
       - name: Run tests
         run: go test -race ./...
 
+      - name: Verify Docker workspace binds on Linux
+        if: matrix.os == 'ubuntu-latest'
+        env:
+          RUNSCALER_TEST_DOCKER_SOCKET: /var/run/docker.sock
+          RUNSCALER_TEST_DOCKER_IMAGE: alpine:3.21
+        run: |
+          docker pull alpine:3.21
+          go test -race ./internal/provider -run '^TestDockerWorkspaceBindIntegration$' -count=1 -v
+
       - name: Run vet
         run: go vet ./...
 

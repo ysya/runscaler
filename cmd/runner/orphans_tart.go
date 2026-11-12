@@ -61,9 +61,9 @@ func removeOrphanTartVMs(ctx context.Context, runner provider.CommandRunner, orp
 // machine-wide internal/lock before entering run; without that lock these
 // resources could belong to another live runner process.
 //
-// Reconciliation reclaims anonymous and explicitly runner-owned temporary
-// volumes only. Shared/cache volumes outlive the process and may hold data
-// needed by a later job in an in-flight workflow run.
+// Reconciliation reclaims anonymous, explicitly runner-owned temporary, and
+// private workspace volumes. Shared/cache volumes outlive the process and may
+// hold data needed by a later job in an in-flight workflow run.
 func reconcileOrphans(ctx context.Context, dockerClients map[string]*dockerclient.Client, tartHomes []string, logger *slog.Logger, workspaceRoots ...string) {
 	workspacesSafeToRemove := len(dockerClients) > 0
 	var remainingContainers []container.Summary
@@ -108,6 +108,11 @@ func reconcileOrphans(ctx context.Context, dockerClients map[string]*dockerclien
 		remainingContainers = append(remainingContainers, remaining.Items...)
 	}
 	if workspacesSafeToRemove {
+		for _, socket := range sockets {
+			if err := provider.CleanupWorkspaceVolumes(ctx, dockerClients[socket]); err != nil {
+				logger.Warn("Failed to remove orphan runner workspace volumes", slog.String("socket", socket), slog.Any("error", err))
+			}
+		}
 		for _, root := range uniqueSortedStrings(workspaceRoots) {
 			if err := provider.CleanupWorkspaceRoot(root, remainingContainers); err != nil {
 				logger.Warn("Failed to remove orphan runner workspaces", slog.String("root", root), slog.Any("error", err))

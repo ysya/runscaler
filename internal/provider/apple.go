@@ -41,14 +41,14 @@ func NewAppleContainerProvider(ss config.ScaleSetConfig) *AppleContainerProvider
 func (p *AppleContainerProvider) list(ctx context.Context) ([]AppleInstance, error) {
 	out, err := p.command.Run(ctx, "container", "list", "--all", "--format", "json")
 	if err != nil {
-		return nil, fmt.Errorf("Apple Container inventory unavailable: %w", err)
+		return nil, fmt.Errorf("apple container inventory unavailable: %w", err)
 	}
 	var items []AppleInstance
 	if err = json.Unmarshal(out, &items); err != nil {
-		return nil, fmt.Errorf("invalid Apple Container inventory: %w", err)
+		return nil, fmt.Errorf("invalid apple container inventory: %w", err)
 	}
 	if items == nil {
-		return nil, fmt.Errorf("Apple Container inventory must be an array")
+		return nil, fmt.Errorf("apple container inventory must be an array")
 	}
 	return items, nil
 }
@@ -63,7 +63,7 @@ func (p *AppleContainerProvider) StartInstance(ctx context.Context, name, jit st
 	}
 	for _, item := range items {
 		if item.ID == name {
-			return "", fmt.Errorf("Apple Container name already exists")
+			return "", fmt.Errorf("apple container name already exists")
 		}
 	}
 	secret, err := os.CreateTemp("", "runscaler-apple-jit-*")
@@ -85,9 +85,9 @@ func (p *AppleContainerProvider) StartInstance(ctx context.Context, name, jit st
 		defer cancel()
 		cleanupErr := p.RemoveInstance(cleanup, name)
 		if cleanupErr != nil {
-			return "", fmt.Errorf("Apple Container start failed; cleanup pending: %w", cleanupErr)
+			return "", fmt.Errorf("apple container start failed; cleanup pending: %w", cleanupErr)
 		}
-		return "", fmt.Errorf("Apple Container start failed: %w", err)
+		return "", fmt.Errorf("apple container start failed: %w", err)
 	}
 	return name, nil
 }
@@ -102,7 +102,7 @@ func (p *AppleContainerProvider) RemoveInstance(ctx context.Context, id string) 
 			continue
 		}
 		if item.Configuration.Labels["io.github.runscaler.apple-owner"] != p.owner {
-			return fmt.Errorf("refusing to delete a foreign Apple Container")
+			return fmt.Errorf("refusing to delete a foreign apple container")
 		}
 		// JobCompleted can arrive before the image finishes shutting down
 		// containerd. Let its normal exit settle before signalling the VM.
@@ -128,7 +128,7 @@ func (p *AppleContainerProvider) RemoveInstance(ctx context.Context, id string) 
 					if candidate.ID == id {
 						found = true
 						if candidate.Configuration.Labels["io.github.runscaler.apple-owner"] != p.owner {
-							return fmt.Errorf("Apple Container ownership changed during cleanup")
+							return fmt.Errorf("apple container ownership changed during cleanup")
 						}
 						waiting = candidate.Status.State != "stopped"
 					}

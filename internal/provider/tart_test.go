@@ -218,6 +218,25 @@ func TestTartProvider_StartInstance_WaitsThroughEmptyStartupLog(t *testing.T) {
 	}
 }
 
+func TestTartProvider_RunnerAliveMalformedExitStatusDoesNotPanic(t *testing.T) {
+	cmd := &mockCommandRunner{
+		results: map[string]cmdResult{
+			"tart exec runner-abc pgrep -f Runner.Listener": {
+				err: errors.New("wrapped: exit status "),
+			},
+		},
+	}
+	p := newTestTartProvider(cmd)
+
+	alive, err := p.runnerAlive(context.Background(), "runner-abc")
+	if alive {
+		t.Fatal("runnerAlive() reported a malformed-status process as alive")
+	}
+	if err == nil || !strings.Contains(err.Error(), "exit status") {
+		t.Fatalf("runnerAlive() error = %v, want the original malformed status error", err)
+	}
+}
+
 func TestTartProvider_StartInstance_RunnerNeverConnects(t *testing.T) {
 	cmd := startupCmdRunner(map[string]cmdResult{
 		"tart exec runner-abc grep -q Listening for Jobs /tmp/runner.log": {err: errors.New("exit status 1")},

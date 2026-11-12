@@ -814,9 +814,12 @@ func (p *TartProvider) runnerAlive(ctx context.Context, vmName string) (bool, er
 		return false, err
 	}
 	if marker := strings.LastIndex(err.Error(), "exit status "); marker >= 0 {
-		codeText := strings.TrimSuffix(strings.Fields(err.Error()[marker+len("exit status "):])[0], ":")
-		if code, parseErr := strconv.Atoi(codeText); parseErr == nil && code == 1 {
-			return false, nil
+		fields := strings.Fields(err.Error()[marker+len("exit status "):])
+		if len(fields) > 0 {
+			codeText := strings.TrimSuffix(fields[0], ":")
+			if code, parseErr := strconv.Atoi(codeText); parseErr == nil && code == 1 {
+				return false, nil
+			}
 		}
 	}
 	return false, err

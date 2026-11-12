@@ -5,7 +5,7 @@
 [![License](https://img.shields.io/github/license/ysya/runscaler)](LICENSE)
 [![Go Report Card](https://goreportcard.com/badge/github.com/ysya/runscaler)](https://goreportcard.com/report/github.com/ysya/runscaler)
 
-[Website](https://ysya.github.io/runscaler/) | [English](README.md) | [繁體中文](README.zh-TW.md)
+[Website & config builder](https://runscaler.ysya.dev/) | [English](README.md) | [繁體中文](README.zh-TW.md)
 
 Auto-scale GitHub Actions self-hosted runners as Docker containers or macOS VMs. Powered by [actions/scaleset](https://github.com/actions/scaleset).
 
@@ -73,7 +73,7 @@ See [Host-local Actions cache](docs/local-actions-cache.md) for both modes.
 
 ## Quick Start
 
-Use the [config builder](https://ysya.github.io/runscaler/#configure) to choose
+Use the [config builder](https://runscaler.ysya.dev/#configure) to choose
 your host and copy a TOML config. Save it at the path below and add your GitHub
 [App or PAT](docs/configuration.md#github-credentials-and-pat-permissions) on
 the host; the website never asks for credential contents. The Linux system
@@ -167,7 +167,7 @@ Details for each command are in [docs/commands.md](docs/commands.md).
 ## Upgrade requirements
 
 `runner init` is removed. Existing config files and installed services keep
-working; create new config files with the [config builder](https://ysya.github.io/runscaler/#configure)
+working; create new config files with the [config builder](https://runscaler.ysya.dev/#configure)
 and add credentials on the host.
 
 **Actions cache setting sunset (no removal in this release):** Docker scale sets

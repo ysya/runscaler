@@ -256,7 +256,7 @@ func buildInstallOpts(scope serviceScope, configPath, binaryPath string, require
 	}
 	var warnings []string
 	if !facts.found {
-		warnings = append(warnings, fmt.Sprintf("Config file not found at %s; run 'runner init' to generate one first", configPath))
+		warnings = append(warnings, fmt.Sprintf("Config file not found at %s; build one at %s first", configPath, configBuilderURL))
 	}
 	if scope != scopeUser && runtime.GOOS == "linux" {
 		if _, warning := systemdLogsDirectory(facts.logFile); warning != "" {

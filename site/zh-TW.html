@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Runscaler 在自己的主機上以 Docker 或 Tart 建立短生命週期的 GitHub Actions runner。選擇設定並開始使用。">
+  <meta name="theme-color" content="#0b171c">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'none'; base-uri 'none'; form-action 'none'">
+  <link rel="icon" type="image/svg+xml" href="./favicon.svg">
+  <title>Runscaler — 工作來了，runner 就緒</title>
+  <link rel="stylesheet" href="./style.css">
+  <script type="module" src="./app.mjs"></script>
+</head>
+<body data-lang="zh-TW">
+  <a class="skip-link" href="#main">跳至內容</a>
+  <header class="site-header">
+    <a class="brand" href="./" aria-label="Runscaler home"><span class="brand-mark" aria-hidden="true">r<span>.</span></span><span>runscaler</span></a>
+    <nav class="site-nav" aria-label="主選單">
+      <a href="#how">運作方式</a>
+      <a href="#configure">設定產生器</a>
+      <a href="https://github.com/ysya/runscaler/blob/main/README.zh-TW.md#documentation">文件 <span aria-hidden="true">↗</span></a>
+    </nav>
+    <div class="header-actions">
+      <a class="language-link" href="./" lang="en" hreflang="en">English</a>
+      <a class="header-github" href="https://github.com/ysya/runscaler" aria-label="Runscaler on GitHub">GitHub <span aria-hidden="true">↗</span></a>
+    </div>
+  </header>
+
+  <main id="main">
+    <section class="hero section-shell">
+      <div class="hero-copy">
+        <p class="eyebrow"><span class="eyebrow-dot"></span> 自架 GITHUB ACTIONS RUNNER</p>
+        <h1>工作來了，<em>runner 就緒。</em></h1>
+        <p class="hero-lede">一個程序在你的主機上依工作需求啟動 Docker 容器或 macOS VM。每個 runner 只執行一個工作，完成後便會移除。</p>
+        <div class="hero-actions">
+          <a class="button button-primary" href="#configure">產生設定檔 <span aria-hidden="true">↗</span></a>
+          <a class="button button-text" href="https://github.com/ysya/runscaler">查看原始碼 <span aria-hidden="true">→</span></a>
+        </div>
+        <div class="hero-facts" aria-label="專案特點">
+          <div><strong>0 → N</strong><span>依需求擴縮</span></div>
+          <div><strong>1 job</strong><span>使用全新 runner</span></div>
+          <div><strong>1 binary</strong><span>在主機上</span></div>
+        </div>
+      </div>
+      <div class="hero-visual" role="img" aria-label="GitHub Actions 工作送到管理程序後，啟動 Docker 容器或 Tart macOS VM，完成後清理 runner">
+        <div class="visual-topline"><span class="terminal-dots" aria-hidden="true"><i></i><i></i><i></i></span><span>runscaler / 工作流程</span><span class="signal"><i></i> ONLINE</span></div>
+        <div class="queue-card"><span class="node-icon">01</span><div><small>GITHUB ACTIONS</small><strong>工作排入佇列</strong></div><span class="pulse-dot"></span></div>
+        <div class="flow-line"><span></span><i></i></div>
+        <div class="manager-card"><span class="manager-badge">r.</span><div><small>YOUR HOST</small><strong>runscaler</strong><span>接收工作並啟動 runner</span></div></div>
+        <div class="split-line" aria-hidden="true"><span></span><span></span></div>
+        <div class="provider-cards"><div><small>LINUX</small><strong>Docker</strong><span>短生命週期容器</span></div><div><small>MACOS</small><strong>Tart</strong><span>短生命週期 VM</span></div></div>
+        <div class="visual-footer"><span class="footer-indicator"></span> 工作完成 <span aria-hidden="true">→</span> 移除 runner</div>
+      </div>
+    </section>
+
+    <section class="principles section-shell" id="how">
+      <div class="section-heading"><p class="eyebrow">運作原理</p><h2>容量跟著工作佇列走。</h2><p>沿用你的主機與工作流程；Runscaler 負責中間的 runner 生命週期。</p></div>
+      <div class="principle-grid">
+        <article class="principle"><span class="principle-number">01 / 等待</span><h3>有工作才啟動</h3><p>透過 GitHub scale-set API 長輪詢，在收到工作指派時啟動 runner。</p></article>
+        <article class="principle"><span class="principle-number">02 / 執行</span><h3>依主機選擇環境</h3><p>在 Docker 主機使用容器；macOS 工作則可使用 Tart VM。</p></article>
+        <article class="principle"><span class="principle-number">03 / 回收</span><h3>工作結束後清理</h3><p>每個 runner 只處理一個工作。完成後會移除，重新啟動時也會清理遺留資源。</p></article>
+      </div>
+    </section>
+
+    <section class="configure-band" id="configure">
+      <div class="section-shell">
+        <div class="configure-heading"><div><p class="eyebrow">開始使用</p><h2>選好主機設定，複製即可使用。</h2><p>選擇基本選項並複製 TOML。在主機上填入憑證，再用 <code>runner validate</code> 檢查實際環境。</p></div><span class="local-only"><span aria-hidden="true">●</span> 此網頁不輸入憑證</span></div>
+        <div class="configurator">
+          <form id="config-form" class="config-form" novalidate>
+            <fieldset class="choice-fieldset">
+              <legend>01 <span>要在哪裡執行？</span></legend>
+              <div class="choice-grid">
+                <label class="choice-card"><input type="radio" name="provider" value="docker" checked><span class="choice-content"><strong>Linux + Docker</strong><small>系統服務 · 容器</small></span></label>
+                <label class="choice-card"><input type="radio" name="provider" value="tart"><span class="choice-content"><strong>macOS + Tart</strong><small>使用者服務 · 虛擬機器</small></span></label>
+              </div>
+            </fieldset>
+
+            <fieldset class="form-group">
+              <legend>02 <span>連接 GitHub</span></legend>
+              <label for="registration-url">組織或儲存庫網址</label>
+              <input id="registration-url" name="url" type="url" inputmode="url" autocomplete="off" placeholder="https://github.com/your-org">
+              <label for="scale-name">規模集名稱 <small>（工作流程的 <code>runs-on</code> 標籤）</small></label>
+              <input id="scale-name" name="name" type="text" autocomplete="off" placeholder="my-runners">
+            </fieldset>
+
+            <fieldset class="form-group">
+              <legend>03 <span>設定容量</span></legend>
+              <label for="max-runners">最多同時執行的 runner 數量</label>
+              <input id="max-runners" name="max-runners" type="number" min="1" step="1" value="10">
+              <p class="field-help" id="capacity-help">請依主機可用資源設定。</p>
+              <label for="runner-image">Runner 映像檔</label>
+              <input id="runner-image" name="runner-image" type="text" autocomplete="off" value="ghcr.io/actions/actions-runner:latest">
+              <p class="field-help" id="image-help">已安裝 GitHub Actions runner 的 Docker 映像檔。</p>
+              <div id="docker-options" class="option-row"><label for="dind">允許工作使用 Docker</label><input id="dind" name="dind" type="checkbox" checked><p class="field-help">會掛載主機 Docker socket，讓工作取得等同主機 root 的權限。啟用時切勿執行公開 fork 的 PR。<a href="https://github.com/ysya/runscaler/blob/main/docs/security.zh-TW.md">安全性說明</a>。</p></div>
+            </fieldset>
+
+            <fieldset class="choice-fieldset auth-fieldset">
+              <legend>04 <span>選擇驗證方式</span></legend>
+              <div class="choice-grid">
+                <label class="choice-card"><input type="radio" name="auth" value="pat" checked><span class="choice-content"><strong>個人存取權杖（PAT）</strong><small>複製後在主機上填入權杖</small></span></label>
+                <label class="choice-card"><input type="radio" name="auth" value="app"><span class="choice-content"><strong>GitHub App</strong><small>參照主機上的私鑰檔案</small></span></label>
+              </div>
+              <p class="field-help">繼續前請確認 <a href="https://github.com/ysya/runscaler/blob/main/docs/configuration.zh-TW.md#github-credentials-and-pat-permissions">GitHub 所需權限</a>。</p>
+              <div id="app-fields" class="app-fields" hidden>
+                <label for="client-id">App 用戶端 ID</label><input id="client-id" name="client-id" type="text" autocomplete="off" placeholder="Iv1.abc123">
+                <label for="installation-id">安裝 ID</label><input id="installation-id" name="installation-id" type="number" min="1" step="1" placeholder="123456">
+                <label for="key-file">主機上的私鑰檔案路徑</label><input id="key-file" name="key-file" type="text" autocomplete="off" placeholder="/etc/runner/app.pem">
+                <p class="field-help">只輸入路徑；私鑰內容留在主機上。</p>
+              </div>
+            </fieldset>
+          </form>
+
+          <div class="output-panel">
+            <div class="output-header"><div><span class="output-kicker">你的設定檔</span><h3>config.toml</h3></div><span class="output-badge">TOML</span></div>
+            <p id="form-message" class="form-message" role="status" aria-live="polite">輸入 GitHub 網址與規模集名稱，即可預覽設定檔。</p>
+            <pre class="code-window"><code id="config-output"></code></pre>
+            <button id="copy-config" class="button button-primary copy-button" type="button" disabled>複製 TOML <span aria-hidden="true">↗</span></button>
+            <p id="copy-status" class="copy-status" role="status" aria-live="polite"></p>
+            <div class="output-note"><strong>憑證留在你的主機。</strong><p id="credential-note">複製的檔案會保留空白的 <code>token = ""</code>；請在主機上填入 PAT 後再驗證。</p></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="finish section-shell" id="next-steps">
+      <div class="section-heading"><p class="eyebrow">在主機完成設定</p><h2>複製、存檔、驗證、執行。</h2><p>網頁只產生設定文字；runner 會檢查主機與 GitHub 存取權。</p></div>
+      <div id="docker-steps" class="steps-grid">
+        <article><span>01</span><h3>安裝</h3><p>先啟動 Docker，再於 Linux 安裝 runner 執行檔。</p><pre><code>curl -fsSL https://raw.githubusercontent.com/ysya/runscaler/main/install.sh | sudo sh</code></pre></article>
+        <article><span>02</span><h3>存檔並填入憑證</h3><p>將 TOML 貼到檔案，在主機填入 PAT 或放置 App 私鑰檔案，再保護設定檔。</p><pre><code>sudo install -d -m 0700 /etc/runner
+sudoedit /etc/runner/config.toml
+sudo chmod 0600 /etc/runner/config.toml</code></pre></article>
+        <article><span>03</span><h3>安裝服務</h3><p>新的系統服務會在啟動前檢查 Docker 與 GitHub 存取權。</p><pre><code>sudo /usr/local/bin/runner service install --config-path /etc/runner/config.toml
+sudo /usr/local/bin/runner status</code></pre></article>
+      </div>
+      <div id="tart-steps" class="steps-grid" hidden>
+        <article><span>01</span><h3>準備 Mac</h3><p><a href="https://github.com/ysya/runscaler/blob/main/docs/deployment.zh-TW.md#tart-prerequisites-macos">安裝 Tart 並拉取相容的 VM 映像檔</a>，接著在本機圖形介面登入階段安裝 runner 執行檔。</p><pre><code>curl -fsSL https://raw.githubusercontent.com/ysya/runscaler/main/install.sh | sh -s -- --user</code></pre></article>
+        <article><span>02</span><h3>存檔並填入憑證</h3><p>將 TOML 貼到檔案，在主機填入 PAT 或放置 App 私鑰檔案，再保護設定檔。</p><pre><code>mkdir -p ~/.config/runner
+chmod 0700 ~/.config/runner
+nano ~/.config/runner/config.toml
+chmod 0600 ~/.config/runner/config.toml</code></pre></article>
+        <article><span>03</span><h3>驗證並安裝</h3><p>請在 macOS 本機登入階段執行。</p><pre><code>~/.local/bin/runner validate
+~/.local/bin/runner service install --scope user
+~/.local/bin/runner status</code></pre></article>
+      </div>
+      <div class="workflow-note"><div><span class="workflow-icon" aria-hidden="true">↳</span><strong>最後在工作流程指定規模集</strong></div><pre><code id="workflow-output">runs-on: my-runners</code></pre></div>
+      <p class="advanced-link">需要多個規模集或進階快取、網路設定嗎？ <a href="https://github.com/ysya/runscaler/blob/main/docs/configuration.zh-TW.md">閱讀完整設定指南 <span aria-hidden="true">↗</span></a></p>
+    </section>
+  </main>
+
+  <footer class="site-footer"><div class="section-shell footer-inner"><a class="brand" href="./"><span class="brand-mark" aria-hidden="true">r<span>.</span></span><span>runscaler</span></a><p>在自己的主機管理自架 runner。</p><div><a href="https://github.com/ysya/runscaler">GitHub</a><a href="https://github.com/ysya/runscaler/blob/main/README.zh-TW.md#documentation">文件</a><a href="https://github.com/ysya/runscaler/blob/main/LICENSE">MIT 授權</a></div></div></footer>
+</body>
+</html>

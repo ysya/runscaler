@@ -10,6 +10,25 @@ ignored: `runner run` logs a warning for each and keeps starting, while
 (`url`, `name`, `token`, `github-app`, `labels`, `min-runners`) left at the top level
 when `[[scaleset]]` entries exist.
 
+<a id="github-credentials-and-pat-permissions"></a>
+
+## GitHub credentials and PAT permissions
+
+Use a [GitHub App](#github-app-authentication) or Personal Access Token
+(PAT) for the target organization or repository. PAT permissions depend on
+the token type and runner level:
+
+| Token type | Organization runners | Repository runners |
+| --- | --- | --- |
+| Classic PAT | `admin:org` | `repo` |
+| Fine-grained PAT | Self-hosted runners: **Read and write** + Administration: **Read** | Administration: **Read and write** |
+
+The token owner must be an organization owner for organization runners, or
+have admin access to the repository for repository runners. Fine-grained PATs
+targeting an organization may also require
+[administrator approval](https://docs.github.com/en/organizations/managing-programmatic-access-to-your-organization/setting-a-personal-access-token-policy-for-your-organization),
+depending on organization policy.
+
 ## Config File (TOML)
 
 **Docker provider (default):**
@@ -379,15 +398,9 @@ name = "pat-runners"
 token = "env:ORG_B_TOKEN"
 ```
 
-For non-interactive setup, `runner init` accepts the same App reference flags as
-`runner run`, and writes the references without prompting for a PAT:
-
-```bash
-runner init --url https://github.com/your-org --name app-runners \
-  --provider docker --max-runners 2 --dind=false --shared-volume="" \
-  --github-app-client-id Iv1.example --github-app-installation-id 123456 \
-  --github-app-private-key-file /absolute/path/to/runner-app.pem
-```
+For one scale set, the [config builder](https://ysya.github.io/runscaler/#configure)
+can produce App references without receiving the private key. Save the copied
+TOML locally, then put the key file at the configured absolute path.
 
 `run`, `validate`, `doctor`, and `scaleset delete` use the same auth selection.
 `doctor` performs read-only API probes for every configured scale set;

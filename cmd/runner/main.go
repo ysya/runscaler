@@ -123,7 +123,7 @@ func init() {
 	viper.BindPFlag("tart.net-bridged", flags.Lookup("tart-net-bridged"))
 
 	// Register subcommands
-	cmd.AddCommand(initCmd, validateCmd, statusCmd, doctorCmd, versionCmd, serviceCmd, cacheCmd, runCommand)
+	cmd.AddCommand(validateCmd, statusCmd, doctorCmd, versionCmd, serviceCmd, cacheCmd, runCommand)
 }
 
 func main() {
@@ -245,8 +245,7 @@ handles one job and is removed upon completion.
 
 Supports multiple scale sets via [[scaleset]] entries in TOML config,
 or a single scale set via 'runner run' CLI flags.`,
-	Example: `  # Quick start
-  runner init                            # Generate config.toml interactively
+	Example: `  # Build config.toml at https://ysya.github.io/runscaler/#configure
   runner validate --config config.toml   # Verify configuration
   runner run --config config.toml        # Start scaling
 

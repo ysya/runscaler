@@ -2,6 +2,55 @@
 
 [English](deployment.md) | [繁體中文](deployment.zh-TW.md)
 
+## Tart prerequisites (macOS)
+
+Install Tart on an Apple Silicon Mac. Homebrew may require explicit trust for
+the Tart and Softnet formulas before loading them:
+
+```bash
+brew trust --formula openai/tools/tart openai/tools/softnet
+brew install openai/tools/tart
+```
+
+Pull an Xcode runner image compatible with the host macOS version. For example,
+on a macOS 26 host:
+
+```bash
+tart pull ghcr.io/cirruslabs/macos-tahoe-xcode:latest
+```
+
+[Cirrus Labs images](https://github.com/orgs/cirruslabs/packages?tab=packages&q=macos-)
+also include `macos-sequoia-xcode` (macOS 15) and
+`macos-golden-gate-xcode` (macOS 27). A VM cannot run a newer macOS than its
+host. Image tags select an Xcode version; pin a tag instead of `latest` for
+reproducible builds. See the image's published requirements before
+adjusting CPU or memory under `[tart]`. The
+[config builder](https://ysya.github.io/runscaler/#configure) limits Tart to at
+most two VMs per host.
+
+If upgrading from the old `cirruslabs/cli` tap, uninstall its `tart` and
+`softnet` formulas before installing from `openai/tools`. Then remove the
+old tap after reviewing what remains installed from it. See
+[Tart's installation guide](https://github.com/openai/tart/blob/main/docs/quick-start.md)
+and [Homebrew's tap trust guide](https://docs.brew.sh/Tap-Trust).
+
+## Other binary installation methods
+
+The install script downloads the binary only. Linux system installs use
+`/usr/local/bin`; macOS and Linux user installs use `~/.local/bin`.
+Set `INSTALL_DIR` for another absolute path or `RUNNER_VERSION` to pin a
+release. A system binary and every parent directory must be protected from
+non-root writes.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ysya/runscaler/main/install.sh | sudo env INSTALL_DIR=/opt/runner/bin sh
+curl -fsSL https://raw.githubusercontent.com/ysya/runscaler/main/install.sh | RUNNER_VERSION=v0.20.1 sh -s -- --user
+```
+
+You can also use `go install github.com/ysya/runscaler/cmd/runner@latest`
+or download a prebuilt binary from [Releases](https://github.com/ysya/runscaler/releases).
+A binary install does not create the service; use the service commands below.
+
 ## Graceful Shutdown
 
 The default `drain-timeout` is `2h`. Shutdown signals have distinct meanings:
@@ -67,7 +116,7 @@ runner service restart     # waits for active jobs automatically
   Docker socket. No sudo is needed. Root user-services are rejected.
 - **macOS** supports only a LaunchAgent for the logged-in user. It starts at
   login, so enable automatic login on unattended hosts, and install it from a
-  local GUI session rather than SSH. runner refuses to run, init, install or
+  local GUI session rather than SSH. runner refuses to run, install or
   start as root on macOS. launchd starts agents with a minimal `PATH`; runner
   appends `/opt/homebrew/bin` and `/usr/local/bin` when present so a
   Homebrew-installed `tart` is found. The agent discards stdout (runner writes
@@ -77,12 +126,15 @@ runner service restart     # waits for active jobs automatically
   runner; it is not a security boundary against local users.
 
 ```bash
-# New Linux system installation: configure first, then prepare and start
-sudo /usr/local/bin/runner init --output /etc/runner/config.toml
+# New Linux system installation: copy TOML from the config builder,
+# save it at /etc/runner/config.toml and fill credentials on the host.
+sudo chmod 0600 /etc/runner/config.toml
 sudo /usr/local/bin/runner service install --config-path /etc/runner/config.toml
 
-# macOS, or Linux with a user-owned binary and provider
-runner init
+# macOS, or Linux with a user-owned binary and provider: save the TOML
+# at ~/.config/runner/config.toml and fill credentials on the host.
+chmod 0600 ~/.config/runner/config.toml
+runner validate
 runner service install --scope user
 ```
 

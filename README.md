@@ -5,7 +5,7 @@
 [![License](https://img.shields.io/github/license/ysya/runscaler)](LICENSE)
 [![Go Report Card](https://goreportcard.com/badge/github.com/ysya/runscaler)](https://goreportcard.com/report/github.com/ysya/runscaler)
 
-[English](README.md) | [繁體中文](README.zh-TW.md)
+[Website](https://ysya.github.io/runscaler/) | [English](README.md) | [繁體中文](README.zh-TW.md)
 
 Auto-scale GitHub Actions self-hosted runners as Docker containers or macOS VMs. Powered by [actions/scaleset](https://github.com/actions/scaleset).
 
@@ -16,9 +16,8 @@ Runners are **ephemeral** — each container/VM handles exactly one job and is r
 - [How It Works](#how-it-works)
 - [Features](#features)
 - [Quick Start](#quick-start)
-  - [Prerequisites](#prerequisites)
-  - [Install](#install)
-  - [Run](#run)
+  - [Linux system service](#linux-system-service)
+  - [macOS user service](#macos-user-service)
 - [Commands](#commands)
 - [Documentation](#documentation)
 - [Upgrade requirements](#upgrade-requirements)
@@ -74,118 +73,71 @@ See [Host-local Actions cache](docs/local-actions-cache.md) for both modes.
 
 ## Quick Start
 
-### Prerequisites
+Use the [config builder](https://ysya.github.io/runscaler/#configure) to choose
+your host and copy a TOML config. Save it at the path below and add your GitHub
+[App or PAT](docs/configuration.md#github-credentials-and-pat-permissions) on
+the host; the website never asks for credential contents. The Linux system
+installer checks the config, Docker access, and GitHub credentials before starting.
 
-- **Docker provider:** Docker running on the host
-- **Tart provider (macOS):** Apple Silicon Mac with [Tart](https://tart.run/) installed:
+### Linux system service
 
-  ```bash
-  # Homebrew 7 refuses formulae from a tap you have not trusted
-  brew trust --formula openai/tools/tart openai/tools/softnet
-  brew install openai/tools/tart
-
-  # Pull a macOS runner image (pre-installed with Xcode and runner dependencies)
-  tart pull ghcr.io/cirruslabs/macos-golden-gate-xcode:latest
-  ```
-
-  > **Upgrading from the `cirruslabs/cli` tap:** Tart moved to `openai/tools`, so `brew upgrade` never gets past the last `cirruslabs/cli` release (2.32.x). Run `brew uninstall tart softnet`, then the two commands above, then remove the old tap. Homebrew will not untap formulae it does not trust, so trust them just for that: `brew trust --formula cirruslabs/cli/tart cirruslabs/cli/softnet && brew untap cirruslabs/cli && brew untrust --formula cirruslabs/cli/tart cirruslabs/cli/softnet`. Avoid `brew untap --force`, which uninstalls every formula it attributes to the tap.
-
-  > **Note:** Apple's Virtualization.framework limits each host to **2 concurrent macOS VMs**. Set `max-runners` accordingly. Each VM slot reuses a deterministic MAC address to reduce DHCP lease churn — no sudo required for MAC assignment.
-
-  The default VM resources from Cirrus Labs images:
-
-  | Image | CPU | Memory | Disk |
-  | ----- | --- | ------ | ---- |
-  | `ghcr.io/cirruslabs/macos-golden-gate-xcode:latest` (macOS 27) | 4 cores | 8 GB (8192 MB) | 140 GB |
-  | `ghcr.io/cirruslabs/macos-tahoe-xcode:latest` (macOS 26) | 4 cores | 8 GB (8192 MB) | 140 GB |
-  | `ghcr.io/cirruslabs/macos-sequoia-xcode:latest` (macOS 15) | 4 cores | 8 GB (8192 MB) | 140 GB |
-
-  Image tags track the Xcode version, not macOS (e.g. `macos-golden-gate-xcode:27.2` ships Xcode 27.2); pin a tag instead of `latest` for reproducible builds. A guest cannot run a newer macOS than its host, so a macOS 26 host needs `macos-tahoe-xcode`.
-
-  Override per VM with `cpu` and `memory` under `[tart]` in config. For iOS builds (Xcode), 8 GB+ is recommended.
-
-- GitHub credentials: a [GitHub App](docs/configuration.md#github-app-authentication) or a **Personal Access Token**. PAT scopes depend on token type and runner level:
-
-  | Token type           | Organization runners                                               | Repository runners                 |
-  | -------------------- | ------------------------------------------------------------------ | ---------------------------------- |
-  | **Classic PAT**      | `admin:org`                                                        | `repo`                             |
-  | **Fine-grained PAT** | Self-hosted runners: **Read and write** + Administration: **Read** | Administration: **Read and write** |
-
-  > **Note:** The token owner must be an **org owner** (for org runners) or have **admin access** to the repo (for repo runners). Fine-grained PATs targeting an organization may also require [admin approval](https://docs.github.com/en/organizations/managing-programmatic-access-to-your-organization/setting-a-personal-access-token-policy-for-your-organization) depending on org policy.
-
-### Install
-
-**Shell script (Linux/macOS):**
+Start Docker on the host, then run:
 
 ```bash
-# Linux: root-owned system binary (the service runs as non-root)
 curl -fsSL https://raw.githubusercontent.com/ysya/runscaler/main/install.sh | sudo sh
+sudo install -d -m 0700 /etc/runner
+sudoedit /etc/runner/config.toml  # Paste the TOML and fill the credential locally
+sudo chmod 0600 /etc/runner/config.toml
+sudo /usr/local/bin/runner service install --config-path /etc/runner/config.toml
+sudo /usr/local/bin/runner status
+```
 
-# macOS: user binary; Linux: opt into a user installation
+The service uses a dedicated non-root account. In the builder, choose Docker
+and enter the scale-set name you will use in `runs-on`. See
+[Deployment](docs/deployment.md#service-layout) for user services, credential
+environment files, and other installation methods.
+
+### macOS user service
+
+Install [Tart](https://tart.run/) and pull a macOS image compatible with your
+host; [Tart setup and image choices](docs/deployment.md#tart-prerequisites-macos)
+has the commands. Then run from a local GUI login session:
+
+```bash
 curl -fsSL https://raw.githubusercontent.com/ysya/runscaler/main/install.sh | sh -s -- --user
+mkdir -p ~/.config/runner
+chmod 0700 ~/.config/runner
+nano ~/.config/runner/config.toml  # Paste the TOML and fill the credential locally
+chmod 0600 ~/.config/runner/config.toml
+~/.local/bin/runner validate
+~/.local/bin/runner service install --scope user
+~/.local/bin/runner status
 ```
 
-Linux defaults to system installation at `/usr/local/bin` and requires root. macOS defaults to `~/.local/bin`; Linux `--user` uses the same user-owned location. The script downloads a binary only; it does not create an account or service. System binaries may use another absolute location if the file and every ancestor are protected from non-root writes. Set `INSTALL_DIR` to customize, or `RUNNER_VERSION` to pin a version:
+In the builder, choose Tart, enter the image you pulled, and use the scale-set
+name you will put in `runs-on`. The LaunchAgent starts when you log in. A
+Linux user service uses the same runner commands after a user installation;
+see [Deployment](docs/deployment.md#service-layout).
 
-```bash
-# Install the system binary elsewhere (the directory and every ancestor must be root-only)
-curl -fsSL https://raw.githubusercontent.com/ysya/runscaler/main/install.sh | sudo env INSTALL_DIR=/opt/runner/bin sh
-
-# Pin a specific version
-curl -fsSL https://raw.githubusercontent.com/ysya/runscaler/main/install.sh | RUNNER_VERSION=v1.2.3 sh -s -- --user
-```
-
-**Go install:**
-
-```bash
-go install github.com/ysya/runscaler/cmd/runner@latest
-```
-
-**Binary releases:**
-
-Download from [Releases](https://github.com/ysya/runscaler/releases) and add to your `PATH`.
-
-### Run
-
-```bash
-# Generate config interactively
-# (writes ~/.config/runner/config.toml, or /etc/runner/config.toml as root)
-runner init
-
-# Validate everything before starting (the standard config path is found automatically)
-runner validate
-
-# Start scaling
-runner run
-
-# Or using CLI flags directly
-runner run \
-  --url https://github.com/your-org \
-  --name my-runners \
-  --token ghp_xxx \
-  --max-runners 10
-
-# Dry run — validate config, Docker, and images without starting listeners
-runner run --dry-run
-```
-
-Then in your workflow:
+In your workflow, use the name entered in the builder:
 
 ```yaml
 jobs:
   build:
-    runs-on: my-runners  # matches --labels (defaults to --name if not set)
+    runs-on: my-runners
     steps:
       - uses: actions/checkout@v4
       - run: echo "Running on auto-scaled runner!"
 ```
+
+For a foreground run or CLI flags, see [Commands](docs/commands.md) and
+[Configuration](docs/configuration.md).
 
 ## Commands
 
 | Command                  | Description                                            |
 | ------------------------ | ------------------------------------------------------ |
 | `runner run`             | Start the runner manager                               |
-| `runner init`            | Generate a config file interactively                   |
 | `runner validate`        | Validate configuration and connectivity                |
 | `runner status`          | Show capacity, jobs, native cache, and disk headroom |
 | `runner doctor`          | Diagnose GitHub connectivity and orphaned containers/VMs |
@@ -213,6 +165,10 @@ Details for each command are in [docs/commands.md](docs/commands.md).
 | [Development](docs/development.md) | Building from source, architecture |
 
 ## Upgrade requirements
+
+`runner init` is removed. Existing config files and installed services keep
+working; create new config files with the [config builder](https://ysya.github.io/runscaler/#configure)
+and add credentials on the host.
 
 **Actions cache setting sunset (no removal in this release):** Docker scale sets
 using the built-in Go receiver should set `native-actions-cache = true` and
@@ -259,8 +215,8 @@ current user's runner config directory, then `/etc/runner`. Explicit `--config`
 selects its exact path. Absolute `XDG_CONFIG_HOME` and `XDG_STATE_HOME` customize
 user config/state; relative values are ignored. User service installation
 records those values and its absolute config path, while management commands
-select the installed service's config. `init` defaults to the current identity's
-standard config path; `service install --config-path` takes precedence over
+select the installed service's config. The builder describes the standard
+config paths; `service install --config-path` takes precedence over
 `--config`.
 
 ## License

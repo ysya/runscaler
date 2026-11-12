@@ -5,7 +5,7 @@
 [![License](https://img.shields.io/github/license/ysya/runscaler)](LICENSE)
 [![Go Report Card](https://goreportcard.com/badge/github.com/ysya/runscaler)](https://goreportcard.com/report/github.com/ysya/runscaler)
 
-[English](README.md) | [繁體中文](README.zh-TW.md)
+[官網](https://ysya.github.io/runscaler/zh-TW.html) | [English](README.md) | [繁體中文](README.zh-TW.md)
 
 本文件為 [英文 README](README.md) 的繁體中文版本。更新指令、設定或操作說明時，請同步維護英文與繁體中文版本（包含 `docs/` 內的文件）；若內容有差異，以英文版為準。
 
@@ -20,9 +20,8 @@ runner 採用**短生命週期**模式 — 每個容器／VM 只處理一個工�
 - [運作方式](#how-it-works)
 - [功能](#features)
 - [快速開始](#quick-start)
-  - [必要條件](#prerequisites)
-  - [安裝](#install)
-  - [執行](#run)
+  - [Linux 系統服務](#linux-system-service)
+  - [macOS 使用者服務](#macos-user-service)
 - [指令](#commands)
 - [文件](#documentation)
 - [升級前準備](#upgrade-requirements)
@@ -83,117 +82,65 @@ Go cache-v2 接收器。具備快取能力的 runner 與 BuildKit 容器透過
 
 ## 快速開始
 
-<a id="prerequisites"></a>
+先用[設定產生器](https://ysya.github.io/runscaler/zh-TW.html#configure)選擇主機並複製 TOML。
+將設定存到下方路徑，在主機上填入 GitHub [App 或 PAT](docs/configuration.zh-TW.md#github-credentials-and-pat-permissions)；
+網頁不會要求輸入憑證內容。Linux 系統服務安裝前會檢查設定、Docker 存取權與 GitHub 憑證。
 
-### 必要條件
+<a id="linux-system-service"></a>
 
-- **Docker 供應器：** 主機上須已執行 Docker
-- **Tart 供應器（macOS）：** 已安裝 [Tart](https://tart.run/) 的 Apple Silicon Mac：
+### Linux 系統服務
 
-  ```bash
-  # Homebrew 7 refuses formulae from a tap you have not trusted
-  brew trust --formula openai/tools/tart openai/tools/softnet
-  brew install openai/tools/tart
-
-  # Pull a macOS runner image (pre-installed with Xcode and runner dependencies)
-  tart pull ghcr.io/cirruslabs/macos-golden-gate-xcode:latest
-  ```
-
-  > **從 `cirruslabs/cli` tap 升級：** Tart 已移至 `openai/tools`，因此 `brew upgrade` 只能更新到 `cirruslabs/cli` 的最後一個版本（2.32.x）。請先執行 `brew uninstall tart softnet`，再執行上方兩個指令，最後移除舊 tap。Homebrew 不允許移除含有未受信任 formula 的 tap，因此僅為了移除而暫時信任這些 formula：`brew trust --formula cirruslabs/cli/tart cirruslabs/cli/softnet && brew untap cirruslabs/cli && brew untrust --formula cirruslabs/cli/tart cirruslabs/cli/softnet`。避免使用 `brew untap --force`，因為它會解除安裝所有被歸屬於該 tap 的 formula。
-
-  > **注意：** Apple 的 Virtualization.framework 限制每台主機**同時最多執行 2 台 macOS VM**。請據此設定 `max-runners`。每個 VM 槽位會重複使用固定的 MAC 位址，以減少 DHCP 租約更動；指派 MAC 位址不需要 sudo。
-
-  Cirrus Labs 映像檔的預設 VM 資源：
-
-  | 映像檔 | CPU | 記憶體 | 磁碟 |
-  | ----- | --- | ------ | ---- |
-  | `ghcr.io/cirruslabs/macos-golden-gate-xcode:latest`（macOS 27） | 4 核心 | 8 GB（8192 MB） | 140 GB |
-  | `ghcr.io/cirruslabs/macos-tahoe-xcode:latest`（macOS 26） | 4 核心 | 8 GB（8192 MB） | 140 GB |
-  | `ghcr.io/cirruslabs/macos-sequoia-xcode:latest`（macOS 15） | 4 核心 | 8 GB（8192 MB） | 140 GB |
-
-  映像檔標籤對應的是 Xcode 版本而非 macOS 版本（例如 `macos-golden-gate-xcode:27.2` 內含 Xcode 27.2）；若需要可重現的建置，請固定標籤而非使用 `latest`。VM 的 macOS 版本不能比主機新，因此 macOS 26 主機請使用 `macos-tahoe-xcode`。
-
-  可在設定檔的 `[tart]` 下，透過 `cpu` 與 `memory` 覆寫每台 VM 的資源。進行 iOS 建置（Xcode）時，建議至少配置 8 GB 記憶體。
-
-- GitHub 憑證：[GitHub App](docs/configuration.zh-TW.md#github-app-authentication) 或**個人存取權杖（Personal Access Token）**。PAT 所需的權限範圍取決於權杖類型與 runner 層級：
-
-  | 權杖類型 | 組織 runner | 儲存庫 runner |
-  | -------------------- | ------------------------------------------------------------------ | ---------------------------------- |
-  | **傳統 PAT** | `admin:org` | `repo` |
-  | **細緻權限 PAT** | 自架 runner：**讀取與寫入** + 管理：**讀取** | 管理：**讀取與寫入** |
-
-  > **注意：** 權杖擁有者必須是**組織擁有者**（組織 runner），或具有儲存庫的**管理員存取權**（儲存庫 runner）。依組織原則而定，以組織為目標的細緻權限 PAT 也可能需要[管理員核准](https://docs.github.com/en/organizations/managing-programmatic-access-to-your-organization/setting-a-personal-access-token-policy-for-your-organization)。
-
-<a id="install"></a>
-
-### 安裝
-
-**Shell 指令碼（Linux／macOS）：**
+先在主機上啟動 Docker，再執行：
 
 ```bash
-# Linux: root-owned system binary (the service runs as non-root)
 curl -fsSL https://raw.githubusercontent.com/ysya/runscaler/main/install.sh | sudo sh
+sudo install -d -m 0700 /etc/runner
+sudoedit /etc/runner/config.toml  # 貼上 TOML 並在主機填入憑證
+sudo chmod 0600 /etc/runner/config.toml
+sudo /usr/local/bin/runner service install --config-path /etc/runner/config.toml
+sudo /usr/local/bin/runner status
+```
 
-# macOS: user binary; Linux: opt into a user installation
+服務使用專用的非 root 帳號。在設定產生器中選擇 Docker，並輸入要用在
+`runs-on` 的規模集名稱。使用者服務、憑證環境檔及其他安裝方式請見
+[部署](docs/deployment.zh-TW.md#service-layout)。
+
+<a id="macos-user-service"></a>
+
+### macOS 使用者服務
+
+先安裝 [Tart](https://tart.run/) 並拉取與主機相容的 macOS 映像檔；
+[安裝與映像檔選擇](docs/deployment.zh-TW.md#tart-prerequisites-macos)列有指令。
+然後從本機 GUI 登入階段執行：
+
+```bash
 curl -fsSL https://raw.githubusercontent.com/ysya/runscaler/main/install.sh | sh -s -- --user
+mkdir -p ~/.config/runner
+chmod 0700 ~/.config/runner
+nano ~/.config/runner/config.toml  # 貼上 TOML 並在主機填入憑證
+chmod 0600 ~/.config/runner/config.toml
+~/.local/bin/runner validate
+~/.local/bin/runner service install --scope user
+~/.local/bin/runner status
 ```
 
-Linux 預設為系統安裝，需以 root 將 binary 安裝至 `/usr/local/bin`。macOS 預設安裝至 `~/.local/bin`；Linux 的 `--user` 也使用此使用者路徑。指令碼只下載 binary，不會建立帳號或服務。系統 binary 也可使用其他絕對路徑，但檔案與所有上層目錄都必須只有 root 能修改。可設定 `INSTALL_DIR` 自訂位置，或以 `RUNNER_VERSION` 指定版本：
+在設定產生器中選擇 Tart，輸入剛拉取的映像檔，以及要用在 `runs-on`
+的規模集名稱。LaunchAgent 會在登入時啟動。Linux 使用者安裝也可使用
+相同的 runner 指令；詳見[部署](docs/deployment.zh-TW.md#service-layout)。
 
-```bash
-# Install the system binary elsewhere (the directory and every ancestor must be root-only)
-curl -fsSL https://raw.githubusercontent.com/ysya/runscaler/main/install.sh | sudo env INSTALL_DIR=/opt/runner/bin sh
-
-# Pin a specific version
-curl -fsSL https://raw.githubusercontent.com/ysya/runscaler/main/install.sh | RUNNER_VERSION=v1.2.3 sh -s -- --user
-```
-
-**透過 Go 安裝：**
-
-```bash
-go install github.com/ysya/runscaler/cmd/runner@latest
-```
-
-**預先編譯的執行檔：**
-
-從[發行版本](https://github.com/ysya/runscaler/releases)下載，並加入你的 `PATH`。
-
-<a id="run"></a>
-
-### 執行
-
-```bash
-# Generate config interactively
-# (writes ~/.config/runner/config.toml, or /etc/runner/config.toml as root)
-runner init
-
-# Validate everything before starting (the standard config path is found automatically)
-runner validate
-
-# Start scaling
-runner run
-
-# Or using CLI flags directly
-runner run \
-  --url https://github.com/your-org \
-  --name my-runners \
-  --token ghp_xxx \
-  --max-runners 10
-
-# Dry run — validate config, Docker, and images without starting listeners
-runner run --dry-run
-```
-
-接著在工作流程中設定：
+在工作流程中使用設定產生器輸入的名稱：
 
 ```yaml
 jobs:
   build:
-    runs-on: my-runners  # matches --labels (defaults to --name if not set)
+    runs-on: my-runners
     steps:
       - uses: actions/checkout@v4
       - run: echo "Running on auto-scaled runner!"
 ```
+
+以前景方式執行或使用 CLI 旗標時，請見[指令](docs/commands.zh-TW.md)與
+[設定](docs/configuration.zh-TW.md)。
 
 <a id="commands"></a>
 
@@ -202,7 +149,6 @@ jobs:
 | 指令 | 說明 |
 | ------------------------ | ------------------------------------------------------ |
 | `runner run` | 啟動 runner 管理程序 |
-| `runner init` | 互動式產生設定檔 |
 | `runner validate` | 驗證設定與連線 |
 | `runner status` | 顯示容量、工作、原生快取與磁碟剩餘空間 |
 | `runner doctor` | 診斷 GitHub 連線與孤立的容器／VM |
@@ -235,6 +181,9 @@ jobs:
 
 ## 升級前準備
 
+已移除 `runner init`。既有設定檔與已安裝服務可繼續使用；建立新設定檔請用
+[設定產生器](https://ysya.github.io/runscaler/zh-TW.html#configure)，並在主機上填入憑證。
+
 **Actions 快取設定 sunset（本版尚未移除）：** 使用內建 Go 接收器的 Docker scale set
 應設定 `native-actions-cache = true`，並在 `actions-cache-url` 與
 `[actions-cache].advertise-url` 相同時移除前者。管理程序會自動帶入該 URL。
@@ -264,7 +213,7 @@ release notes。
 
 已移除的 TOML 設定鍵會明確報錯，不會自動翻譯或忽略。仍使用更名過渡期格式的安裝，須先手動準備目前的 binary、config 與服務定義，再升級至此版本。既有資料與舊備份檔案保持原樣。已使用目前 `runner` 格式的 Linux root 系統服務仍受支援，更新與 `--force` 都保留原身分。
 
-獨立執行時，設定搜尋順序為目前目錄、目前使用者的 runner 設定目錄、`/etc/runner`；明確指定 `--config` 時使用該路徑。絕對路徑的 `XDG_CONFIG_HOME` 與 `XDG_STATE_HOME` 可自訂 user 設定／state 位置，相對值會被忽略。user 服務安裝會記錄這些變數與設定檔的絕對路徑，管理指令則使用已安裝服務的設定。`init` 預設使用目前身分的標準設定路徑；服務安裝時 `--config-path` 優先於 `--config`。
+獨立執行時，設定搜尋順序為目前目錄、目前使用者的 runner 設定目錄、`/etc/runner`；明確指定 `--config` 時使用該路徑。絕對路徑的 `XDG_CONFIG_HOME` 與 `XDG_STATE_HOME` 可自訂 user 設定／state 位置，相對值會被忽略。user 服務安裝會記錄這些變數與設定檔的絕對路徑，管理指令則使用已安裝服務的設定。設定產生器會說明標準設定路徑；服務安裝時 `--config-path` 優先於 `--config`。
 
 <a id="license"></a>
 

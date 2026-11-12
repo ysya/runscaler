@@ -6,6 +6,56 @@
 
 本文件為 [英文版](deployment.md) 的繁體中文版本；若內容有差異，以英文版為準。
 
+<a id="tart-prerequisites-macos"></a>
+
+## Tart 必要條件（macOS）
+
+在 Apple Silicon Mac 安裝 Tart。Homebrew 可能要求先信任 Tart 與 Softnet 的
+formula，才能載入：
+
+```bash
+brew trust --formula openai/tools/tart openai/tools/softnet
+brew install openai/tools/tart
+```
+
+拉取與主機 macOS 版本相容、已預裝 Xcode 的 runner 映像檔。例如 macOS 26
+主機可使用：
+
+```bash
+tart pull ghcr.io/cirruslabs/macos-tahoe-xcode:latest
+```
+
+[Cirrus Labs 映像檔](https://github.com/orgs/cirruslabs/packages?tab=packages&q=macos-)
+也有 `macos-sequoia-xcode`（macOS 15）與
+`macos-golden-gate-xcode`（macOS 27）。VM 的 macOS 版本不能比主機新。
+映像檔標籤選擇的是 Xcode 版本；需要可重現的建置時，請固定標籤，不要使用
+`latest`。調整 `[tart]` 下的 CPU 和記憶體前，請先查看映像檔公布的
+需求。[設定產生器](https://ysya.github.io/runscaler/zh-TW.html#configure)會將 Tart 上限設為每台主機兩台 VM。
+
+若從舊的 `cirruslabs/cli` tap 升級，先解除安裝該來源的 `tart` 與
+`softnet`，再從 `openai/tools` 安裝。檢查舊 tap 中仍安裝的 formula 後，
+即可移除舊 tap。詳見
+[Tart 安裝指南](https://github.com/openai/tart/blob/main/docs/quick-start.md)與
+[Homebrew tap 信任指南](https://docs.brew.sh/Tap-Trust)。
+
+<a id="other-binary-installation-methods"></a>
+
+## 其他執行檔安裝方式
+
+安裝指令碼只下載執行檔。Linux 系統安裝使用 `/usr/local/bin`；
+macOS 與 Linux 使用者安裝使用 `~/.local/bin`。可用 `INSTALL_DIR`
+選擇其他絕對路徑，或用 `RUNNER_VERSION` 固定發行版本。系統執行檔
+及其所有上層目錄都必須防止非 root 使用者修改。
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ysya/runscaler/main/install.sh | sudo env INSTALL_DIR=/opt/runner/bin sh
+curl -fsSL https://raw.githubusercontent.com/ysya/runscaler/main/install.sh | RUNNER_VERSION=v0.20.1 sh -s -- --user
+```
+
+也可執行 `go install github.com/ysya/runscaler/cmd/runner@latest`，
+或從[發行版本](https://github.com/ysya/runscaler/releases)下載預先編譯的
+執行檔。安裝執行檔不會建立服務；請接著使用下方的服務指令。
+
 <a id="graceful-shutdown"></a>
 
 ## 正常關閉
@@ -49,16 +99,19 @@ runner service restart     # waits for active jobs automatically
 
 - **Linux 新系統安裝**由 root 安裝，以專用的 `runscaler` 非登入帳號執行。binary 保持 root 擁有；config／App key 為 `root:runscaler`、`0640`，`/etc/runner` 為 `0750`。HOME 與工作目錄為 `/var/lib/runner`；state 與 log 目錄由服務帳號擁有、權限為 `0750`。`ProtectSystem=strict` 讓設定維持唯讀，只開放 `/tmp`、state 與 `/var/log` 下的有效日誌目錄寫入。安裝會拒絕衝突帳號、連結或共用的憑證檔，以及已有其他擁有者資料的目錄。父目錄（包含日誌目錄的父層）必須由 root 擁有，且不可讓群組或其他使用者寫入；請由管理員先準備主機路徑，安裝器不會更改父目錄權限。
 - **Linux user 安裝**使用 `runner service install --scope user`（或 `--user`），沿用使用者的 XDG 路徑、憑證與 Docker socket，不需要 sudo。拒絕建立 root 的 user service。
-- **macOS** 僅支援已登入使用者的 LaunchAgent。它會在登入時啟動，因此無人值守的主機請啟用自動登入，並從本機 GUI 工作階段安裝，而非透過 SSH。runner 在 macOS 上會拒絕以 root 身分執行、初始化、安裝或啟動。launchd 啟動 agent 時使用精簡的 `PATH`；若 `/opt/homebrew/bin` 與 `/usr/local/bin` 存在，runner 會將其附加至路徑，以便找到透過 Homebrew 安裝的 `tart`。agent 會捨棄 stdout（runner 會自行寫入輪替日誌），並將 stderr 保留在 `~/Library/Logs/runner/stderr.log`；此檔案不會輪替。
+- **macOS** 僅支援已登入使用者的 LaunchAgent。它會在登入時啟動，因此無人值守的主機請啟用自動登入，並從本機 GUI 工作階段安裝，而非透過 SSH。runner 在 macOS 上會拒絕以 root 身分執行、安裝或啟動。launchd 啟動 agent 時使用精簡的 `PATH`；若 `/opt/homebrew/bin` 與 `/usr/local/bin` 存在，runner 會將其附加至路徑，以便找到透過 Homebrew 安裝的 `tart`。agent 會捨棄 stdout（runner 會自行寫入輪替日誌），並將 stderr 保留在 `~/Library/Logs/runner/stderr.log`；此檔案不會輪替。
 - `/tmp/runner.lock` 的執行鎖可避免意外啟動第二個 runner；它不是防範本機使用者的安全邊界。
 
 ```bash
-# New Linux system installation: configure first, then prepare and start
-sudo /usr/local/bin/runner init --output /etc/runner/config.toml
+# Linux 新系統安裝：從設定產生器複製 TOML，存為 /etc/runner/config.toml，
+# 並在主機上填入憑證。
+sudo chmod 0600 /etc/runner/config.toml
 sudo /usr/local/bin/runner service install --config-path /etc/runner/config.toml
 
-# macOS, or Linux with a user-owned binary and provider
-runner init
+# macOS 或 Linux 使用者安裝：將 TOML 存為 ~/.config/runner/config.toml，
+# 並在主機上填入憑證。
+chmod 0600 ~/.config/runner/config.toml
+runner validate
 runner service install --scope user
 ```
 

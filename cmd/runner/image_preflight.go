@@ -12,11 +12,27 @@ import (
 	dockerclient "github.com/moby/moby/client"
 	"github.com/moby/moby/client/pkg/jsonmessage"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
 	"github.com/ysya/runscaler/internal/config"
 	"github.com/ysya/runscaler/internal/provider"
 )
+
+func runOptionalImagePreflight(cmd *cobra.Command, scaleSets []config.ScaleSetConfig, pullDocker, ensureTart func(context.Context, config.ScaleSetConfig) error) error {
+	preflight, err := cmd.Flags().GetBool("preflight")
+	if err != nil && cmd.Flags().Lookup("preflight") != nil {
+		return err
+	}
+	if !preflight {
+		return nil
+	}
+	fmt.Fprintln(cmd.OutOrStdout(), "\nPreparing runner images (downloads may take a while)...")
+	if err := prepareRunnerImages(commandContext(cmd), scaleSets, pullDocker, ensureTart); err != nil {
+		return fmt.Errorf("image preflight failed: %w", err)
+	}
+	return nil
+}
 
 // prepareRunnerImages visits each image once per Docker socket and platform,
 // or once per Tart host. Both startup and explicit validation preflight use it.

@@ -69,6 +69,41 @@ func TestValidatePreflightIsOptIn(t *testing.T) {
 	}
 }
 
+func TestOptionalImagePreflightCallsPreparationOnlyWhenRequested(t *testing.T) {
+	command := &cobra.Command{}
+	command.Flags().Bool("preflight", false, "")
+	var out bytes.Buffer
+	command.SetOut(&out)
+	docker := validScaleSet("docker", 0)
+	tart := validScaleSet("tart", 0)
+	tart.Provider = "tart"
+	sets := []config.ScaleSetConfig{docker, tart}
+	var calls []string
+	pullDocker := func(_ context.Context, ss config.ScaleSetConfig) error {
+		calls = append(calls, "docker:"+ss.ScaleSetName)
+		return nil
+	}
+	ensureTart := func(_ context.Context, ss config.ScaleSetConfig) error {
+		calls = append(calls, "tart:"+ss.ScaleSetName)
+		return nil
+	}
+	if err := runOptionalImagePreflight(command, sets, pullDocker, ensureTart); err != nil {
+		t.Fatal(err)
+	}
+	if len(calls) != 0 || out.Len() != 0 {
+		t.Fatalf("default validation prepared images: calls=%q output=%q", calls, &out)
+	}
+	if err := command.Flags().Set("preflight", "true"); err != nil {
+		t.Fatal(err)
+	}
+	if err := runOptionalImagePreflight(command, sets, pullDocker, ensureTart); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(calls, ",") != "docker:docker,tart:tart" || !strings.Contains(out.String(), "Preparing runner images") {
+		t.Fatalf("explicit preflight calls=%q output=%q", calls, &out)
+	}
+}
+
 func TestPrepareRunnerImagesOnlyCallsEachUniqueTarget(t *testing.T) {
 	dockerA := validScaleSet("docker-a", 0)
 	dockerA.RunnerImage = "example/runner:latest"

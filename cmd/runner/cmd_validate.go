@@ -112,26 +112,19 @@ func runValidate(cmd *cobra.Command, args []string) error {
 	if err := validateGitHubAccess(commandContext(cmd), os.Stdout, scaleSets, newScaleSetClient); err != nil {
 		return err
 	}
-	preflight, err := cmd.Flags().GetBool("preflight")
-	if err != nil && cmd.Flags().Lookup("preflight") != nil {
-		return err
+	logger := slog.New(slog.NewTextHandler(cmd.OutOrStdout(), nil))
+	var coordinator *provider.TartHostCoordinator
+	if needsTart {
+		coordinator = provider.NewTartHostCoordinator(config.MaxTartVMsPerHost)
 	}
-	if preflight {
-		fmt.Fprintln(cmd.OutOrStdout(), "\nPreparing runner images (downloads may take a while)...")
-		logger := slog.New(slog.NewTextHandler(cmd.OutOrStdout(), nil))
-		var coordinator *provider.TartHostCoordinator
-		if needsTart {
-			coordinator = provider.NewTartHostCoordinator(config.MaxTartVMsPerHost)
-		}
-		if err := prepareRunnerImages(commandContext(cmd), scaleSets,
-			func(ctx context.Context, ss config.ScaleSetConfig) error {
-				return pullDockerRunnerImage(ctx, ss, dockerClients, cmd.OutOrStdout(), logger)
-			},
-			func(ctx context.Context, ss config.ScaleSetConfig) error {
-				return ensureTartRunnerImage(ctx, ss, logger, coordinator)
-			}); err != nil {
-			return fmt.Errorf("image preflight failed: %w", err)
-		}
+	if err := runOptionalImagePreflight(cmd, scaleSets,
+		func(ctx context.Context, ss config.ScaleSetConfig) error {
+			return pullDockerRunnerImage(ctx, ss, dockerClients, cmd.OutOrStdout(), logger)
+		},
+		func(ctx context.Context, ss config.ScaleSetConfig) error {
+			return ensureTartRunnerImage(ctx, ss, logger, coordinator)
+		}); err != nil {
+		return err
 	}
 
 	fmt.Println("\nAll checks passed.")

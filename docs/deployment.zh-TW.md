@@ -30,7 +30,7 @@ tart pull ghcr.io/cirruslabs/macos-tahoe-xcode:latest
 `macos-golden-gate-xcode`（macOS 27）。VM 的 macOS 版本不能比主機新。
 映像檔標籤選擇的是 Xcode 版本；需要可重現的建置時，請固定標籤，不要使用
 `latest`。調整 `[tart]` 下的 CPU 和記憶體前，請先查看映像檔公布的
-需求。[設定產生器](https://ysya.github.io/runscaler/zh-TW.html#configure)會將 Tart 上限設為每台主機兩台 VM。
+需求。[設定產生器](https://runscaler.ysya.dev/zh-TW.html#configure)會將 Tart 上限設為每台主機兩台 VM。
 
 若從舊的 `cirruslabs/cli` tap 升級，先解除安裝該來源的 `tart` 與
 `softnet`，再從 `openai/tools` 安裝。檢查舊 tap 中仍安裝的 formula 後，

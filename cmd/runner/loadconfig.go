@@ -59,7 +59,7 @@ func searchedConfigFiles() []string {
 
 // missingConfigError explains that no config file was found and how to give
 // runner one.
-const configBuilderURL = "https://ysya.github.io/runscaler/#configure"
+const configBuilderURL = "https://runscaler.ysya.dev/#configure"
 
 func missingConfigError() error {
 	msg := "no config file found"

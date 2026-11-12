@@ -262,7 +262,7 @@ name = "pat-runners"
 token = "env:ORG_B_TOKEN"
 ```
 
-單一規模集可用[設定產生器](https://ysya.github.io/runscaler/zh-TW.html#configure)
+單一規模集可用[設定產生器](https://runscaler.ysya.dev/zh-TW.html#configure)
 產生 App 參照，網頁不會接收私鑰內容。請在本機儲存複製的 TOML，再把私鑰檔案
 放到設定的絕對路徑。
 

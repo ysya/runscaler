@@ -245,7 +245,7 @@ handles one job and is removed upon completion.
 
 Supports multiple scale sets via [[scaleset]] entries in TOML config,
 or a single scale set via 'runner run' CLI flags.`,
-	Example: `  # Build config.toml at https://ysya.github.io/runscaler/#configure
+	Example: `  # Build config.toml at https://runscaler.ysya.dev/#configure
   runner validate --config config.toml   # Verify configuration
   runner run --config config.toml        # Start scaling
 

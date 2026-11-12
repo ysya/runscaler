@@ -108,11 +108,11 @@ install "${BINARY}" "${INSTALL_DIR}/${BINARY}"
 echo "Installed ${BINARY} ${RUNNER_VERSION} to ${INSTALL_DIR}/${BINARY}"
 echo "Binary download complete. No account or service was created."
 if [ "$SCOPE" = "system" ]; then
-    echo "Next: Build config.toml at https://ysya.github.io/runscaler/#configure"
+    echo "Next: Build config.toml at https://runscaler.ysya.dev/#configure"
     echo "Save it to /etc/runner/config.toml, add credentials locally, and set mode 0600."
     echo "Then: sudo ${INSTALL_DIR}/${BINARY} service install --scope system --config-path /etc/runner/config.toml"
 else
-    echo "Next: Build config.toml at https://ysya.github.io/runscaler/#configure"
+    echo "Next: Build config.toml at https://runscaler.ysya.dev/#configure"
     echo "Save it to ~/.config/runner/config.toml, add credentials locally, and set mode 0600."
     echo "Then: ${INSTALL_DIR}/${BINARY} validate && ${INSTALL_DIR}/${BINARY} service install --scope user"
 fi

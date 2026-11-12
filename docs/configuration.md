@@ -398,7 +398,7 @@ name = "pat-runners"
 token = "env:ORG_B_TOKEN"
 ```
 
-For one scale set, the [config builder](https://ysya.github.io/runscaler/#configure)
+For one scale set, the [config builder](https://runscaler.ysya.dev/#configure)
 can produce App references without receiving the private key. Save the copied
 TOML locally, then put the key file at the configured absolute path.
 

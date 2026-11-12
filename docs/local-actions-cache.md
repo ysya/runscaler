@@ -1,19 +1,29 @@
 # Host-local Actions cache
 
-Run one persistent cache service on the same Linux host as disposable Docker
-runners. Supported cache-v2 clients retain their standard Actions cache keys and
-restore behavior; archive creation/extraction and local HTTP transfers still
-happen. This is not a zero-copy cache.
+Runscaler supports two opt-in cache-v2 receiver modes for disposable Docker
+runners on a Linux host:
+
+- **Native Go receiver:** the `runner` manager process starts its own private
+  HTTP listener and stores cache data in `[actions-cache].data-dir`. Enable it
+  globally, then select Docker scale sets with `native-actions-cache = true`.
+  No separate cache process or container is required. See [native receiver
+  setup and recovery](#native-go-receiver).
+- **External receiver:** run a separate service, such as the Rust/Compose
+  deployment below, and set an explicit `docker.actions-cache-url` on selected
+  scale sets. Its process, storage, and management remain independent of runner.
+
+Supported cache-v2 clients retain their standard Actions cache keys and restore
+behavior. Archive creation/extraction and local HTTP transfers still happen;
+neither mode is a zero-copy cache.
 
 The [external Rust service compatibility report](local-actions-cache-compatibility.md)
-records the original pinned client/runtime gate. The native Go receiver also
-passed an isolated signed-job gate covering the fail-closed runner image,
-client matrix, restart, and outage behavior. Detailed run evidence is kept in
-private operator notes. Both gates are scoped to Linux amd64 and the listed
-clients. A provider-managed host canary and drain remain separate deployment
-gates. The standard runner image is unchanged.
+records the original pinned client/runtime gate. The native Go receiver passed
+signed-job acceptance covering the fail-closed runner image, client matrix,
+restart, and outage behavior. Detailed run evidence is kept in private operator
+notes. Both modes require a reachable private endpoint, a cache-capable runner
+image, and validation on each new host. The standard runner image is unchanged.
 
-## Ownership and storage
+## External receiver: ownership and storage
 
 The operator owns `runscaler-actions-cache`; Runscaler does not provision it per
 job. Its label is `managed-by=runscaler-cache`, never `managed-by=runner` or
@@ -33,7 +43,7 @@ A stopped service container can be removed by stopped-container pruning. Its
 external volume remains the data contract; Compose recreates the service against
 that volume. Do not use external volume deletion as routine runner cleanup.
 
-## Select the endpoint and budget
+## External receiver: endpoint and budget
 
 Fill every mandatory field in `deploy/local-cache/.env.example`, copied to an
 ignored `.env` in the same directory:
@@ -53,7 +63,7 @@ is private or automatically create firewall rules. Keep the listener private.
 The service listens on all interfaces *inside* its container, while host port
 publication uses the explicitly selected interface.
 
-## Operator startup
+## External receiver: startup
 
 Deploy only after reviewing the canary evidence and approving the actual host,
 image, endpoint and budget. Never overwrite a pre-existing volume of unknown
@@ -84,7 +94,7 @@ distroless image does not provide a shell/curl healthcheck. A host-only health
 response is insufficient: also exercise actual upload/download URLs and verify
 the restored checksum from both client paths.
 
-## Opt-in runner startup
+## Runner opt-in and image
 
 For the native receiver, set `native-actions-cache = true` on the selected Docker
 scale set and configure the global `[actions-cache].advertise-url`. Use a verified
@@ -97,8 +107,10 @@ Before the listener starts, Runscaler completes volume ownership setup and runs
 source/version and Worker/Listener hashes against the root-owned manifest under
 `/usr/local/share/runscaler/`. Missing/changed files fail before accepting work.
 The check makes no network request; availability tests are separate.
-Only `CUSTOM_ACTIONS_RESULTS_URL` is added for local mode; management credentials
-remain with the service. Empty configuration keeps the original startup behavior.
+The Docker provider supplies `CUSTOM_ACTIONS_RESULTS_URL` for the selected
+receiver. An external service's management key is never injected into jobs;
+native mode has no separate management key. Empty configuration keeps the
+original startup behavior.
 
 ## Client boundaries
 
@@ -128,7 +140,7 @@ continuing builds; the artifact action failed. Docker's optional export required
 asserted that an invalid build failed. This does not promise arbitrary cache
 imports or other clients tolerate outages. No automatic cloud fallback exists.
 
-## Download capabilities, backup and rollback
+## External receiver: download capabilities, backup and rollback
 
 For filesystem storage, returned `/download/<UUIDv4>` paths are bearer
 capabilities without an independent expiry; possession permits download until
@@ -164,7 +176,8 @@ Never force-kill business jobs to finish rollout.
 
 After explicit deployment approval, pin the published fail-closed image by its
 verified digest. Start the native Go listener on a separate private port and
-fresh private data directory while the Rust service remains available. Add a
+fresh private data directory. If migrating an existing Rust deployment, keep
+that service and its data available for rollback. Add a
 canary scale set with only a unique label and one-runner maximum, so generic
 organization jobs cannot match it. Verify signed save/restore, artifact
 passthrough and sibling BuildKit upload/download on provider-managed runners
@@ -172,10 +185,11 @@ before draining and switching the selected existing scale set. Disable
 overlapping shared writable language-cache mounts without deleting their data.
 Live capacity and production disk performance need their own observations.
 
-Rollback stops canary dispatch and drains work. With the manager stopped,
-restore the reviewed prior binary/config and compatible service definition,
-including the selected scale set's Rust endpoint and old runner image. Retain
-both cache data stores and private backups; do not delete a GitHub scale-set
+Rollback stops canary dispatch and drains work. For migration from an existing
+external receiver, restore the reviewed prior binary/config and compatible
+service definition with the manager stopped, including the selected scale set's
+external endpoint and old runner image. Retain each existing cache data store
+and private backups; do not delete a GitHub scale-set
 registration as routine rollback. An isolated JIT test is not a rehearsal of
 this production manager restart.
 
@@ -208,7 +222,9 @@ checks authenticated block uploads, exact-byte restore, cancellation, store
 reopen, and controlled artifact passthrough. It does not register a runner or
 prove compatibility with signed GitHub jobs.
 
-The Rust service and its data remain the rollback endpoint through cutover.
+When migrating an existing external deployment, retain its service and data as
+a rollback endpoint until a separate retention decision. A new native
+deployment does not need the Rust service.
 The original runner image still gives legacy v1 clients GitHub's
 `ACTIONS_CACHE_URL`; use the verified fail-closed image for native v2 so legacy
 requests are rejected locally. Review the private signed-job acceptance record

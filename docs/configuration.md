@@ -289,8 +289,9 @@ The manager can host an opt-in cache-v2 receiver on a separate private listener.
 Its isolated signed-job acceptance and a provider-managed Linux amd64 canary
 have passed. Detailed run evidence is kept in private operator notes. Each new
 host still needs its own image, endpoint, and workflow validation. Keep the
-existing Rust service and data as a rollback endpoint until its retention is
-decided. The global table is not inherited by scale sets:
+existing Rust service and data as a rollback endpoint, if present, until its
+retention is decided. A new native deployment needs no Rust service. The global
+table is not inherited by scale sets:
 
 ```toml
 [actions-cache]
@@ -305,9 +306,10 @@ max-idle-days = 30
 
 Use an actual private host IP for `listen-address` and a URL reachable from
 both runner and sibling BuildKit containers. The directory must be new, private,
-and separate from the Rust volume. The receiver uses GitHub's token issuer/JWKS
-and Results upstream by default. `token-issuer` and `jwks-url` may be set together
-for a trusted HTTPS issuer; `upstream-results-url` is a fixed HTTPS origin.
+and separate from any existing external receiver volume. The receiver uses
+GitHub's token issuer/JWKS and Results upstream by default. `token-issuer` and
+`jwks-url` may be set together for a trusted HTTPS issuer;
+`upstream-results-url` is a fixed HTTPS origin.
 There is no token-validation bypass. `native-actions-cache = true` requires the
 global receiver to be enabled; the scale set gets its advertised URL automatically.
 Other scale sets retain their configured endpoint. The text and JSON forms of

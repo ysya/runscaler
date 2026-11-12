@@ -196,7 +196,8 @@ max-idle-days = 30
 ```
 
 `listen-address` 應使用實際私有主機 IP；`advertise-url` 須能從 runner 與旁系
-BuildKit 容器連通。資料目錄須為全新、私有，且與 Rust volume 分開。預設使用
+BuildKit 容器連通。資料目錄須為全新、私有，且與任何既存外部接收器的 volume 分開；
+全新的原生部署不需要 Rust 服務。預設使用
 GitHub token issuer／JWKS 與 Results 上游；可信任的 HTTPS issuer 可同時設定
 `token-issuer` 與 `jwks-url`，`upstream-results-url` 則是固定 HTTPS 來源。
 沒有略過 token 驗證的開關。`native-actions-cache = true` 必須搭配已啟用的全域

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"time"
@@ -14,14 +15,20 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/ysya/runscaler/internal/config"
+	"github.com/ysya/runscaler/internal/provider"
 )
 
 var validateCmd = &cobra.Command{
-	Use:     "validate",
-	Short:   "Validate configuration and connectivity",
-	Long:    "Check that the config file is valid, Docker/Tart is reachable, and GitHub credentials work.",
-	Example: `  runner validate --config config.toml`,
-	RunE:    runValidate,
+	Use:   "validate",
+	Short: "Validate configuration and connectivity",
+	Long:  "Check that the config file is valid, Docker/Tart is reachable, and GitHub credentials work.",
+	Example: `  runner validate --config config.toml
+  runner validate --config config.toml --preflight`,
+	RunE: runValidate,
+}
+
+func init() {
+	validateCmd.Flags().Bool("preflight", false, "Pull Docker runner images and ensure Tart images are available")
 }
 
 func runValidate(cmd *cobra.Command, args []string) error {
@@ -50,6 +57,12 @@ func runValidate(cmd *cobra.Command, args []string) error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	dockerClients := make(map[string]*dockerclient.Client)
+	defer func() {
+		for _, client := range dockerClients {
+			_ = client.Close()
+		}
+	}()
 
 	// Test every distinct Docker socket used by resolved scale sets.
 	if needsDocker {
@@ -71,7 +84,7 @@ func runValidate(cmd *cobra.Command, args []string) error {
 				fmt.Println("  3. Re-login or run: newgrp docker")
 				return fmt.Errorf("validation failed")
 			}
-			_ = dockerClient.Close()
+			dockerClients[socket] = dockerClient
 			fmt.Printf("  ✓ Docker is reachable at %s\n", socket)
 		}
 	}
@@ -98,6 +111,27 @@ func runValidate(cmd *cobra.Command, args []string) error {
 
 	if err := validateGitHubAccess(commandContext(cmd), os.Stdout, scaleSets, newScaleSetClient); err != nil {
 		return err
+	}
+	preflight, err := cmd.Flags().GetBool("preflight")
+	if err != nil && cmd.Flags().Lookup("preflight") != nil {
+		return err
+	}
+	if preflight {
+		fmt.Fprintln(cmd.OutOrStdout(), "\nPreparing runner images (downloads may take a while)...")
+		logger := slog.New(slog.NewTextHandler(cmd.OutOrStdout(), nil))
+		var coordinator *provider.TartHostCoordinator
+		if needsTart {
+			coordinator = provider.NewTartHostCoordinator(config.MaxTartVMsPerHost)
+		}
+		if err := prepareRunnerImages(commandContext(cmd), scaleSets,
+			func(ctx context.Context, ss config.ScaleSetConfig) error {
+				return pullDockerRunnerImage(ctx, ss, dockerClients, cmd.OutOrStdout(), logger)
+			},
+			func(ctx context.Context, ss config.ScaleSetConfig) error {
+				return ensureTartRunnerImage(ctx, ss, logger, coordinator)
+			}); err != nil {
+			return fmt.Errorf("image preflight failed: %w", err)
+		}
 	}
 
 	fmt.Println("\nAll checks passed.")

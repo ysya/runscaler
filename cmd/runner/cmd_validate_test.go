@@ -59,6 +59,52 @@ max-runners = 0
 	}
 }
 
+func TestValidatePreflightIsOptIn(t *testing.T) {
+	flag := validateCmd.Flags().Lookup("preflight")
+	if flag == nil {
+		t.Fatal("validate has no --preflight flag")
+	}
+	if flag.DefValue != "false" {
+		t.Fatalf("--preflight default = %q, want false", flag.DefValue)
+	}
+}
+
+func TestPrepareRunnerImagesOnlyCallsEachUniqueTarget(t *testing.T) {
+	dockerA := validScaleSet("docker-a", 0)
+	dockerA.RunnerImage = "example/runner:latest"
+	dockerB := dockerA
+	dockerB.ScaleSetName = "docker-b"
+	dockerC := dockerA
+	dockerC.ScaleSetName = "docker-c"
+	dockerC.Docker.Platform = "linux/arm64"
+	tartA := validScaleSet("tart-a", 0)
+	tartA.Provider = "tart"
+	tartA.RunnerImage = "example/tart:latest"
+	tartB := tartA
+	tartB.ScaleSetName = "tart-b"
+	var calls []string
+	err := prepareRunnerImages(context.Background(), []config.ScaleSetConfig{dockerA, dockerB, dockerC, tartA, tartB},
+		func(_ context.Context, ss config.ScaleSetConfig) error {
+			calls = append(calls, "docker:"+ss.Docker.Socket+":"+ss.RunnerImage+":"+ss.Docker.Platform)
+			return nil
+		},
+		func(_ context.Context, ss config.ScaleSetConfig) error {
+			calls = append(calls, "tart:"+ss.RunnerImage)
+			return nil
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"docker:" + dockerA.Docker.Socket + ":example/runner:latest:",
+		"docker:" + dockerA.Docker.Socket + ":example/runner:latest:linux/arm64",
+		"tart:example/tart:latest",
+	}
+	if strings.Join(calls, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("image preparation calls = %q, want %q", calls, want)
+	}
+}
+
 func TestValidateGitHubAccessUsesTheConfiguredRunnerGroup(t *testing.T) {
 	ss := validScaleSet("builders-set", 0)
 	ss.RunnerGroup = "builders"

@@ -548,132 +548,151 @@ func (ss *ScaleSetConfig) resolveEnvToken() {
 
 // Validate checks required fields and logical constraints for a scale set.
 func (ss *ScaleSetConfig) Validate() error {
+	problems := ss.ValidationErrors()
+	if len(problems) > 0 {
+		return problems[0]
+	}
+	return nil
+}
+
+// ValidationErrors returns independent scale-set problems in runtime check order.
+func (ss *ScaleSetConfig) ValidationErrors() []error {
+	var problems []error
+	add := func(err error) { problems = append(problems, err) }
 	if ss.DockerReadyTimeout() <= 0 {
-		return fmt.Errorf("docker.ready-timeout must be greater than zero")
+		add(fmt.Errorf("docker.ready-timeout must be greater than zero"))
 	}
 	if err := ss.EffectiveRetry().Validate(); err != nil {
-		return err
+		add(err)
 	}
 	if ss.RegistrationURL == "" {
-		return fmt.Errorf("registration URL (url) is required")
-	}
-	parsedURL, err := url.ParseRequestURI(ss.RegistrationURL)
-	if err != nil {
-		return fmt.Errorf("invalid registration URL: %w", err)
-	}
-	if parsedURL.Scheme != "https" || parsedURL.Host == "" || parsedURL.User != nil {
-		return fmt.Errorf("registration URL must be an HTTPS URL without embedded credentials")
+		add(fmt.Errorf("registration URL (url) is required"))
+	} else if parsedURL, err := url.ParseRequestURI(ss.RegistrationURL); err != nil {
+		add(fmt.Errorf("invalid registration URL: %w", err))
+	} else if parsedURL.Scheme != "https" || parsedURL.Host == "" || parsedURL.User != nil {
+		add(fmt.Errorf("registration URL must be an HTTPS URL without embedded credentials"))
 	}
 	if ss.ScaleSetName == "" {
-		return fmt.Errorf("scale set name (name) is required")
+		add(fmt.Errorf("scale set name (name) is required"))
 	}
 	if err := ss.validateAuthentication(); err != nil {
-		return err
+		add(err)
 	}
 	if ss.MinRunners < 0 {
-		return fmt.Errorf("min-runners must be >= 0")
+		add(fmt.Errorf("min-runners must be >= 0"))
 	}
 	if ss.MaxRunners < 1 {
-		return fmt.Errorf("max-runners must be >= 1")
+		add(fmt.Errorf("max-runners must be >= 1"))
 	}
 	if ss.MinRunners > ss.MaxRunners {
-		return fmt.Errorf("min-runners (%d) must be <= max-runners (%d)", ss.MinRunners, ss.MaxRunners)
+		add(fmt.Errorf("min-runners (%d) must be <= max-runners (%d)", ss.MinRunners, ss.MaxRunners))
 	}
 	if ss.RunnerImage == "" {
-		return fmt.Errorf("runner-image is required")
+		add(fmt.Errorf("runner-image is required"))
 	}
 
 	switch ss.Provider {
 	case DefaultProvider:
 		if err := validateActionsCacheURL(ss.Docker.ActionsCacheURL); err != nil {
-			return err
+			add(err)
 		}
 		if root := ss.Docker.WorkspaceRoot; root != "" {
 			if !ss.IsDinD() {
-				return fmt.Errorf("docker.workspace-root requires docker.dind=true")
+				add(fmt.Errorf("docker.workspace-root requires docker.dind=true"))
 			}
 			if !filepath.IsAbs(root) || filepath.Clean(root) != root || root == "/" {
-				return fmt.Errorf("docker.workspace-root must be a clean absolute host path other than /")
+				add(fmt.Errorf("docker.workspace-root must be a clean absolute host path other than /"))
 			}
 		}
 		if ss.Docker.Platform != "" {
 			parts := strings.Split(ss.Docker.Platform, "/")
 			if (len(parts) != 2 && len(parts) != 3) || parts[0] == "" || parts[1] == "" || (len(parts) == 3 && parts[2] == "") {
-				return fmt.Errorf("docker platform must be os/arch or os/arch/variant")
+				add(fmt.Errorf("docker platform must be os/arch or os/arch/variant"))
 			}
 		}
 		mounts, err := ss.Docker.ParseCacheVolumes()
 		if err != nil {
-			return err
+			add(err)
 		}
 		if ss.Docker.Memory < 0 || ss.Docker.CPU < 0 || ss.Docker.PidsLimit < 0 || ss.Docker.BuildCacheBudgetGB < 0 {
-			return fmt.Errorf("docker resource limits and cache budget must be >= 0")
+			add(fmt.Errorf("docker resource limits and cache budget must be >= 0"))
 		}
 		if ss.Docker.SharedVolumeName != "" && !volumeNameRe.MatchString(ss.Docker.SharedVolumeName) {
-			return fmt.Errorf("invalid shared-volume-name %q", ss.Docker.SharedVolumeName)
+			add(fmt.Errorf("invalid shared-volume-name %q", ss.Docker.SharedVolumeName))
 		}
 		if ss.Docker.SharedVolume != "" {
 			if !filepath.IsAbs(ss.Docker.SharedVolume) || filepath.Clean(ss.Docker.SharedVolume) != ss.Docker.SharedVolume || ss.Docker.SharedVolume == "/" {
-				return fmt.Errorf("shared-volume must be a clean absolute container path other than /")
+				add(fmt.Errorf("shared-volume must be a clean absolute container path other than /"))
 			}
 			for _, mount := range mounts {
 				if mount.Path == ss.Docker.SharedVolume {
-					return fmt.Errorf("shared-volume conflicts with cache-volumes path %q", mount.Path)
+					add(fmt.Errorf("shared-volume conflicts with cache-volumes path %q", mount.Path))
 				}
 			}
 		}
 	case "tart":
 		if ss.MaxRunners > MaxTartVMsPerHost {
-			return fmt.Errorf("max-runners must be <= %d for the Tart provider (Apple host limit)", MaxTartVMsPerHost)
+			add(fmt.Errorf("max-runners must be <= %d for the Tart provider (Apple host limit)", MaxTartVMsPerHost))
 		}
 		if ss.Tart.PoolSize < 0 || ss.Tart.PoolSize > ss.MaxRunners {
-			return fmt.Errorf("tart pool-size must be between 0 and max-runners")
+			add(fmt.Errorf("tart pool-size must be between 0 and max-runners"))
 		}
 		// Below 1280 the guest loses IPv6; above 1500 the NAT cannot carry it.
 		if ss.Tart.MTU != 0 && ss.Tart.MTU != -1 && (ss.Tart.MTU < 1280 || ss.Tart.MTU > 1500) {
-			return fmt.Errorf("tart mtu must be 0 (auto), -1 (off), or between 1280 and 1500")
+			add(fmt.Errorf("tart mtu must be 0 (auto), -1 (off), or between 1280 and 1500"))
 		}
 		for _, server := range ss.Tart.DNS {
 			if _, err := netip.ParseAddr(server); err != nil {
-				return fmt.Errorf("tart dns entry %q is not an IP address", server)
+				add(fmt.Errorf("tart dns entry %q is not an IP address", server))
 			}
 		}
 		if b := ss.Tart.NetBridged; b != "" && (strings.HasPrefix(b, "-") || strings.ContainsAny(b, " \t\n=")) {
-			return fmt.Errorf("tart net-bridged %q is not a host interface name", b)
+			add(fmt.Errorf("tart net-bridged %q is not a host interface name", b))
 		}
 	default:
-		return fmt.Errorf("unsupported provider %q (must be %q or \"tart\")", ss.Provider, DefaultProvider)
+		add(fmt.Errorf("unsupported provider %q (must be %q or \"tart\")", ss.Provider, DefaultProvider))
 	}
 
-	return nil
+	return problems
 }
 
 // ValidateGlobal checks process-wide settings that are not part of any scale
 // set and therefore would otherwise bypass ScaleSetConfig.Validate.
 func (c *Config) ValidateGlobal() error {
+	problems := c.GlobalValidationErrors()
+	if len(problems) > 0 {
+		return problems[0]
+	}
+	return nil
+}
+
+// GlobalValidationErrors collects independent process-wide config problems.
+// Runtime startup uses the first one; `runner validate` can report all of them.
+func (c *Config) GlobalValidationErrors() []error {
+	var problems []error
 	switch strings.ToLower(c.LogLevel) {
 	case "debug", "info", "warn", "error":
 	default:
-		return fmt.Errorf("log-level must be debug, info, warn, or error")
+		problems = append(problems, fmt.Errorf("log-level must be debug, info, warn, or error"))
 	}
 	switch strings.ToLower(c.LogFormat) {
 	case "text", "json":
 	default:
-		return fmt.Errorf("log-format must be text or json")
+		problems = append(problems, fmt.Errorf("log-format must be text or json"))
 	}
 	if c.HealthPort < 0 || c.HealthPort > 65535 {
-		return fmt.Errorf("health-port must be between 0 and 65535")
+		problems = append(problems, fmt.Errorf("health-port must be between 0 and 65535"))
 	}
 	if c.Concurrent < 0 {
-		return fmt.Errorf("concurrent must be >= 0")
+		problems = append(problems, fmt.Errorf("concurrent must be >= 0"))
 	}
 	if err := c.ActionsCache.Validate(c.HealthPort); err != nil {
-		return err
+		problems = append(problems, err)
 	}
 	if err := c.Disk.Validate(); err != nil {
-		return fmt.Errorf("disk: %w", err)
+		problems = append(problems, fmt.Errorf("disk: %w", err))
 	}
-	return nil
+	return problems
 }
 
 // EffectiveConcurrent returns the process-wide instance limit. An omitted or

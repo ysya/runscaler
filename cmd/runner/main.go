@@ -845,32 +845,42 @@ func groupDockerScaleSets(scaleSets []config.ScaleSetConfig) map[string][]config
 // validate` and service preparation all call it, so a config that validates
 // or installs also starts.
 func checkScaleSets(cfg config.Config, scaleSets []config.ScaleSetConfig) error {
+	problems := scaleSetProblems(cfg, scaleSets)
+	if len(problems) > 0 {
+		return problems[0]
+	}
+	return nil
+}
+
+func scaleSetProblems(cfg config.Config, scaleSets []config.ScaleSetConfig) []error {
+	var problems []error
 	for i := range scaleSets {
-		if err := scaleSets[i].Validate(); err != nil {
-			return fmt.Errorf("scaleset[%d] %q: %w", i, scaleSets[i].ScaleSetName, err)
+		for _, err := range scaleSets[i].ValidationErrors() {
+			problems = append(problems, fmt.Errorf("scaleset[%d] %q: %w", i, scaleSets[i].ScaleSetName, err))
 		}
 		if scaleSets[i].Provider == config.DefaultProvider && scaleSets[i].Docker.NativeActionsCache {
 			if !cfg.ActionsCache.Enabled {
-				return fmt.Errorf("scaleset[%d] %q: docker.native-actions-cache requires actions-cache.enabled", i, scaleSets[i].ScaleSetName)
+				problems = append(problems, fmt.Errorf("scaleset[%d] %q: docker.native-actions-cache requires actions-cache.enabled", i, scaleSets[i].ScaleSetName))
 			}
 			if scaleSets[i].Docker.ActionsCacheURL != cfg.ActionsCache.AdvertiseURL {
-				return fmt.Errorf("scaleset[%d] %q: docker.native-actions-cache requires docker.actions-cache-url to match actions-cache.advertise-url", i, scaleSets[i].ScaleSetName)
+				problems = append(problems, fmt.Errorf("scaleset[%d] %q: docker.native-actions-cache requires docker.actions-cache-url to match actions-cache.advertise-url", i, scaleSets[i].ScaleSetName))
 			}
 		}
 	}
 	if err := cfg.ValidateConcurrent(scaleSets); err != nil {
-		return fmt.Errorf("invalid global capacity: %w", err)
+		problems = append(problems, fmt.Errorf("invalid global capacity: %w", err))
 	}
-	return validateScaleSetCollection(scaleSets)
+	return append(problems, validateScaleSetCollectionProblems(scaleSets)...)
 }
 
-func validateScaleSetCollection(scaleSets []config.ScaleSetConfig) error {
+func validateScaleSetCollectionProblems(scaleSets []config.ScaleSetConfig) []error {
+	var problems []error
 	names := make(map[string]int)
 	totalTartMin := 0
 	totalTartPool := 0
 	for i, ss := range scaleSets {
 		if prior, ok := names[ss.ScaleSetName]; ok {
-			return fmt.Errorf("scaleset[%d] %q duplicates scaleset[%d] name; names must be unique for lifecycle and health tracking", i, ss.ScaleSetName, prior)
+			problems = append(problems, fmt.Errorf("scaleset[%d] %q duplicates scaleset[%d] name; names must be unique for lifecycle and health tracking", i, ss.ScaleSetName, prior))
 		}
 		names[ss.ScaleSetName] = i
 		if ss.IsTart() {
@@ -879,12 +889,12 @@ func validateScaleSetCollection(scaleSets []config.ScaleSetConfig) error {
 		}
 	}
 	if totalTartMin > config.MaxTartVMsPerHost {
-		return fmt.Errorf("combined Tart min-runners is %d, exceeding the host-wide macOS VM limit of %d", totalTartMin, config.MaxTartVMsPerHost)
+		problems = append(problems, fmt.Errorf("combined Tart min-runners is %d, exceeding the host-wide macOS VM limit of %d", totalTartMin, config.MaxTartVMsPerHost))
 	}
 	if totalTartPool > config.MaxTartVMsPerHost {
-		return fmt.Errorf("combined Tart pool-size is %d, exceeding the host-wide macOS VM limit of %d", totalTartPool, config.MaxTartVMsPerHost)
+		problems = append(problems, fmt.Errorf("combined Tart pool-size is %d, exceeding the host-wide macOS VM limit of %d", totalTartPool, config.MaxTartVMsPerHost))
 	}
-	return nil
+	return problems
 }
 
 // listenOnce creates a message session and listener, then runs until

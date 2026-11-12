@@ -32,36 +32,9 @@ func runValidate(cmd *cobra.Command, args []string) error {
 	if configMissing(cfg) {
 		return missingConfigError()
 	}
-
-	// Strict mode: what `runner run` merely warns about (unknown keys,
-	// mixed single/multi mode) fails validation.
-	if len(cfg.Warnings) > 0 {
-		for _, w := range cfg.Warnings {
-			fmt.Printf("  ✗ config: %s\n", w)
-		}
-		return fmt.Errorf("validation failed")
-	}
-	for _, d := range cfg.Deprecations {
-		fmt.Printf("  ⚠ config: %s\n", d)
-	}
-	if err := cfg.ValidateGlobal(); err != nil {
-		fmt.Printf("  ✗ global config: %s\n", err)
-		return fmt.Errorf("validation failed")
-	}
-
-	scaleSets := cfg.ResolveScaleSets()
-	if len(scaleSets) == 0 {
-		return fmt.Errorf("no scale sets configured")
-	}
-	// The same offline checks `runner run` applies before it starts, so a
-	// config that validates also starts.
-	if err := checkScaleSets(cfg, scaleSets); err != nil {
-		fmt.Printf("  ✗ %s\n", err)
-		return fmt.Errorf("validation failed")
-	}
-	for i, ss := range scaleSets {
-		fmt.Printf("  ✓ scaleset[%d] %q — provider=%s url=%s max=%d min=%d\n",
-			i, ss.ScaleSetName, ss.Provider, ss.RegistrationURL, ss.MaxRunners, ss.MinRunners)
+	scaleSets, err := validateLocalConfig(cfg, cmd.OutOrStdout())
+	if err != nil {
+		return err
 	}
 
 	// Check which instance providers are needed.
@@ -129,6 +102,44 @@ func runValidate(cmd *cobra.Command, args []string) error {
 
 	fmt.Println("\nAll checks passed.")
 	return nil
+}
+
+func validateLocalConfig(cfg config.Config, out io.Writer) ([]config.ScaleSetConfig, error) {
+	problemCount := 0
+
+	// Strict mode: what `runner run` merely warns about (unknown keys,
+	// mixed single/multi mode) fails validation.
+	for _, w := range cfg.Warnings {
+		fmt.Fprintf(out, "  ✗ config: %s\n", w)
+		problemCount++
+	}
+	for _, d := range cfg.Deprecations {
+		fmt.Fprintf(out, "  ⚠ config: %s\n", d)
+	}
+	for _, err := range cfg.GlobalValidationErrors() {
+		fmt.Fprintf(out, "  ✗ global config: %s\n", err)
+		problemCount++
+	}
+
+	scaleSets := cfg.ResolveScaleSets()
+	if len(scaleSets) == 0 {
+		fmt.Fprintln(out, "  ✗ no scale sets configured")
+		problemCount++
+	}
+	// The same offline checks `runner run` applies before it starts, so a
+	// config that validates also starts.
+	for _, err := range scaleSetProblems(cfg, scaleSets) {
+		fmt.Fprintf(out, "  ✗ %s\n", err)
+		problemCount++
+	}
+	if problemCount > 0 {
+		return nil, fmt.Errorf("validation failed")
+	}
+	for i, ss := range scaleSets {
+		fmt.Fprintf(out, "  ✓ scaleset[%d] %q — provider=%s url=%s max=%d min=%d\n",
+			i, ss.ScaleSetName, ss.Provider, ss.RegistrationURL, ss.MaxRunners, ss.MinRunners)
+	}
+	return scaleSets, nil
 }
 
 // validateGitHubAccess probes each scale set through the same read-only

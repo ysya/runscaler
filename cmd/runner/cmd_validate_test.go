@@ -5,14 +5,59 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/actions/scaleset"
+	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 
 	"github.com/ysya/runscaler/internal/config"
 )
+
+func TestValidateReportsIndependentLocalErrorsBeforeConnectivity(t *testing.T) {
+	viper.Reset()
+	t.Cleanup(viper.Reset)
+	path := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(path, []byte(`
+log-level = "invalid"
+log-format = "text"
+health-port = 65536
+
+[[scaleset]]
+url = "https://github.com/example-org"
+name = "first"
+token = "synthetic-test-token"
+max-runners = 0
+runner-image = ""
+
+[[scaleset]]
+url = "https://github.com/example-org"
+name = "second"
+token = "synthetic-test-token"
+max-runners = 0
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c := &cobra.Command{}
+	c.Flags().String("config", path, "")
+	var out bytes.Buffer
+	c.SetOut(&out)
+	if err := runValidate(c, nil); err == nil {
+		t.Fatal("invalid local config passed validation")
+	}
+	for _, want := range []string{"log-level", "health-port", `scaleset[0] "first": max-runners`, `scaleset[0] "first": runner-image`, `scaleset[1] "second"`} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("validation omitted %q:\n%s", want, &out)
+		}
+	}
+	if strings.Contains(out.String(), "Docker connectivity") || strings.Contains(out.String(), "GitHub API") {
+		t.Fatalf("validation probed external services despite local errors:\n%s", &out)
+	}
+}
 
 func TestValidateGitHubAccessUsesTheConfiguredRunnerGroup(t *testing.T) {
 	ss := validScaleSet("builders-set", 0)

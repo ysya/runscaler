@@ -5,14 +5,14 @@ on:
     branches: [main]
     paths:
       - 'site/**'
-      - 'scripts/site-config.test.mjs'
+      - 'scripts/full-config.test.mjs'
       - 'scripts/check-site.py'
       - 'testdata/site/**'
       - '.github/workflows/pages.yml'
   pull_request:
     paths:
       - 'site/**'
-      - 'scripts/site-config.test.mjs'
+      - 'scripts/full-config.test.mjs'
       - 'scripts/check-site.py'
       - 'testdata/site/**'
       - '.github/workflows/pages.yml'
@@ -33,7 +33,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-      - run: node --test scripts/site-config.test.mjs
+      - run: node --test scripts/full-config.test.mjs
       - run: python3 scripts/check-site.py
 
   deploy:

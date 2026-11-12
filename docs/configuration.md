@@ -398,8 +398,8 @@ name = "pat-runners"
 token = "env:ORG_B_TOKEN"
 ```
 
-For one scale set, the [config builder](https://runscaler.ysya.dev/#configure)
-can produce App references without receiving the private key. Save the copied
+The [config builder](https://runscaler.ysya.dev/configure/) can produce single or
+multiple scale sets and App references without receiving the private key. Save the copied
 TOML locally, then put the key file at the configured absolute path.
 
 `run`, `validate`, `doctor`, and `scaleset delete` use the same auth selection.

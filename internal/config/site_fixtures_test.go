@@ -10,14 +10,14 @@ import (
 )
 
 func TestSiteConfigFixturesLoad(t *testing.T) {
-	for _, name := range []string{"docker-pat.toml", "docker-app.toml", "tart-pat.toml", "tart-app.toml"} {
+	for _, name := range []string{"docker-pat.toml", "docker-app.toml", "tart-pat.toml", "tart-app.toml", "full-multi.toml"} {
 		t.Run(name, func(t *testing.T) {
 			data, err := os.ReadFile(filepath.Join("..", "..", "testdata", "site", name))
 			if err != nil {
 				t.Fatal(err)
 			}
 			// PAT templates intentionally require a local credential before use.
-			raw := strings.Replace(string(data), `token = ""`, `token = "synthetic-test-token"`, 1)
+			raw := strings.ReplaceAll(string(data), `token = ""`, `token = "synthetic-test-token"`)
 			v := viper.New()
 			v.SetConfigType("toml")
 			if err := v.ReadConfig(strings.NewReader(raw)); err != nil {
@@ -34,11 +34,20 @@ func TestSiteConfigFixturesLoad(t *testing.T) {
 				t.Fatal(err)
 			}
 			sets := cfg.ResolveScaleSets()
-			if len(sets) != 1 {
-				t.Fatalf("resolved %d scale sets, want one", len(sets))
+			wantSets := 1
+			if name == "full-multi.toml" {
+				wantSets = 2
 			}
-			if err := sets[0].Validate(); err != nil {
+			if len(sets) != wantSets {
+				t.Fatalf("resolved %d scale sets, want %d", len(sets), wantSets)
+			}
+			if err := cfg.ValidateConcurrent(sets); err != nil {
 				t.Fatal(err)
+			}
+			for _, set := range sets {
+				if err := set.Validate(); err != nil {
+					t.Fatal(err)
+				}
 			}
 		})
 	}

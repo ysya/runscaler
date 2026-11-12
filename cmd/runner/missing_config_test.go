@@ -63,7 +63,7 @@ func TestValidateWithoutAConfigFileSaysWhereItLooked(t *testing.T) {
 	if err == nil {
 		t.Fatal("validate passed without any config")
 	}
-	for _, want := range []string{"no config file found", "./config.toml", filepath.Join(home, "xdg", "runner", "config.toml"), defaultConfigPath, "https://runscaler.ysya.dev/#configure", "--config PATH"} {
+	for _, want := range []string{"no config file found", "./config.toml", filepath.Join(home, "xdg", "runner", "config.toml"), defaultConfigPath, "https://runscaler.ysya.dev/configure/", "--config PATH"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error lacks %q:\n%s", want, err)
 		}
@@ -78,7 +78,7 @@ func TestDoctorSkipsGitHubWithoutAConfigFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a missing config failed the GitHub check instead of skipping it: %v", err)
 	}
-	for _, want := range []string{"GitHub API: no config file found (skipping)", "./config.toml", "https://runscaler.ysya.dev/#configure"} {
+	for _, want := range []string{"GitHub API: no config file found (skipping)", "./config.toml", "https://runscaler.ysya.dev/configure/"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("output lacks %q:\n%s", want, out)
 		}

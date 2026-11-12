@@ -124,7 +124,7 @@ func doctorGitHubCheck(ctx context.Context, cfg *config.Config) error {
 	if files := searchedConfigFiles(); len(files) > 0 {
 		fmt.Printf("    Searched %s\n", strings.Join(files, ", "))
 	}
-	fmt.Println("    Create one with 'runner init', or pass --config PATH")
+	fmt.Println("    Build config.toml at " + configBuilderURL + ", or pass --config PATH")
 	return nil
 }
 

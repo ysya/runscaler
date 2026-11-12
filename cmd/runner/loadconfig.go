@@ -59,12 +59,14 @@ func searchedConfigFiles() []string {
 
 // missingConfigError explains that no config file was found and how to give
 // runner one.
+const configBuilderURL = "https://ysya.github.io/runscaler/#configure"
+
 func missingConfigError() error {
 	msg := "no config file found"
 	if files := searchedConfigFiles(); len(files) > 0 {
 		msg += " (searched " + strings.Join(files, ", ") + ")"
 	}
-	return errors.New(msg + "\n\n  Create one with: runner init\n  Or pass its path: --config PATH")
+	return errors.New(msg + "\n\n  Build config.toml: " + configBuilderURL + "\n  Or pass its path: --config PATH")
 }
 
 func loadConfigAtPath(cmd *cobra.Command, configPath string) (config.Config, error) {

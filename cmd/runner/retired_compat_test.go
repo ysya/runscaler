@@ -6,8 +6,6 @@ import (
 	"slices"
 	"strings"
 	"testing"
-
-	"github.com/spf13/cobra"
 )
 
 func TestRetiredCommandsAndFlagsAreUnavailable(t *testing.T) {
@@ -16,9 +14,12 @@ func TestRetiredCommandsAndFlagsAreUnavailable(t *testing.T) {
 			t.Fatal("retired migrate command is registered")
 		}
 	}
-	for _, c := range []*cobra.Command{runCommand, initCmd} {
-		if c.Flags().Lookup("backend") != nil {
-			t.Errorf("%s still accepts --backend", c.Name())
+	if runCommand.Flags().Lookup("backend") != nil {
+		t.Error("run still accepts --backend")
+	}
+	for _, c := range cmd.Commands() {
+		if c.Name() == "init" {
+			t.Fatal("retired init command is registered")
 		}
 	}
 }

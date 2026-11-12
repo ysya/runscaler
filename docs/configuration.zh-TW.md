@@ -10,6 +10,22 @@
 
 未知的設定鍵（例如拼字錯誤或其他版本的選項）不會被無聲忽略：`runner run` 會逐一記錄警告並繼續啟動，`runner validate` 則會判定失敗。若已有 `[[scaleset]]` 項目，卻仍將單一模式的設定鍵（`url`、`name`、`token`、`github-app`、`labels`、`min-runners`）留在最上層，也會採取相同處理。
 
+<a id="github-credentials-and-pat-permissions"></a>
+
+## GitHub 憑證與 PAT 權限
+
+請為目標組織或儲存庫準備 [GitHub App](#github-app-authentication)
+或個人存取權杖（PAT）。PAT 所需權限取決於權杖類型及 runner 層級：
+
+| 權杖類型 | 組織 runner | 儲存庫 runner |
+| --- | --- | --- |
+| 傳統 PAT | `admin:org` | `repo` |
+| 細緻權限 PAT | 自架 runner：**讀取與寫入** + 管理：**讀取** | 管理：**讀取與寫入** |
+
+組織 runner 的權杖擁有者須為組織擁有者；儲存庫 runner 則須具有該儲存庫的
+管理員存取權。依組織原則而定，以組織為目標的細緻權限 PAT 也可能需要
+[管理員核准](https://docs.github.com/en/organizations/managing-programmatic-access-to-your-organization/setting-a-personal-access-token-policy-for-your-organization)。
+
 <a id="config-file-toml"></a>
 
 ## 設定檔（TOML）
@@ -246,16 +262,11 @@ name = "pat-runners"
 token = "env:ORG_B_TOKEN"
 ```
 
-若要以非互動方式設定，`runner init` 接受與 `runner run` 相同的 App 參照旗標，並會直接寫入參照，不會提示輸入 PAT：
+單一規模集可用[設定產生器](https://ysya.github.io/runscaler/zh-TW.html#configure)
+產生 App 參照，網頁不會接收私鑰內容。請在本機儲存複製的 TOML，再把私鑰檔案
+放到設定的絕對路徑。
 
-```bash
-runner init --url https://github.com/your-org --name app-runners \
-  --provider docker --max-runners 2 --dind=false --shared-volume="" \
-  --github-app-client-id Iv1.example --github-app-installation-id 123456 \
-  --github-app-private-key-file /absolute/path/to/runner-app.pem
-```
-
-`run`、`validate`、`doctor` 與 `scaleset delete` 使用相同的驗證選擇邏輯。`doctor` 會對每個已設定的 runner 規模集執行唯讀 API 探測；`validate` 也會檢查 供應器連線與設定。
+`run`、`validate`、`doctor` 與 `scaleset delete` 使用相同的驗證選擇邏輯。`doctor` 會對每個已設定的 runner 規模集執行唯讀 API 探測；`validate` 也會檢查供應器連線與設定。
 
 <a id="token-security"></a>
 

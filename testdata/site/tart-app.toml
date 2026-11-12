@@ -1,0 +1,12 @@
+# runner configuration
+url = "https://github.com/example-org"
+name = "example-runners"
+github-app.client-id = "Iv1.example"
+github-app.installation-id = 123
+github-app.private-key-file = "/Users/test/runner-app.pem"
+max-runners = 2
+log-level = "info"
+log-format = "text"
+health-port = 8080
+provider = "tart"
+runner-image = "ghcr.io/cirruslabs/macos-tahoe-xcode:latest"

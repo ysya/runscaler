@@ -1,0 +1,11 @@
+# runner configuration
+url = "https://github.com/example-org"
+name = "example-runners"
+# Add your PAT locally before validating.
+token = ""
+max-runners = 2
+log-level = "info"
+log-format = "text"
+health-port = 8080
+provider = "tart"
+runner-image = "ghcr.io/cirruslabs/macos-tahoe-xcode:latest"

@@ -1,0 +1,31 @@
+# config.toml — add credentials locally before validation
+log-level = "info"
+log-format = "text"
+health-port = 8080
+health-address = "127.0.0.1"
+
+[[scaleset]]
+url = "https://github.com/example-org"
+name = "linux-runners"
+# Set the PAT on the host.
+token = ""
+provider = "tart"
+max-runners = 2
+min-runners = 1
+runner-image = "ghcr.io/actions/actions-runner:latest"
+
+[scaleset.tart]
+pool-size = 1
+
+[[scaleset]]
+url = "https://github.com/example-org"
+name = "second-tart"
+# Set the PAT on the host.
+token = ""
+provider = "tart"
+max-runners = 2
+min-runners = 1
+runner-image = "ghcr.io/actions/actions-runner:latest"
+
+[scaleset.tart]
+pool-size = 1

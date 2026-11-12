@@ -98,6 +98,16 @@ SIGTERM 通常會開始排空並等待工作完成，但仍受 `drain-timeout` �
 /path/to/new/runner validate --config /absolute/path/config.toml
 ```
 
+首次啟動或更換映像時，可以加上 `--preflight`，預先準備 runner 映像：
+
+```bash
+runner validate --config /absolute/path/config.toml --preflight
+```
+
+一般驗證只檢查設定與連線，不會拉取映像。`--preflight` 會依 Docker socket
+和平台拉取各個不同的 runner 映像，並檢查或拉取 Tart 映像。這可能耗用大量網路流量、
+磁碟空間和時間；不會啟動 listener 或工作。
+
 runner 規模集在重新啟動期間會維持註冊，因此當 runner 因升級、重新開機或當機而停止時，
 排入佇列的工作會在 runner 重新連線後立即被接手。
 runner 不會自行刪除 runner 規模集：當你停用某個 `[[scaleset]]` 時，

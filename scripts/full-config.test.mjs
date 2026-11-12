@@ -188,3 +188,54 @@ test('an error in the second scale set points to its own input', () => {
   state.scaleSets.push(second);
   fieldError(state, 'docker', 'platform', 1);
 });
+
+test('combined Tart warm minimum and pool cannot exceed two VMs', () => {
+  const state = base();
+  const second = baseSet();
+  second.set.name = 'second-tart';
+  state.scaleSets.push(second);
+  for (const scale of state.scaleSets) {
+    scale.set.provider = 'tart';
+    scale.set['max-runners'] = '2';
+    scale.set['min-runners'] = '1';
+    scale.tart['pool-size'] = '1';
+  }
+  state.scaleSets[1].set['min-runners'] = '2';
+  fieldError(state, 'set', 'min-runners', 1);
+  state.scaleSets[1].set['min-runners'] = '1';
+  state.scaleSets[1].tart['pool-size'] = '2';
+  fieldError(state, 'tart', 'pool-size', 1);
+  state.scaleSets[1].tart['pool-size'] = '1';
+  assert.match(generateFullConfig(state), /\[scaleset\.tart\]/u);
+});
+
+test('generated mixed-provider TOML matches the Go-validated fixture', () => {
+  const state = base();
+  state.global.concurrent = '12';
+  state.actionsCache = { enabled: 'true', 'listen-address': '172.18.0.1:32500', 'advertise-url': 'http://cache.internal:32500/', 'data-dir': '/var/lib/runner/native-actions-cache', 'max-size-bytes': '53687091200', 'max-idle-days': '30' };
+  state.disk = { guard: 'true', 'min-free': '10%', 'target-free': '20%', interval: '1h', 'max-tier': '3' };
+  state.diagnostics = { enabled: 'true', 'capture-logs': 'true' };
+  state.scaleSets[0].docker = { dind: 'false', 'shared-volume-max-age': '168h', 'native-actions-cache': 'true', 'cache-volumes': 'gradle:/home/runner/.gradle', cache: 'pip | /home/runner/.cache/pip | 20GB | warn' };
+  state.scaleSets[0].retry = { initial: '5s', max: '1m', 'cooldown-after': '5', cooldown: '5m' };
+  const tart = baseSet();
+  tart.set = { ...tart.set, name: 'macos-runners', provider: 'tart', 'max-runners': '2', 'runner-image': 'ghcr.io/cirruslabs/macos-golden-gate-xcode:latest', auth: 'app', 'client-id': 'Iv1.example', 'installation-id': '123', 'app-key-source': 'env', 'key-env': 'RUNNER_APP_KEY' };
+  tart.tart = { 'pool-size': '1', 'cache-cleanup': 'true', 'cache-budget': '80' };
+  state.scaleSets.push(tart);
+  const fixture = readFileSync(new URL('../testdata/site/full-multi.toml', import.meta.url), 'utf8');
+  assert.equal(generateFullConfig(state), fixture);
+});
+
+test('generated multi-Tart TOML matches the Go-validated fixture', () => {
+  const state = base();
+  const second = baseSet();
+  second.set.name = 'second-tart';
+  state.scaleSets.push(second);
+  for (const scale of state.scaleSets) {
+    scale.set.provider = 'tart';
+    scale.set['max-runners'] = '2';
+    scale.set['min-runners'] = '1';
+    scale.tart['pool-size'] = '1';
+  }
+  const fixture = readFileSync(new URL('../testdata/site/multi-tart.toml', import.meta.url), 'utf8');
+  assert.equal(generateFullConfig(state), fixture);
+});

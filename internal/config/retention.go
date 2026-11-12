@@ -102,18 +102,39 @@ type DiskGuardSettings struct {
 // defaults: they are substituted before parsing, never compared as raw zero
 // values.
 func (dc DiskConfig) Resolve() (DiskGuardSettings, error) {
+	settings, problems := dc.resolveWithErrors()
+	if len(problems) > 0 {
+		return DiskGuardSettings{}, problems[0]
+	}
+	return settings, nil
+}
+
+// ValidationErrors reports independent disk settings problems while Resolve
+// retains its first-error behavior for startup and other callers.
+func (dc DiskConfig) ValidationErrors() []error {
+	_, problems := dc.resolveWithErrors()
+	return problems
+}
+
+func (dc DiskConfig) resolveWithErrors() (DiskGuardSettings, []error) {
 	s := DiskGuardSettings{
 		MinFree:    cmp.Or(dc.MinFree, DefaultDiskMinFree),
 		TargetFree: cmp.Or(dc.TargetFree, DefaultDiskTargetFree),
 		Interval:   positiveOr(dc.Interval, DefaultDiskGuardInterval),
 		MaxTier:    cmp.Or(dc.MaxTier, DefaultDiskMaxTier),
 	}
-	var err error
-	if s.MinFreeThreshold, err = bytesize.ParseThreshold(s.MinFree); err != nil {
-		return DiskGuardSettings{}, fmt.Errorf("min-free: %w", err)
+	var problems []error
+	minThreshold, minErr := bytesize.ParseThreshold(s.MinFree)
+	if minErr != nil {
+		problems = append(problems, fmt.Errorf("min-free: %w", minErr))
+	} else {
+		s.MinFreeThreshold = minThreshold
 	}
-	if s.TargetFreeThreshold, err = bytesize.ParseThreshold(s.TargetFree); err != nil {
-		return DiskGuardSettings{}, fmt.Errorf("target-free: %w", err)
+	targetThreshold, targetErr := bytesize.ParseThreshold(s.TargetFree)
+	if targetErr != nil {
+		problems = append(problems, fmt.Errorf("target-free: %w", targetErr))
+	} else {
+		s.TargetFreeThreshold = targetThreshold
 	}
 
 	// bytesize.Threshold does not record whether it came from a percentage
@@ -121,19 +142,20 @@ func (dc DiskConfig) Resolve() (DiskGuardSettings, error) {
 	// zero-byte threshold. Reading the "%" suffix off the strings is exact.
 	minIsPercent := strings.HasSuffix(s.MinFree, "%")
 	targetIsPercent := strings.HasSuffix(s.TargetFree, "%")
-	if minIsPercent != targetIsPercent {
-		return DiskGuardSettings{}, fmt.Errorf("min-free and target-free must both be percentages or both be sizes to compare")
-	}
-	if minIsPercent {
-		if s.MinFreeThreshold.Percent >= s.TargetFreeThreshold.Percent {
-			return DiskGuardSettings{}, fmt.Errorf("min-free must be less than target-free")
+	if minErr == nil && targetErr == nil {
+		if minIsPercent != targetIsPercent {
+			problems = append(problems, fmt.Errorf("min-free and target-free must both be percentages or both be sizes to compare"))
+		} else if minIsPercent {
+			if s.MinFreeThreshold.Percent >= s.TargetFreeThreshold.Percent {
+				problems = append(problems, fmt.Errorf("min-free must be less than target-free"))
+			}
+		} else if s.MinFreeThreshold.Bytes >= s.TargetFreeThreshold.Bytes {
+			problems = append(problems, fmt.Errorf("min-free must be less than target-free"))
 		}
-	} else if s.MinFreeThreshold.Bytes >= s.TargetFreeThreshold.Bytes {
-		return DiskGuardSettings{}, fmt.Errorf("min-free must be less than target-free")
 	}
 
 	if s.MaxTier < 1 || s.MaxTier > 4 {
-		return DiskGuardSettings{}, fmt.Errorf("max-tier must be between 1 and 4")
+		problems = append(problems, fmt.Errorf("max-tier must be between 1 and 4"))
 	}
-	return s, nil
+	return s, problems
 }

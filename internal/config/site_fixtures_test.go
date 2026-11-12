@@ -10,7 +10,7 @@ import (
 )
 
 func TestSiteConfigFixturesLoad(t *testing.T) {
-	for _, name := range []string{"docker-pat.toml", "docker-app.toml", "tart-pat.toml", "tart-app.toml", "full-multi.toml"} {
+	for _, name := range []string{"docker-pat.toml", "docker-app.toml", "tart-pat.toml", "tart-app.toml", "full-multi.toml", "multi-tart.toml"} {
 		t.Run(name, func(t *testing.T) {
 			data, err := os.ReadFile(filepath.Join("..", "..", "testdata", "site", name))
 			if err != nil {
@@ -35,7 +35,7 @@ func TestSiteConfigFixturesLoad(t *testing.T) {
 			}
 			sets := cfg.ResolveScaleSets()
 			wantSets := 1
-			if name == "full-multi.toml" {
+			if name == "full-multi.toml" || name == "multi-tart.toml" {
 				wantSets = 2
 			}
 			if len(sets) != wantSets {

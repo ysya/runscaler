@@ -12,7 +12,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"runtime"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -21,11 +20,8 @@ import (
 	"github.com/actions/scaleset/listener"
 	"github.com/google/uuid"
 	dockerclient "github.com/moby/moby/client"
-	"github.com/moby/moby/client/pkg/jsonmessage"
-	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
-	"golang.org/x/term"
 
 	"github.com/ysya/runscaler/internal/actionscache"
 	"github.com/ysya/runscaler/internal/backoff"
@@ -360,42 +356,6 @@ func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) e
 			}
 			dockerClients[ss.Docker.Socket] = client
 		}
-		// Pull unique runner images on each target Docker daemon.
-		pulled := make(map[string]bool)
-		for _, ss := range scaleSets {
-			pullKey := ss.Docker.Socket + "|" + ss.RunnerImage + "|" + ss.Docker.Platform
-			if ss.IsTart() || pulled[pullKey] {
-				continue
-			}
-			logger.Info("Pulling runner image", slog.String("image", ss.RunnerImage), slog.String("platform", ss.Docker.Platform))
-			pullCtx, pullCancel := context.WithTimeout(ctx, 30*time.Minute)
-			pullOptions := dockerclient.ImagePullOptions{}
-			if ss.Docker.Platform != "" {
-				parts := strings.SplitN(ss.Docker.Platform, "/", 3)
-				platform := ocispec.Platform{OS: parts[0], Architecture: parts[1]}
-				if len(parts) == 3 {
-					platform.Variant = parts[2]
-				}
-				pullOptions.Platforms = []ocispec.Platform{platform}
-			}
-			pull, err := dockerClients[ss.Docker.Socket].ImagePull(pullCtx, ss.RunnerImage, pullOptions)
-			if err != nil {
-				pullCancel()
-				return fmt.Errorf("failed to pull runner image %s: %w", ss.RunnerImage, err)
-			}
-			fd := os.Stdout.Fd()
-			pullOutput := io.Writer(os.Stdout)
-			if logFile != nil {
-				pullOutput = io.MultiWriter(os.Stdout, logFile)
-			}
-			pullErr := jsonmessage.DisplayJSONMessagesStream(pull, pullOutput, fd, term.IsTerminal(int(fd)), nil)
-			pull.Close()
-			pullCancel()
-			if pullErr != nil {
-				return fmt.Errorf("failed to pull runner image %s: %w", ss.RunnerImage, pullErr)
-			}
-			pulled[pullKey] = true
-		}
 	}
 
 	// One coordinator is shared by every Tart scale set so MAC slots and the
@@ -410,18 +370,19 @@ func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) e
 		}
 		logger.Info("Tart provider enabled")
 
-		// Ensure Tart images are available locally (auto-pull if missing)
-		pulled := make(map[string]bool)
-		for _, ss := range scaleSets {
-			if !ss.IsTart() || pulled[ss.RunnerImage] {
-				continue
-			}
-			tb := provider.NewTartProviderWithCoordinator(ss, logger, tartCoordinator)
-			if err := tb.EnsureImage(ctx); err != nil {
-				return err
-			}
-			pulled[ss.RunnerImage] = true
-		}
+	}
+	pullOutput := io.Writer(os.Stdout)
+	if logFile != nil {
+		pullOutput = io.MultiWriter(os.Stdout, logFile)
+	}
+	if err := prepareRunnerImages(ctx, scaleSets,
+		func(ctx context.Context, ss config.ScaleSetConfig) error {
+			return pullDockerRunnerImage(ctx, ss, dockerClients, pullOutput, logger)
+		},
+		func(ctx context.Context, ss config.ScaleSetConfig) error {
+			return ensureTartRunnerImage(ctx, ss, logger, tartCoordinator)
+		}); err != nil {
+		return err
 	}
 
 	if cfg.DryRun {
@@ -845,32 +806,42 @@ func groupDockerScaleSets(scaleSets []config.ScaleSetConfig) map[string][]config
 // validate` and service preparation all call it, so a config that validates
 // or installs also starts.
 func checkScaleSets(cfg config.Config, scaleSets []config.ScaleSetConfig) error {
+	problems := scaleSetProblems(cfg, scaleSets)
+	if len(problems) > 0 {
+		return problems[0]
+	}
+	return nil
+}
+
+func scaleSetProblems(cfg config.Config, scaleSets []config.ScaleSetConfig) []error {
+	var problems []error
 	for i := range scaleSets {
-		if err := scaleSets[i].Validate(); err != nil {
-			return fmt.Errorf("scaleset[%d] %q: %w", i, scaleSets[i].ScaleSetName, err)
+		for _, err := range scaleSets[i].ValidationErrors() {
+			problems = append(problems, fmt.Errorf("scaleset[%d] %q: %w", i, scaleSets[i].ScaleSetName, err))
 		}
 		if scaleSets[i].Provider == config.DefaultProvider && scaleSets[i].Docker.NativeActionsCache {
 			if !cfg.ActionsCache.Enabled {
-				return fmt.Errorf("scaleset[%d] %q: docker.native-actions-cache requires actions-cache.enabled", i, scaleSets[i].ScaleSetName)
+				problems = append(problems, fmt.Errorf("scaleset[%d] %q: docker.native-actions-cache requires actions-cache.enabled", i, scaleSets[i].ScaleSetName))
 			}
 			if scaleSets[i].Docker.ActionsCacheURL != cfg.ActionsCache.AdvertiseURL {
-				return fmt.Errorf("scaleset[%d] %q: docker.native-actions-cache requires docker.actions-cache-url to match actions-cache.advertise-url", i, scaleSets[i].ScaleSetName)
+				problems = append(problems, fmt.Errorf("scaleset[%d] %q: docker.native-actions-cache requires docker.actions-cache-url to match actions-cache.advertise-url", i, scaleSets[i].ScaleSetName))
 			}
 		}
 	}
 	if err := cfg.ValidateConcurrent(scaleSets); err != nil {
-		return fmt.Errorf("invalid global capacity: %w", err)
+		problems = append(problems, fmt.Errorf("invalid global capacity: %w", err))
 	}
-	return validateScaleSetCollection(scaleSets)
+	return append(problems, validateScaleSetCollectionProblems(scaleSets)...)
 }
 
-func validateScaleSetCollection(scaleSets []config.ScaleSetConfig) error {
+func validateScaleSetCollectionProblems(scaleSets []config.ScaleSetConfig) []error {
+	var problems []error
 	names := make(map[string]int)
 	totalTartMin := 0
 	totalTartPool := 0
 	for i, ss := range scaleSets {
 		if prior, ok := names[ss.ScaleSetName]; ok {
-			return fmt.Errorf("scaleset[%d] %q duplicates scaleset[%d] name; names must be unique for lifecycle and health tracking", i, ss.ScaleSetName, prior)
+			problems = append(problems, fmt.Errorf("scaleset[%d] %q duplicates scaleset[%d] name; names must be unique for lifecycle and health tracking", i, ss.ScaleSetName, prior))
 		}
 		names[ss.ScaleSetName] = i
 		if ss.IsTart() {
@@ -879,12 +850,12 @@ func validateScaleSetCollection(scaleSets []config.ScaleSetConfig) error {
 		}
 	}
 	if totalTartMin > config.MaxTartVMsPerHost {
-		return fmt.Errorf("combined Tart min-runners is %d, exceeding the host-wide macOS VM limit of %d", totalTartMin, config.MaxTartVMsPerHost)
+		problems = append(problems, fmt.Errorf("combined Tart min-runners is %d, exceeding the host-wide macOS VM limit of %d", totalTartMin, config.MaxTartVMsPerHost))
 	}
 	if totalTartPool > config.MaxTartVMsPerHost {
-		return fmt.Errorf("combined Tart pool-size is %d, exceeding the host-wide macOS VM limit of %d", totalTartPool, config.MaxTartVMsPerHost)
+		problems = append(problems, fmt.Errorf("combined Tart pool-size is %d, exceeding the host-wide macOS VM limit of %d", totalTartPool, config.MaxTartVMsPerHost))
 	}
-	return nil
+	return problems
 }
 
 // listenOnce creates a message session and listener, then runs until

@@ -63,56 +63,69 @@ func (c ActionsCacheConfig) EffectiveMaxIdleDays() int {
 }
 
 func (c ActionsCacheConfig) Validate(healthPort int) error {
+	problems := c.ValidationErrors(healthPort)
+	if len(problems) > 0 {
+		return problems[0]
+	}
+	return nil
+}
+
+// ValidationErrors reports independent cache configuration problems in
+// runtime check order. Validate keeps returning the first for startup.
+func (c ActionsCacheConfig) ValidationErrors(healthPort int) []error {
 	if !c.Enabled {
 		return nil
 	}
+	var problems []error
 	host, portText, err := net.SplitHostPort(c.ListenAddress)
 	if err != nil {
-		return errors.New("actions-cache.listen-address must include a private IP and port")
-	}
-	ip, err := netip.ParseAddr(host)
-	if err != nil || !ip.IsPrivate() || ip.IsUnspecified() {
-		return errors.New("actions-cache.listen-address must use a private IP")
-	}
-	port, err := strconv.Atoi(portText)
-	if err != nil || port < 1 || port > 65535 {
-		return errors.New("actions-cache.listen-address port must be between 1 and 65535")
-	}
-	if port == healthPort {
-		return errors.New("actions-cache.listen-address must not use health-port")
+		problems = append(problems, errors.New("actions-cache.listen-address must include a private IP and port"))
+	} else {
+		ip, err := netip.ParseAddr(host)
+		if err != nil || !ip.IsPrivate() || ip.IsUnspecified() {
+			problems = append(problems, errors.New("actions-cache.listen-address must use a private IP"))
+		}
+		port, err := strconv.Atoi(portText)
+		if err != nil || port < 1 || port > 65535 {
+			problems = append(problems, errors.New("actions-cache.listen-address port must be between 1 and 65535"))
+		} else if port == healthPort {
+			problems = append(problems, errors.New("actions-cache.listen-address must not use health-port"))
+		}
 	}
 	if err := validateActionsCacheURL(c.AdvertiseURL); err != nil || c.AdvertiseURL == "" {
-		return errors.New("actions-cache.advertise-url must be an absolute HTTP(S) URL with a trailing slash and no credentials")
-	}
-	advertise, _ := url.Parse(c.AdvertiseURL)
-	if advertise.Path != "/" {
-		return errors.New("actions-cache.advertise-url must use the root path")
+		problems = append(problems, errors.New("actions-cache.advertise-url must be an absolute HTTP(S) URL with a trailing slash and no credentials"))
+	} else {
+		advertise, _ := url.Parse(c.AdvertiseURL)
+		if advertise.Path != "/" {
+			problems = append(problems, errors.New("actions-cache.advertise-url must use the root path"))
+		}
 	}
 	if !filepath.IsAbs(c.DataDir) || filepath.Clean(c.DataDir) == "/" {
-		return errors.New("actions-cache.data-dir must be an absolute private directory")
+		problems = append(problems, errors.New("actions-cache.data-dir must be an absolute private directory"))
 	}
 	if c.MaxSizeBytes <= 0 {
-		return errors.New("actions-cache.max-size-bytes must be positive")
+		problems = append(problems, errors.New("actions-cache.max-size-bytes must be positive"))
 	}
 	if c.MaxIdleDays < 0 {
-		return errors.New("actions-cache.max-idle-days must be positive")
+		problems = append(problems, errors.New("actions-cache.max-idle-days must be positive"))
 	}
 	issuer := c.EffectiveTokenIssuer()
 	if !validOriginURL(issuer, true) {
-		return errors.New("actions-cache.token-issuer must be HTTPS")
+		problems = append(problems, errors.New("actions-cache.token-issuer must be HTTPS"))
 	}
 	if c.EffectiveJWKSURL() == "" || !validOriginURL(c.EffectiveJWKSURL(), true) {
-		return errors.New("actions-cache.jwks-url must be HTTPS, and required for a custom issuer")
+		problems = append(problems, errors.New("actions-cache.jwks-url must be HTTPS, and required for a custom issuer"))
 	}
 	if !validOriginURL(c.EffectiveUpstreamResultsURL(), true) {
-		return errors.New("actions-cache.upstream-results-url must be HTTPS")
+		problems = append(problems, errors.New("actions-cache.upstream-results-url must be HTTPS"))
 	}
 	for _, audience := range c.Audiences {
 		if audience == "" {
-			return fmt.Errorf("actions-cache.audiences must not contain an empty value")
+			problems = append(problems, fmt.Errorf("actions-cache.audiences must not contain an empty value"))
+			break
 		}
 	}
-	return nil
+	return problems
 }
 
 func validOriginURL(value string, httpsOnly bool) bool {

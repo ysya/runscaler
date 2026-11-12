@@ -96,6 +96,8 @@ The service uses a dedicated non-root account. In the builder, choose Docker
 and enter the scale-set name you will use in `runs-on`. See
 [Deployment](docs/deployment.md#service-layout) for user services, credential
 environment files, and other installation methods.
+After a successful install, runner prints a copyable `runs-on` line for each
+configured scale set.
 
 ### macOS user service
 
@@ -119,7 +121,8 @@ name you will put in `runs-on`. The LaunchAgent starts when you log in. A
 Linux user service uses the same runner commands after a user installation;
 see [Deployment](docs/deployment.md#service-layout).
 
-In your workflow, use the name entered in the builder:
+In your workflow, use the name entered in the builder (also printed after
+service installation):
 
 ```yaml
 jobs:

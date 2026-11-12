@@ -4,6 +4,7 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -67,12 +68,13 @@ type installOpts struct {
 	environmentFiles    []string
 	// scope is scopeUser for the current user's service manager; anything
 	// else, including the zero value, is a system installation.
-	scope      serviceScope
-	configPath string
-	binaryPath string
-	noStart    bool
-	force      bool
-	provider   string
+	scope         serviceScope
+	configPath    string
+	binaryPath    string
+	noStart       bool
+	force         bool
+	provider      string
+	scaleSetNames []string
 	// nil means the config omitted drain-timeout and therefore inherits the
 	// compiled-in default; a non-nil zero explicitly disables draining.
 	drainTimeout *time.Duration
@@ -203,10 +205,11 @@ var errServiceNotInstalled = errors.New("service not installed")
 
 // serviceConfigFacts are the parts of a config a service definition encodes.
 type serviceConfigFacts struct {
-	found        bool
-	provider     string
-	drainTimeout *time.Duration
-	logFile      *string
+	found         bool
+	provider      string
+	scaleSetNames []string
+	drainTimeout  *time.Duration
+	logFile       *string
 }
 
 // readServiceConfig loads the facts a service definition depends on. A config
@@ -237,9 +240,11 @@ func readServiceConfig(configPath string, required bool) (serviceConfigFacts, er
 	if sets := cfg.ResolveScaleSets(); len(sets) > 0 {
 		facts.provider = "tart"
 		for _, ss := range sets {
+			if ss.ScaleSetName != "" {
+				facts.scaleSetNames = append(facts.scaleSetNames, ss.ScaleSetName)
+			}
 			if !ss.IsTart() {
 				facts.provider = config.DefaultProvider
-				break
 			}
 		}
 	}
@@ -268,6 +273,7 @@ func buildInstallOpts(scope serviceScope, configPath, binaryPath string, require
 		configPath:    configPath,
 		binaryPath:    binaryPath,
 		provider:      facts.provider,
+		scaleSetNames: facts.scaleSetNames,
 		drainTimeout:  facts.drainTimeout,
 		logFile:       facts.logFile,
 		xdgConfigHome: getenv("XDG_CONFIG_HOME"),
@@ -370,7 +376,18 @@ func runServiceInstall(cmd *cobra.Command, _ []string) error {
 		}
 		return err
 	}
+	printWorkflowLabels(cmd.OutOrStdout(), opts.scaleSetNames)
 	return nil
+}
+
+func printWorkflowLabels(out io.Writer, names []string) {
+	if len(names) == 0 {
+		return
+	}
+	fmt.Fprintln(out, "\n  Workflow runs-on values:")
+	for _, name := range names {
+		fmt.Fprintf(out, "    runs-on: %s\n", strconv.Quote(name))
+	}
 }
 
 // installRetryCommand repeats a system service install with the root-only

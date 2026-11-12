@@ -115,6 +115,19 @@ the intended runtime environment before replacing the service binary:
 /path/to/new/runner validate --config /absolute/path/config.toml
 ```
 
+For a first start or image change, add `--preflight` to prepare the runner
+images as well:
+
+```bash
+runner validate --config /absolute/path/config.toml --preflight
+```
+
+Normal validation checks the configuration and connectivity without pulling
+images. `--preflight` also pulls each distinct Docker runner image on its
+configured socket and platform, and checks or pulls each Tart image. It can
+use significant network bandwidth, disk space, and time. It does not start
+listeners or jobs.
+
 The scale set itself stays registered across restarts, so a job queued while
 runner is stopped — for an upgrade, a reboot, or after a crash — is picked up
 as soon as runner reconnects. runner never deletes a scale set on its own: when

@@ -104,6 +104,7 @@ sudo /usr/local/bin/runner status
 服務使用專用的非 root 帳號。在設定產生器中選擇 Docker，並輸入要用在
 `runs-on` 的規模集名稱。使用者服務、憑證環境檔及其他安裝方式請見
 [部署](docs/deployment.zh-TW.md#service-layout)。
+安裝成功後，runner 會為每個已設定的規模集印出可複製的 `runs-on` 行。
 
 <a id="macos-user-service"></a>
 
@@ -128,7 +129,7 @@ chmod 0600 ~/.config/runner/config.toml
 的規模集名稱。LaunchAgent 會在登入時啟動。Linux 使用者安裝也可使用
 相同的 runner 指令；詳見[部署](docs/deployment.zh-TW.md#service-layout)。
 
-在工作流程中使用設定產生器輸入的名稱：
+在工作流程中使用設定產生器輸入的名稱（安裝服務後也會列出）：
 
 ```yaml
 jobs:

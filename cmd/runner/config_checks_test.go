@@ -1,11 +1,45 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/spf13/viper"
+
 	"github.com/ysya/runscaler/internal/config"
 )
+
+func TestGeneratedSiteFixturesPassRuntimeConfigChecks(t *testing.T) {
+	for _, name := range []string{"full-multi.toml", "multi-tart.toml"} {
+		t.Run(name, func(t *testing.T) {
+			data, err := os.ReadFile(filepath.Join("..", "..", "testdata", "site", name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			v := viper.New()
+			v.SetConfigType("toml")
+			raw := strings.ReplaceAll(string(data), `token = ""`, `token = "synthetic-test-token"`)
+			if err := v.ReadConfig(strings.NewReader(raw)); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := config.Load(v)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(cfg.Warnings) > 0 {
+				t.Fatalf("unexpected config warnings: %v", cfg.Warnings)
+			}
+			if err := cfg.ValidateGlobal(); err != nil {
+				t.Fatal(err)
+			}
+			if err := checkScaleSets(cfg, cfg.ResolveScaleSets()); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
 
 func validScaleSet(name string, minRunners int) config.ScaleSetConfig {
 	return config.ScaleSetConfig{

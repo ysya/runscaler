@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +21,49 @@ import (
 
 	"github.com/ysya/runscaler/internal/config"
 )
+
+func TestServiceInstallWorkflowLabels(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want []string
+	}{
+		{name: "single scale set", body: "name = \"my-runners\"\ntoken = \"synthetic-secret\"\n", want: []string{"my-runners"}},
+		{name: "multiple scale sets", body: "[[scaleset]]\nname = \"linux\"\n[[scaleset]]\nname = \"mac:arm\"\n", want: []string{"linux", "mac:arm"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.toml")
+			if err := os.WriteFile(path, []byte(tt.body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			opts, _, err := buildInstallOpts(scopeUser, path, "/usr/local/bin/runner", true, func(string) string { return "" })
+			if err != nil || !slices.Equal(opts.scaleSetNames, tt.want) {
+				t.Fatalf("scale set names = %q, err = %v; want %q", opts.scaleSetNames, err, tt.want)
+			}
+			var out bytes.Buffer
+			printWorkflowLabels(&out, opts.scaleSetNames)
+			for _, name := range tt.want {
+				if !strings.Contains(out.String(), "runs-on: "+strconv.Quote(name)) {
+					t.Errorf("missing workflow label %q in %q", name, &out)
+				}
+			}
+			if strings.Contains(out.String(), "synthetic-secret") {
+				t.Fatal("credential appeared in workflow hints")
+			}
+		})
+	}
+	missing := filepath.Join(t.TempDir(), "missing.toml")
+	opts, _, err := buildInstallOpts(scopeUser, missing, "/usr/local/bin/runner", false, func(string) string { return "" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	printWorkflowLabels(&out, opts.scaleSetNames)
+	if out.Len() != 0 {
+		t.Fatalf("missing config printed workflow hints: %q", &out)
+	}
+}
 
 func TestReadServiceConfigUsesCanonicalProvider(t *testing.T) {
 	tests := []struct {

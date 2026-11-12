@@ -202,6 +202,22 @@ func TestTartProvider_StartInstance_RunnerExitsBeforeListening(t *testing.T) {
 	}
 }
 
+func TestTartProvider_StartInstance_WaitsThroughEmptyStartupLog(t *testing.T) {
+	cmd := startupCmdRunner(nil)
+	cmd.sequences = map[string][]cmdResult{
+		"tart exec runner-abc pgrep -f Runner.Listener": {{err: errors.New("exit status 1")}, {}, {}},
+		"tart exec runner-abc tail -20 /tmp/runner.log": {{}, {}},
+	}
+	p := newTestTartProvider(cmd)
+	p.runnerPoll = time.Millisecond
+	p.runnerListenTimeout = 100 * time.Millisecond
+	p.runnerSettle = time.Millisecond
+
+	if _, err := p.StartInstance(context.Background(), "runner-abc", "jit"); err != nil {
+		t.Fatalf("StartInstance() failed after transient empty startup log: %v", err)
+	}
+}
+
 func TestTartProvider_StartInstance_RunnerNeverConnects(t *testing.T) {
 	cmd := startupCmdRunner(map[string]cmdResult{
 		"tart exec runner-abc grep -q Listening for Jobs /tmp/runner.log": {err: errors.New("exit status 1")},

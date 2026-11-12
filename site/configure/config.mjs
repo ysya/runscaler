@@ -217,6 +217,15 @@ export function generateFullConfig(state, lang = 'en') {
   if (!scales.length) throw new Error(message(lang, 'Add a scale set.', '請新增規模集。'));
   const global = { ...state.global, 'actions-cache': state.actionsCache };
   scales.forEach((scale, index) => validateSet(scale, global, lang, index));
+  let tartMinimum = 0;
+  let tartPool = 0;
+  scales.forEach((scale, index) => {
+    if (scale.set.provider !== 'tart') return;
+    tartMinimum += Number(scale.set['min-runners'] || 0);
+    reject(tartMinimum > 2, 'set', 'min-runners', index, lang, 'Combined Tart warm runners cannot exceed two VMs per host.', 'Tart 常駐 runner 總數不可超過每台主機兩台 VM。');
+    tartPool += Number(scale.tart?.['pool-size'] || 0);
+    reject(tartPool > 2, 'tart', 'pool-size', index, lang, 'Combined Tart warm pool cannot exceed two VMs per host.', 'Tart 預熱 VM 總數不可超過每台主機兩台 VM。');
+  });
   const names = scales.map(scale => scale.set.name.trim());
   const duplicate = names.findIndex((name, index) => names.indexOf(name) !== index);
   reject(duplicate !== -1, 'set', 'name', duplicate, lang, 'Scale-set names must be unique.', '規模集名稱不可重複。');

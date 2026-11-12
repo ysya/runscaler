@@ -86,6 +86,10 @@ func (r execCommandRunner) Run(ctx context.Context, name string, args ...string)
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
+		// Tart and the guest command can both exit 1; retain stderr to tell them apart.
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			exitErr.Stderr = bytes.Clone(stderr.Bytes())
+		}
 		return nil, fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(stderr.String()))
 	}
 	return stdout.Bytes(), nil
@@ -808,7 +812,7 @@ func (p *TartProvider) runnerAlive(ctx context.Context, vmName string) (bool, er
 	}
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
-		if exitErr.ExitCode() == 1 {
+		if exitErr.ExitCode() == 1 && len(bytes.TrimSpace(exitErr.Stderr)) == 0 {
 			return false, nil
 		}
 		return false, err
@@ -817,7 +821,7 @@ func (p *TartProvider) runnerAlive(ctx context.Context, vmName string) (bool, er
 		fields := strings.Fields(err.Error()[marker+len("exit status "):])
 		if len(fields) > 0 {
 			codeText := strings.TrimSuffix(fields[0], ":")
-			if code, parseErr := strconv.Atoi(codeText); parseErr == nil && code == 1 {
+			if code, parseErr := strconv.Atoi(codeText); parseErr == nil && code == 1 && len(fields) == 1 {
 				return false, nil
 			}
 		}

@@ -28,9 +28,15 @@ Runners are **ephemeral** — each container/VM handles exactly one job and is r
 
 ```mermaid
 flowchart LR
-    A["GitHub Actions<br/>(job queue)"] -- long poll --> B["runner<br/>(this tool)"]
+    A["GitHub Actions<br/>(job queue)"] -- long poll --> B
+    subgraph H["Host: one runner process"]
+        B["Scale-set manager"]
+        E["Native cache-v2 receiver<br/>(Docker opt-in)"]
+    end
     B -- Docker API --> C["Runner Containers<br/>(ephemeral)"]
     B -- Tart CLI --> D["macOS VMs<br/>(ephemeral)"]
+    C -- private cache-v2 HTTP --> E
+    E --> F["Private cache data directory"]
 ```
 
 1. Registers a [runner scale set](https://docs.github.com/en/actions/hosting-your-own-runners/managing-self-hosted-runners-with-actions-runner-controller/about-actions-runner-controller) with GitHub
@@ -38,6 +44,15 @@ flowchart LR
 3. Spins up Docker containers or macOS VMs with JIT (just-in-time) runner configs
 4. Removes containers/VMs automatically when jobs complete
 5. Drains in-flight jobs on a graceful stop and reconciles resources left by an abnormal stop at the next startup
+
+For opted-in Docker scale sets, the same `runner` process also starts the Go
+cache-v2 receiver on a separate private HTTP listener. Cache-capable runner and
+BuildKit containers reach it through `[actions-cache].advertise-url`; completed
+entries and payloads live in `[actions-cache].data-dir`. No separate cache
+daemon or container is required for the native mode. The receiver forwards
+non-cache Results requests, including artifacts, to GitHub. An independently
+managed receiver remains available through `docker.actions-cache-url`.
+See [Host-local Actions cache](docs/local-actions-cache.md) for both modes.
 
 ## Features
 
@@ -48,7 +63,8 @@ flowchart LR
 - **macOS VMs via Tart** — native Apple Virtualization.framework with APFS Copy-on-Write cloning
 - **Tart networking** — shared NAT by default, with optional host-interface bridging
 - **VM warm pool** — pre-boot macOS VMs for instant job pickup (~2s vs ~30s cold boot)
-- **Shared volumes** — cross-runner caching via named Docker volumes
+- **Native Actions cache (Docker opt-in)** — built-in cache-v2 receiver with host-local retention and status visibility
+- **Shared work volume** — optional named Docker volume for explicit cross-job file handoff; legacy cache-volume mounts remain during sunset
 - **Multi-org support** — manage multiple scale sets from a single process, mixing Docker and Tart providers
 - **Self-healing capacity** — replace containers/VMs that exit before GitHub reports job completion
 - **Safe restarts** — SIGTERM/SIGQUIT stop new work and wait for in-flight jobs; startup reclaims containers/VMs left by hard kills
@@ -190,6 +206,7 @@ Details for each command are in [docs/commands.md](docs/commands.md).
 | --- | --- |
 | [Commands](docs/commands.md) | Status dashboard, updating, troubleshooting with `doctor`, logs, runner startup and failure recovery |
 | [Configuration](docs/configuration.md) | Config file (TOML), GitHub App authentication, token security, CLI flags |
+| [Host-local Actions cache](docs/local-actions-cache.md) | Built-in receiver architecture, external receiver option, rollout and recovery |
 | [Caching](docs/caching.md) | What can be reclaimed, the disk guard, store retention settings, visibility |
 | [Security & Isolation](docs/security.md) | Docker socket sharing, per-scale-set isolation settings, Tart VM isolation |
 | [Deployment](docs/deployment.md) | Graceful shutdown, service layout, systemd |

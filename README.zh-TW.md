@@ -34,9 +34,15 @@ runner 採用**短生命週期**模式 — 每個容器／VM 只處理一個工�
 
 ```mermaid
 flowchart LR
-    A["GitHub Actions<br/>(job queue)"] -- long poll --> B["runner<br/>(this tool)"]
-    B -- Docker API --> C["Runner Containers<br/>(ephemeral)"]
-    B -- Tart CLI --> D["macOS VMs<br/>(ephemeral)"]
+    A["GitHub Actions<br/>(工作佇列)"] -- 長輪詢 --> B
+    subgraph H["主機上的單一 runner 程序"]
+        B["規模集管理器"]
+        E["原生 cache-v2 接收器<br/>(Docker 選用)"]
+    end
+    B -- Docker API --> C["Runner 容器<br/>(短生命週期)"]
+    B -- Tart CLI --> D["macOS VM<br/>(短生命週期)"]
+    C -- 私有 cache-v2 HTTP --> E
+    E --> F["私有快取資料目錄"]
 ```
 
 1. 向 GitHub 註冊 [runner 規模集](https://docs.github.com/en/actions/hosting-your-own-runners/managing-self-hosted-runners-with-actions-runner-controller/about-actions-runner-controller)
@@ -44,6 +50,14 @@ flowchart LR
 3. 使用 JIT（just-in-time，即時產生）runner 設定啟動 Docker 容器或 macOS VM
 4. 工作完成後自動移除容器／VM
 5. 正常停止時排空執行中的工作；若異常停止，則於下次啟動時清理遺留的資源
+
+選用原生快取的 Docker 規模集，會由同一個 `runner` 程序在另一個私有 HTTP 位址啟動
+Go cache-v2 接收器。具備快取能力的 runner 與 BuildKit 容器透過
+`[actions-cache].advertise-url` 連線；已完成的項目與 payload 保存在
+`[actions-cache].data-dir`。原生模式不需要另一個快取服務程序或容器。
+接收器會把 artifact 等非快取 Results 請求轉送至 GitHub；獨立管理的外部接收器
+仍可透過 `docker.actions-cache-url` 使用。兩種模式詳見
+[主機本機 Actions 快取](docs/local-actions-cache.zh-TW.md)。
 
 <a id="features"></a>
 
@@ -56,7 +70,8 @@ flowchart LR
 - **透過 Tart 執行 macOS VM** — 使用原生 Apple Virtualization.framework，搭配 APFS 寫入時複製（Copy-on-Write）複製機制
 - **Tart 網路** — 預設使用共用 NAT，也可選擇橋接至主機網路介面
 - **VM 預熱集區** — 預先啟動 macOS VM，即時接手工作（約 2 秒，冷啟動則約需 30 秒）
-- **共用磁碟區** — 透過具名 Docker 磁碟區在 runner 之間共用快取
+- **原生 Actions 快取（Docker 選用）** — 內建 cache-v2 接收器，提供主機本機保留設定與狀態資訊
+- **共用工作磁碟區** — 可選用具名 Docker 磁碟區，讓工作明確交接檔案；舊快取磁碟區掛載目前仍在 sunset 期間
 - **支援多個組織** — 單一程序即可管理多個 runner 規模集，並混用 Docker 與 Tart 供應器
 - **容量自我修復** — 若容器／VM 在 GitHub 回報工作完成前退出，會自動補上
 - **安全重新啟動** — SIGTERM／SIGQUIT 會停止接收新工作並等待執行中的工作完成；啟動時會回收強制終止後遺留的容器／VM
@@ -210,6 +225,7 @@ jobs:
 | --- | --- |
 | [指令](docs/commands.zh-TW.md) | 狀態儀表板、更新、使用 `doctor` 疑難排解、日誌、Runner 啟動與失敗復原 |
 | [設定](docs/configuration.zh-TW.md) | 設定檔（TOML）、GitHub App 驗證、權杖安全性、CLI 旗標 |
+| [主機本機 Actions 快取](docs/local-actions-cache.zh-TW.md) | 內建接收器架構、外部接收器、部署與回復 |
 | [快取](docs/caching.zh-TW.md) | 哪些資料可以回收、磁碟防護機制、儲存區保留設定、檢視空間使用情況 |
 | [安全性與隔離](docs/security.zh-TW.md) | 共用 Docker socket 的風險、各 runner 規模集的隔離設定、Tart VM 隔離 |
 | [部署](docs/deployment.zh-TW.md) | 正常關閉、服務配置、Systemd |

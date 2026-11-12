@@ -1,16 +1,25 @@
 # 主機本機 Actions 快取
 
-在同一台 Linux 主機上，讓常駐快取服務與可拋棄的 Docker runner 分別運作。
-已驗收的 cache-v2 client 維持標準 Actions cache key 與還原行為，資料留在本機；
-仍然需要壓縮、解壓及本機 HTTP 傳輸。
+Runscaler 在 Linux 主機上為短生命週期 Docker runner 提供兩種選用的
+cache-v2 接收器模式：
+
+- **原生 Go 接收器：** `runner` 管理程序自行啟動私有 HTTP listener，並將快取資料
+  存於 `[actions-cache].data-dir`。先啟用全域接收器，再對選定的 Docker 規模集設定
+  `native-actions-cache = true`；不需要另一個快取服務程序或容器。詳見下方
+  [原生接收器的設定與回復](#原生-go-接收器)。
+- **外部接收器：** 另行管理服務，例如下方的 Rust／Compose 部署，再對選定規模集
+  設定明確的 `docker.actions-cache-url`。服務程序、資料及管理權限均與 runner 分開。
+
+已驗收的 cache-v2 client 維持標準 Actions cache key 與還原行為。兩種模式都需要
+壓縮、解壓及本機 HTTP 傳輸，並非零複製快取。
 
 [外部 Rust 服務相容性報告](local-actions-cache-compatibility.md)記錄原先釘選的
-client 與 runtime gate。原生 Go 接收器另經隔離的真實簽名工作驗收，涵蓋失效保護
-runner 映像、client、重啟與斷線結果；詳細執行證據保存在私有操作紀錄。兩者都只涵蓋
-Linux amd64 與列出的 client。Provider 管理的主機 canary 和工作排空仍是
-獨立的部署關卡；標準 runner 映像維持原行為。
+client 與 runtime gate。原生 Go 接收器已通過真實簽名工作驗收，涵蓋失效保護
+runner 映像、client、重啟與斷線結果；詳細執行證據保存在私有操作紀錄。兩種模式
+在每台新主機都需驗證私有端點、快取專用 runner 映像及實際工作流程；標準 runner
+映像維持原行為。
 
-## 資源歸屬與資料保存
+## 外部接收器：資源歸屬與資料保存
 
 `runscaler-actions-cache` 由操作者獨立管理，不隨每個 job 建立或刪除。
 它使用 `managed-by=runscaler-cache` label，不可設定為 `managed-by=runner`，
@@ -26,7 +35,7 @@ Linux amd64 與列出的 client。Provider 管理的主機 canary 和工作排�
 已停止的服務容器可能被 stopped-container prune 移除；資料保存承諾在外部 volume，
 Compose 應能使用同一份 volume 重建服務。一般 runner 清理不應刪除此 volume。
 
-## 選擇端點與容量
+## 外部接收器：端點與容量
 
 將 `deploy/local-cache/.env.example` 複製為同目錄下 Git 忽略的 `.env`，填好所有必填欄位：
 
@@ -42,7 +51,7 @@ Linux 容器不一定能透過 `localhost`、Compose DNS 名稱或 `host.docker.
 驗證路由。Compose 要求明確輸入，但不會驗證 IP 是否私有，也不會自動調整防火牆。
 容器內部會監聽所有介面，主機端只發布到明確選定的私有介面。
 
-## 操作者啟動程序
+## 外部接收器：啟動程序
 
 先檢閱 canary 證據，確認實際主機、映像、端點與容量後才部署。已存在且歸屬不明的
 同名 volume 不可直接覆寫；若確認是新 volume，明確建立：
@@ -68,7 +77,7 @@ docker compose --env-file deploy/local-cache/.env -f deploy/local-cache/compose.
 探測 `/health`。上游 distroless 映像沒有可假設存在的 shell／curl。
 主機自己能連通還不夠，兩條路徑也都要實際上傳、下載 payload 並核對 checksum。
 
-## Opt-in runner 啟動
+## Runner 選用與映像
 
 使用原生接收器時，只在選定的 Docker scale set 設定 `native-actions-cache = true`，
 並設定全域 `[actions-cache].advertise-url`。使用通過驗證、固定 digest 的
@@ -81,8 +90,8 @@ Runscaler 先完成 volume 歸屬設定，再執行
 檢查會比對 `/usr/local/share/runscaler/` 下 root 擁有的 manifest，以及已驗收的
 protocol、source／version、Worker／Listener checksum；缺檔或被修改就不接收工作。
 這個檢查不發出網路請求，服務可用性另行驗證。
-本機模式只新增 `CUSTOM_ACTIONS_RESULTS_URL`；管理憑證留在服務端。
-設定空白時保留原啟動行為。
+Docker provider 對選定的接收器提供 `CUSTOM_ACTIONS_RESULTS_URL`。外部服務的管理
+憑證不會注入 job；原生模式沒有獨立的管理金鑰。設定空白時保留原啟動行為。
 
 ## Client 使用範圍
 
@@ -106,7 +115,7 @@ artifact action。不可保證所有 cache／action 錯誤都不會造成 job �
 `ignore-error=true`；測試停用匯入以單獨驗證匯出，並確認錯誤 Dockerfile 仍會失敗。
 這不代表任意 cache import 或其他 client 都能容忍斷線；沒有自動雲端 fallback。
 
-## 下載 capability、備份與回復
+## 外部接收器：下載 capability、備份與回復
 
 Filesystem 模式回傳的 `/download/<UUIDv4>` 是 bearer capability，沒有獨立到期時間；
 取得該 URL 者可在資料刪除前下載。不可列印或分享 payload URL。Scoped lookup 的
@@ -134,15 +143,16 @@ v10 是單向遷移：比 v9.10 更舊的資料庫會被刪除並清空 storage�
 不可為了部署而強制終止業務 job。
 
 獲得明確部署核准後，使用已驗證 digest 的失效保護映像。在另一個私有連接埠
-與全新私有資料目錄啟動原生 Go listener，同時保留 Rust 服務。新增只帶獨立
-label、最多一個 runner 的 canary scale set，避免一般組織工作被派入。
+與全新私有資料目錄啟動原生 Go listener。若從既有 Rust 部署遷移，保留其服務
+與資料供回復使用。新增只帶獨立 label、最多一個 runner 的 canary scale set，
+避免一般組織工作被派入。
 在 provider 管理的 runner 上驗證簽名保存／還原、artifact 轉送及旁系 BuildKit
 上傳／下載後，再排空並切換選定的現有 scale set。停用重疊的共用可寫語言快取
 掛載並保留其資料。正式容量與磁碟效能仍需另行觀察。
 
-回復時停止派發 canary 工作並排空。在 manager 停止期間，還原已審閱的舊
-binary／設定與相容服務定義，包括選定 scale set 的 Rust endpoint 與舊 runner
-映像。保留兩份快取資料與私有備份；一般回復不刪除 GitHub scale-set 註冊。
+回復時停止派發 canary 工作並排空。若從既有外部接收器遷移，在 manager 停止期間
+還原已審閱的舊 binary／設定與相容服務定義，包括選定 scale set 的外部端點與舊 runner
+映像。保留每份既有快取資料與私有備份；一般回復不刪除 GitHub scale-set 註冊。
 隔離 JIT 測試不代表已演練正式 manager 重啟。
 
 直接清空端點後恢復原 cache action，會重新將 payload 傳到 GitHub。除非操作者
@@ -169,7 +179,8 @@ RUNSCALER_NATIVE_FIXTURE=1 go test -race ./internal/actionscache -run '^TestNati
 分塊上傳、逐位元組還原、取消、重新開啟 store，以及受控的 artifact 轉送。
 它不註冊 runner，也不證明真實 GitHub 簽名 job 的相容性。
 
-切換期間保留 Rust 服務與資料作為回復端點。原本 runner 映像對舊版 v1 client
+若從既有外部部署遷移，先保留其服務與資料作為回復端點，資料保留期限另行決定；
+全新的原生部署不需要 Rust 服務。原本 runner 映像對舊版 v1 client
 仍提供 GitHub 的 `ACTIONS_CACHE_URL`；原生 v2 應使用已驗證的失效保護映像，
 讓舊版請求在本機遭拒。切換前應檢查私有的真實簽名工作驗收紀錄；本機協定測試
 不能取代真實簽名 client 驗收。

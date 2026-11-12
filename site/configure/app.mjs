@@ -21,6 +21,37 @@ function element(tag, className, text) {
   return node;
 }
 
+const errorButton = element('button', 'error-jump', t('Go to field', '前往欄位'));
+errorButton.type = 'button';
+errorButton.hidden = true;
+message.after(errorButton);
+let invalidInput = null;
+
+function clearFieldError() {
+  document.querySelectorAll('.field-error').forEach(node => node.remove());
+  document.querySelectorAll('[aria-invalid="true"]').forEach(node => {
+    node.removeAttribute('aria-invalid');
+    node.removeAttribute('aria-describedby');
+  });
+  invalidInput = null;
+  errorButton.hidden = true;
+}
+
+function showFieldError(error) {
+  if (!error.field) return;
+  const { group, index, key } = error.field;
+  const input = document.getElementById(`${group}-${index}-${key}`);
+  if (!input) return;
+  input.closest('details')?.setAttribute('open', '');
+  const hint = element('p', 'field-error', error.message);
+  hint.id = `${input.id}-error`;
+  input.setAttribute('aria-invalid', 'true');
+  input.setAttribute('aria-describedby', hint.id);
+  input.closest('.tool-field').append(hint);
+  invalidInput = input;
+  errorButton.hidden = false;
+}
+
 function renderField(field, group, index, values) {
   const wrapper = element('div', `tool-field${field.legacy ? ' legacy-field' : ''}`);
   wrapper.dataset.visible = field.visible || '';
@@ -143,6 +174,7 @@ function exampleState() {
 
 function renderPreview() {
   copyStatus.textContent = '';
+  clearFieldError();
   const incomplete = state.scaleSets.some(scale => !scale.set.url?.trim() || !scale.set.name?.trim());
   try {
     const config = generateFullConfig(incomplete ? exampleState() : state, lang);
@@ -157,6 +189,7 @@ function renderPreview() {
     output.textContent = t('# Fix the form error above to generate config.toml.', '# 請修正上方的欄位錯誤以產生 config.toml。');
     message.textContent = error.message;
     message.classList.toggle('is-error', true);
+    showFieldError(error);
   }
 }
 
@@ -216,4 +249,8 @@ copyButton.addEventListener('click', async () => {
     selection.addRange(range);
     copyStatus.textContent = t('Select the preview text and copy it manually.', '請選取預覽文字並手動複製。');
   }
+});
+errorButton.addEventListener('click', () => {
+  invalidInput?.focus();
+  invalidInput?.scrollIntoView({ behavior: 'smooth', block: 'center' });
 });

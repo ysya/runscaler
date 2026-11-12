@@ -406,6 +406,16 @@ func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) e
 		}
 	}
 	reconcileOrphans(ctx, dockerClients, tartHomes, logger, workspaceRoots...)
+	for _, ss := range scaleSets {
+		if ss.Provider == "apple-container" {
+			if _, err := exec.LookPath("container"); err != nil {
+				return err
+			}
+			if err := provider.NewAppleContainerProvider(ss).Reconcile(ctx); err != nil {
+				return err
+			}
+		}
+	}
 
 	// Keep the local Results receiver available until every scale set finishes
 	// draining. Its separate listener has no streaming write timeout.
@@ -623,6 +633,8 @@ func runScaleSetController(ctx context.Context, drain <-chan struct{}, drainTime
 		tb := provider.NewTartProviderWithCoordinator(ss, logger, tartCoordinator)
 		tb.StartPool(ctx) // starts warm pool if tart-pool-size > 0
 		instanceProvider = tb
+	} else if ss.Provider == "apple-container" {
+		instanceProvider = provider.NewAppleContainerProvider(ss)
 	} else {
 		dp := provider.NewDockerProvider(ss, dockerClient, logger)
 		dp.EnableDiagnosticLogs(captureLogs && diagnosticStore != nil)

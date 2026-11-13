@@ -111,7 +111,7 @@ scoped client results before rollout.
 
 ## GitHub CLI overlay
 
-`Dockerfile.github-cli` adds the Ubuntu `gh` package to the verified native v2
+`Dockerfile.github-cli` adds the official GitHub `gh` package to the verified native v2
 fail-closed image without rebuilding its Worker. The
 [GitHub CLI image workflow](../../.github/workflows/runner-image-github-cli.yml)
 builds and checks the image on any manual dispatch. Dispatch from `main` with

@@ -35,6 +35,7 @@ jobs:
       - name: Check CLI and local cache contract
         run: |
           docker run --rm --entrypoint gh local-runner-github-cli:check --version
+          docker run --rm --entrypoint gh local-runner-github-cli:check api --help | grep -q -- '--slurp'
           docker run --rm --entrypoint /usr/local/bin/runner-local-cache-check \
             -e CUSTOM_ACTIONS_RESULTS_URL=http://offline-cache.invalid:9/ \
             local-runner-github-cli:check

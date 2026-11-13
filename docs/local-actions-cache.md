@@ -102,7 +102,7 @@ scale set and configure the global `[actions-cache].advertise-url`. Use a verifi
 `actions-runner` image by immutable digest for a canary; see
 [configuration](configuration.md#host-local-actions-cache-opt-in) and
 [image construction/maintenance](../images/actions-runner/README.md#build-and-verification).
-The bare fork base does not provide the installed capability check.
+The bare official runner base does not provide the patched assemblies or the installed capability check.
 
 Before the listener starts, Runscaler completes volume ownership setup and runs
 `/usr/local/bin/runner-local-cache-check`. It checks the exact accepted protocol,

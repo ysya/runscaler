@@ -14,15 +14,15 @@ fi
 case "$(uname -s)/$(uname -m)" in
     Linux/x86_64)
         platform=linux/amd64
-        worker_hash=aaa126a2ed34483dab70b514539997399a65c19125d3e28414bec8d6b842eb48
-        deps_hash=ae6528d6f947e829666b8b8cb4711a2ef460de9485c2ffd4e334b8324c140154
-        listener_hash=5fcd3b762b1ef5c38c03692f886d9d525162e6b416424852de7a070e7c64b148
+        worker_hash=301a0da6e1423176812111b207daa567e00d4995b8f9379861c8b84c20ddcf23
+        deps_hash=4e394d56562dcffc30b0a5dcf5a4a8b5491f4c8836ceb7b40b81613f6258d38c
+        listener_hash=66d3713bf1ece5a902c24a64667c93d6f4e8d0c31935820995beadad6b423761
         ;;
     Linux/aarch64)
         platform=linux/arm64
-        worker_hash=30c89622af0b7a60a315b7367f03cb076d514ebbc218f4d4697919fe4bc0706b
-        deps_hash=f5c340f0374170bd15beff917fc452122dfe57653910b3c0cb2ae5ad91960a23
-        listener_hash=bf9dd62247a9304bcb8d7e9dcc12b47fafab79e6ba36291ef21e0471c1000d94
+        worker_hash=72aa438dc11905d63bcf8970ec25b4d36e305b05a722b3d01c0786fcc2b11db3
+        deps_hash=5ea5e6f70f549b7881ad584c7d0839117d97640a07ee6e2cd6e9769c60d42f9c
+        listener_hash=27d84ac75baf30c4cbf402cfecce9336f40ef35c9f4d529e2e8ddf3a279a950b
         ;;
     *) fail 'only verified Linux amd64 and arm64 binaries are supported' ;;
 esac
@@ -32,9 +32,9 @@ manifest() {
 protocol=v2
 platform=$platform
 runner-version=2.338.2
-runner-source=3efdc9c0d8a5b7a441cba3069b0fdc33d1931adb
-runner-base=ghcr.io/falcondev-oss/actions-runner@sha256:462ebdbc95fabf0bdf264ffe02ff5182665c6d99ac0f870b67d7f649c1ef1746
-runner-worker-patch-sha256=5c801dea0cbed7265cfa0e716d2f126ae1ed934c96000046cf89c89b701ccde0
+runner-source=d1eb12d4b115c301201de27d667284e1a80f2ab5
+runner-base=ghcr.io/actions/actions-runner@sha256:6d0b2d80d80f143f77dcb676e50920100bbb547e39e883454d57f45ab8c31300
+runner-local-cache-patch-sha256=04fb2e9321520b29c3a2399370cfa64fbeef9ef58e3d5f770a357f56021583b2
 runner-audit-patch-sha256=f258207452fd3a3106d9fa0e2cac397ba76ea8c40e88206c84ff3ad8ff2013cc
 worker-sha256=$worker_hash
 worker-deps-sha256=$deps_hash

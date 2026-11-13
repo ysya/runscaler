@@ -190,8 +190,11 @@ Live capacity and production disk performance need their own observations.
 Rollback stops canary dispatch and drains work. For migration from an existing
 external receiver, restore the reviewed prior binary/config and compatible
 service definition with the manager stopped, including the selected scale set's
-external endpoint and old runner image. Retain each existing cache data store
-and private backups; do not delete a GitHub scale-set
+external endpoint. Before restarting, replace any retired runner-image reference
+in a backup with a pullable digest of `ghcr.io/ysya/actions-runner` that was
+verified with the prior manager, and validate the resulting config. Do not rely
+on locally cached image layers.
+Retain each existing cache data store and private backups; do not delete a GitHub scale-set
 registration as routine rollback. An isolated JIT test is not a rehearsal of
 this production manager restart.
 

@@ -151,8 +151,11 @@ v10 是單向遷移：比 v9.10 更舊的資料庫會被刪除並清空 storage�
 掛載並保留其資料。正式容量與磁碟效能仍需另行觀察。
 
 回復時停止派發 canary 工作並排空。若從既有外部接收器遷移，在 manager 停止期間
-還原已審閱的舊 binary／設定與相容服務定義，包括選定 scale set 的外部端點與舊 runner
-映像。保留每份既有快取資料與私有備份；一般回復不刪除 GitHub scale-set 註冊。
+還原已審閱的舊 binary／設定與相容服務定義，包括選定 scale set 的外部端點。
+重啟前，將備份中已退場的 runner 映像參照改為 `ghcr.io/ysya/actions-runner`
+仍可拉取、且已與舊 manager 驗證相容的 digest，並驗證修改後的設定；
+不可依賴主機暫存的映像層。
+保留每份既有快取資料與私有備份；一般回復不刪除 GitHub scale-set 註冊。
 隔離 JIT 測試不代表已演練正式 manager 重啟。
 
 直接清空端點後恢復原 cache action，會重新將 payload 傳到 GitHub。除非操作者

@@ -21,7 +21,8 @@ records the original pinned client/runtime gate. The native Go receiver passed
 signed-job acceptance covering the fail-closed runner image, client matrix,
 restart, and outage behavior. Detailed run evidence is kept in private operator
 notes. Both modes require a reachable private endpoint, a cache-capable runner
-image, and validation on each new host. The standard runner image is unchanged.
+image, and validation on each new host. The unified `actions-runner` image
+supports GitHub and local cache; the scale-set setting selects the endpoint.
 
 ## External receiver: ownership and storage
 
@@ -98,9 +99,10 @@ the restored checksum from both client paths.
 
 For the native receiver, set `native-actions-cache = true` on the selected Docker
 scale set and configure the global `[actions-cache].advertise-url`. Use a verified
-cache-capable variant by immutable digest; see [configuration](configuration.md#host-local-actions-cache-opt-in)
-and [image construction/maintenance](../images/actions-runner/README.md#opt-in-host-local-actions-cache-variant).
-The bare fork or a standard image does not provide the installed capability check.
+`actions-runner` image by immutable digest for a canary; see
+[configuration](configuration.md#host-local-actions-cache-opt-in) and
+[image construction/maintenance](../images/actions-runner/README.md#build-and-verification).
+The bare fork base does not provide the installed capability check.
 
 Before the listener starts, Runscaler completes volume ownership setup and runs
 `/usr/local/bin/runner-local-cache-check`. It checks the exact accepted protocol,
@@ -115,9 +117,9 @@ original startup behavior.
 ## Client boundaries
 
 Use only clients and immutable revisions that passed acceptance. Legacy v1
-clients are unsupported. The original accepted image supplies GitHub's
-`ACTIONS_CACHE_URL`; the separate native v2 fail-closed image points it at the
-local receiver, which rejects legacy v1 requests without a cloud fallback.
+clients are unsupported. The unified image keeps GitHub's `ACTIONS_CACHE_URL`
+without a local endpoint and points it at the local receiver when selected.
+The local receiver rejects legacy v1 requests without a cloud fallback.
 Raw shell tools need explicit runtime exports; container cache-v2 clients need
 an explicit v2 flag if their handler does not set it. The accepted setup-go,
 setup-node/npm, Gradle basic and Rust GitHub-provider revisions are listed in
@@ -174,7 +176,7 @@ limit cannot accommodate the new default two-hour drain. See
 [service deadline handling](deployment.md#graceful-shutdown).
 Never force-kill business jobs to finish rollout.
 
-After explicit deployment approval, pin the published fail-closed image by its
+After explicit deployment approval, pin the published unified image by its
 verified digest. Start the native Go listener on a separate private port and
 fresh private data directory. If migrating an existing Rust deployment, keep
 that service and its data available for rollback. Add a
@@ -225,8 +227,8 @@ prove compatibility with signed GitHub jobs.
 When migrating an existing external deployment, retain its service and data as
 a rollback endpoint until a separate retention decision. A new native
 deployment does not need the Rust service.
-The original runner image still gives legacy v1 clients GitHub's
-`ACTIONS_CACHE_URL`; use the verified fail-closed image for native v2 so legacy
-requests are rejected locally. Review the private signed-job acceptance record
+The unified runner image keeps GitHub's `ACTIONS_CACHE_URL` without a local
+endpoint; native v2 selection points it at the local receiver, which rejects
+legacy requests locally. Review the private signed-job acceptance record
 before rollout. Native protocol tests alone do not establish real signed-client
 compatibility.

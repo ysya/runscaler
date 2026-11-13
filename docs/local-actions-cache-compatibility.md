@@ -3,6 +3,10 @@
 Date: 2026-11-10
 Implementation baseline: `ded9e96d7857e1903c728db5047718f8dae0559d`.
 
+This is a dated record of the original amd64 gate. For the later multiarchitecture
+runner image and ARM64 signed-job results, see the
+[2026-11-13 unified runner compatibility report](unified-runner-compatibility.md).
+
 **Gate verdict: GO for implementation on Linux amd64, with the scoped inputs below.**
 The pinned candidates passed the isolated protocol/runtime gate and the real-job
 canary. This authorizes continuing integration work, not production deployment,

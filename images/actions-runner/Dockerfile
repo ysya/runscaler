@@ -1,29 +1,32 @@
 # Custom GitHub Actions runner image with Android SDK, Java, Node.js, Ruby, and C/C++ toolchains.
-# Based on the official actions-runner image (Ubuntu 24.04 "noble").
+# Based on the pinned cache-capable runner fork (Ubuntu 24.04 "noble").
 
-# Pinned to the multi-arch index digest for reproducible builds and stable layer caching
-# (covers both linux/amd64 and linux/arm64). Dependabot keeps the tag+digest fresh.
-# Refresh manually with: docker buildx imagetools inspect ghcr.io/actions/actions-runner:latest
-ARG RUNNER_BASE_IMAGE=ghcr.io/actions/actions-runner:2.338.2@sha256:759a1d94a15b05941aba5196974ff43fe15b4cbba29b694b35cbc32a1166b232
+# Both platforms use the same reviewed fork source and fail-closed cache patch.
+# The SDK is a build stage only; it is not included in the published image.
+ARG RUNNER_BASE_IMAGE=ghcr.io/falcondev-oss/actions-runner@sha256:462ebdbc95fabf0bdf264ffe02ff5182665c6d99ac0f870b67d7f649c1ef1746
+ARG WORKER_SDK_IMAGE=mcr.microsoft.com/dotnet/sdk:8.0.428-noble@sha256:3d5cad4bb76fd0130aefd6c629f7267c4aad40cccc86f7fbd1c81e277b58493b
 
-# Validate/install the optional contract in a small independent stage. Copying
-# its overlay only at the end preserves the standard toolchain layer cache.
-FROM ${RUNNER_BASE_IMAGE} AS local-cache-contract
-ARG RUNNER_BASE_IMAGE
-ARG LOCAL_ACTIONS_CACHE=0
-COPY --chmod=0755 check-local-cache.sh /tmp/check-local-cache.sh
-RUN mkdir -p /tmp/local-cache-overlay/usr/local/bin /tmp/local-cache-overlay/usr/local/share/runscaler \
-    && case "$LOCAL_ACTIONS_CACHE" in \
-       0) ;; \
-       1) [ "$RUNNER_BASE_IMAGE" = "ghcr.io/falcondev-oss/actions-runner@sha256:462ebdbc95fabf0bdf264ffe02ff5182665c6d99ac0f870b67d7f649c1ef1746" ] \
-          || { echo "Local cache requires the gate-approved runner base" >&2; exit 1; }; \
-          /tmp/check-local-cache.sh --emit-manifest > /tmp/local-cache-overlay/usr/local/share/runscaler/local-actions-cache.manifest \
-          && cp /tmp/check-local-cache.sh /tmp/local-cache-overlay/usr/local/bin/runner-local-cache-check \
-          && sudo install -D -m 0755 /tmp/check-local-cache.sh /usr/local/bin/runner-local-cache-check \
-          && sudo install -D -m 0644 /tmp/local-cache-overlay/usr/local/share/runscaler/local-actions-cache.manifest /usr/local/share/runscaler/local-actions-cache.manifest \
-          && CUSTOM_ACTIONS_RESULTS_URL=http://offline-cache.invalid:9/ /usr/local/bin/runner-local-cache-check ;; \
-       *) echo "LOCAL_ACTIONS_CACHE must be 0 or 1" >&2; exit 1 ;; \
-       esac
+FROM ${WORKER_SDK_IMAGE} AS cache-worker
+ARG TARGETARCH
+WORKDIR /src
+RUN test "$TARGETARCH" = amd64 -o "$TARGETARCH" = arm64 \
+    && git init -q . \
+    && git remote add origin https://github.com/falcondev-oss/github-actions-runner.git \
+    && git fetch --depth=1 origin 3efdc9c0d8a5b7a441cba3069b0fdc33d1931adb \
+    && git checkout --detach FETCH_HEAD \
+    && test "$(git rev-parse HEAD)" = 3efdc9c0d8a5b7a441cba3069b0fdc33d1931adb
+COPY fail-closed-v1.patch webutilities-audit.patch /tmp/
+RUN printf '%s  %s\n' \
+        5c801dea0cbed7265cfa0e716d2f126ae1ed934c96000046cf89c89b701ccde0 /tmp/fail-closed-v1.patch \
+        f258207452fd3a3106d9fa0e2cac397ba76ea8c40e88206c84ff3ad8ff2013cc /tmp/webutilities-audit.patch \
+        | sha256sum --check \
+    && git apply --unidiff-zero /tmp/fail-closed-v1.patch \
+    && git apply --unidiff-zero /tmp/webutilities-audit.patch \
+    && git diff --check \
+    && dotnet publish src/Runner.Worker/Runner.Worker.csproj \
+        -c Release -r "linux-${TARGETARCH}" \
+        -p:PackageRuntime="linux-${TARGETARCH}" -p:Version=2.338.2 \
+        -o /worker --verbosity minimal
 
 FROM ${RUNNER_BASE_IMAGE} AS runner
 
@@ -108,7 +111,8 @@ RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_MAJOR}.x | sudo -E bash -
     && sudo rm -rf /var/lib/apt/lists/*
 
 # ── pnpm ──────────────────────────────────────────────────────────────────────
-RUN sudo npm install -g pnpm
+RUN sudo npm install -g pnpm \
+    && sudo npm cache clean --force
 
 # ── Temp directory owned by runner ─────────────────────────────────────────
 # Redirect all temp file creation to a runner-owned directory so that any
@@ -131,8 +135,24 @@ RUN set -x \
     && ruby --version \
     && sdkmanager --version 2>&1 | head -1
 
-# Empty for standard images; only the validated opt-in stage supplies files.
-COPY --chown=0:0 --from=local-cache-contract /tmp/local-cache-overlay/ /
-RUN if [ -x /usr/local/bin/runner-local-cache-check ]; then \
-        CUSTOM_ACTIONS_RESULTS_URL=http://offline-cache.invalid:9/ /usr/local/bin/runner-local-cache-check; \
-    fi
+# Install GitHub CLI and the audited Worker overlay. The fork's original
+# Listener keeps its upstream cache endpoint behavior when local cache is off.
+USER root
+RUN mkdir -p -m 0755 /etc/apt/keyrings \
+    && curl -fsSL -o /tmp/githubcli-archive-keyring.gpg https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+    && echo '6084d5d7bd8e288441e0e94fc6275570895da18e6751f70f057485dc2d1a811b  /tmp/githubcli-archive-keyring.gpg' | sha256sum --check \
+    && install -m 0644 /tmp/githubcli-archive-keyring.gpg /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && printf 'deb [arch=%s signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main\n' "$(dpkg --print-architecture)" > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends gh \
+    && rm -rf /var/lib/apt/lists/* /tmp/githubcli-archive-keyring.gpg
+COPY --chown=1001:123 --from=cache-worker /worker/Runner.Worker.dll /worker/Runner.Worker.deps.json /worker/Microsoft.AspNetCore.WebUtilities.dll /home/runner/bin/
+COPY --chmod=0755 check-unified-cache.sh /usr/local/bin/runner-local-cache-check
+RUN mkdir -p /usr/local/share/runscaler \
+    && /usr/local/bin/runner-local-cache-check --emit-manifest > /usr/local/share/runscaler/local-actions-cache.manifest \
+    && chmod 0644 /usr/local/share/runscaler/local-actions-cache.manifest
+USER runner
+RUN gh --version \
+    && gh api --help | grep -q -- '--slurp' \
+    && CUSTOM_ACTIONS_RESULTS_URL=http://offline-cache.invalid:9/ /usr/local/bin/runner-local-cache-check \
+    && /home/runner/run.sh --version | grep -x 2.338.2 >/dev/null

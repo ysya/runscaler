@@ -261,8 +261,9 @@ The manager uses `[actions-cache].advertise-url` for that scale set. The default
 is false, and an inherited true value can be overridden with false. The existing
 `actions-cache-url` remains available for an explicit endpoint, including an
 external receiver. An inherited or explicit URL alongside `native-actions-cache = true` must
-equal the global advertised URL. On Linux amd64, opt in per scale set with an
-accepted cache-capable runner variant by immutable digest.
+equal the global advertised URL. Opt in per scale set with the unified
+`actions-runner` image after accepting its architecture-specific cache behavior.
+Pin an immutable digest during canary validation.
 When an old explicit URL points to the built-in receiver, Runscaler emits an
 advisory sunset warning. Remove that duplicate URL after enabling the new
 switch; external receiver URLs are not deprecated.
@@ -281,7 +282,7 @@ name = "runscaler-local-cache-canary"
 labels = ["runscaler-local-cache-canary"]
 token = "env:RUNNER_TOKEN"
 max-runners = 1
-runner-image = "<verified-local-cache-image>@sha256:<accepted-digest>"
+runner-image = "ghcr.io/ysya/actions-runner:latest"
 
 [scaleset.docker]
 platform = "linux/amd64"

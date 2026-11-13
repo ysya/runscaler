@@ -156,8 +156,9 @@ gh api repos/<owner>/<repo>/actions/runners/deprecations/<version>   # runtime_d
 管理程序會自動採用 `[actions-cache].advertise-url`。預設為 false，也可以在 scale set
 用 false 覆寫繼承的 true。既有的 `actions-cache-url` 仍可指定外部接收器等明確端點；
 若與 `native-actions-cache = true` 同時設定或繼承，URL 必須與全域 advertise URL 相同。
-Linux amd64 環境建議逐一 scale set 啟用，並搭配固定 digest、通過驗收的快取專用
-runner 變體。標準 runner 或單純 fork base image 都不夠；最終映像必須提供
+建議逐一 scale set 啟用，並先針對實際架構完成快取驗收；canary 驗證期間請固定
+映像 digest。統一的 `actions-runner` 映像可支援官方與本機快取，單純 fork base image
+仍不夠；最終映像必須提供
 Runscaler 的 capability checker，先驗證能力再接收工作。
 舊的明確 URL 若指向內建接收器，Runscaler 會顯示不阻斷執行的 sunset 警告；
 啟用新開關後可移除重複的 URL。外部接收器 URL 不列入淘汰範圍。
@@ -173,7 +174,7 @@ name = "runscaler-local-cache-canary"
 labels = ["runscaler-local-cache-canary"]
 token = "env:RUNNER_TOKEN"
 max-runners = 1
-runner-image = "<verified-local-cache-image>@sha256:<accepted-digest>"
+runner-image = "ghcr.io/ysya/actions-runner:latest"
 
 [scaleset.docker]
 platform = "linux/amd64"

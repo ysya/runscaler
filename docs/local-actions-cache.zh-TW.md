@@ -16,8 +16,8 @@ cache-v2 接收器模式：
 [外部 Rust 服務相容性報告](local-actions-cache-compatibility.md)記錄原先釘選的
 client 與 runtime gate。原生 Go 接收器已通過真實簽名工作驗收，涵蓋失效保護
 runner 映像、client、重啟與斷線結果；詳細執行證據保存在私有操作紀錄。兩種模式
-在每台新主機都需驗證私有端點、快取專用 runner 映像及實際工作流程；標準 runner
-映像維持原行為。
+在每台新主機都需驗證私有端點、`actions-runner` 映像及實際工作流程。統一映像
+同時支援官方與本機快取，由 scale set 設定選擇端點。
 
 ## 外部接收器：資源歸屬與資料保存
 
@@ -80,10 +80,10 @@ docker compose --env-file deploy/local-cache/.env -f deploy/local-cache/compose.
 ## Runner 選用與映像
 
 使用原生接收器時，只在選定的 Docker scale set 設定 `native-actions-cache = true`，
-並設定全域 `[actions-cache].advertise-url`。使用通過驗證、固定 digest 的
-快取專用變體。詳見[設定](configuration.zh-TW.md)與
-[映像建置及維護](../images/actions-runner/README.md#opt-in-host-local-actions-cache-variant)。
-單純 fork base image 或標準映像不會提供已安裝的 capability checker。
+並設定全域 `[actions-cache].advertise-url`。使用已驗證的統一 `actions-runner`
+映像；canary 驗證時固定 digest。詳見[設定](configuration.zh-TW.md)與
+[映像建置及維護](../images/actions-runner/README.md#build-and-verification)。
+單純 fork base image 不會提供已安裝的 capability checker。
 
 Runscaler 先完成 volume 歸屬設定，再執行
 `/usr/local/bin/runner-local-cache-check`，成功後才啟動 listener。
@@ -96,7 +96,7 @@ Docker provider 對選定的接收器提供 `CUSTOM_ACTIONS_RESULTS_URL`。外�
 ## Client 使用範圍
 
 僅啟用已驗收的 client 與固定 revision。舊的 v1 client 不受支援。原本已驗收的
-映像仍提供 GitHub 的 `ACTIONS_CACHE_URL`；獨立的原生 v2 失效保護映像會將它指向
+映像在未選用本機端點時保留 GitHub 的 `ACTIONS_CACHE_URL`；選用本機快取時會將它指向
 本機 receiver，由本機拒絕 v1 請求，不回退到雲端。直接執行 shell 工具時需要明確匯出 runtime
 環境；container handler 未設定 v2 flag 時，也需明確啟用 v2。
 已驗收的 setup-go、setup-node/npm、Gradle basic 與 Rust GitHub provider revision

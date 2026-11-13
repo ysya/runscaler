@@ -2,6 +2,8 @@
 
 The `ghcr.io/ysya/actions-runner:latest` image provides one Linux amd64/arm64 runner for GitHub's official Actions cache and Runscaler's native local Actions cache. The local cache is selected per scale set with `native-actions-cache = true`; otherwise the runner uses GitHub's cache URLs. A selected local cache fails closed if its endpoint is unavailable. Artifact traffic still uses GitHub Results passthrough.
 
+"Official cache" means GitHub's hosted cache service, not the runner binary. This image uses a pinned `falcondev-oss` runner fork because the stock GitHub Worker assigns cache and Results URLs from job endpoint data; local routing needs the fork's Results override and the pinned cache patch in this directory. An official-base variant would require an equivalent Worker change and fresh runtime verification. The [compatibility evidence](../../docs/local-actions-cache-compatibility.md#runner-fork) records the fork's other differences from the official runner.
+
 ## Installed tools
 
 | Category | Contents |

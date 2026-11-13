@@ -1,32 +1,36 @@
 # Custom GitHub Actions runner image with Android SDK, Java, Node.js, Ruby, and C/C++ toolchains.
-# Based on the pinned cache-capable runner fork (Ubuntu 24.04 "noble").
+# Based on the pinned official GitHub runner (Ubuntu 24.04 "noble").
 
-# Both platforms use the same reviewed fork source and fail-closed cache patch.
+# Both platforms use the same official source and local-cache patch.
 # The SDK is a build stage only; it is not included in the published image.
-ARG RUNNER_BASE_IMAGE=ghcr.io/falcondev-oss/actions-runner@sha256:462ebdbc95fabf0bdf264ffe02ff5182665c6d99ac0f870b67d7f649c1ef1746
+ARG RUNNER_BASE_IMAGE=ghcr.io/actions/actions-runner@sha256:6d0b2d80d80f143f77dcb676e50920100bbb547e39e883454d57f45ab8c31300
 ARG WORKER_SDK_IMAGE=mcr.microsoft.com/dotnet/sdk:8.0.428-noble@sha256:3d5cad4bb76fd0130aefd6c629f7267c4aad40cccc86f7fbd1c81e277b58493b
 
-FROM ${WORKER_SDK_IMAGE} AS cache-worker
+FROM ${WORKER_SDK_IMAGE} AS patched-runner
 ARG TARGETARCH
 WORKDIR /src
 RUN test "$TARGETARCH" = amd64 -o "$TARGETARCH" = arm64 \
     && git init -q . \
-    && git remote add origin https://github.com/falcondev-oss/github-actions-runner.git \
-    && git fetch --depth=1 origin 3efdc9c0d8a5b7a441cba3069b0fdc33d1931adb \
+    && git remote add origin https://github.com/actions/runner.git \
+    && git fetch --depth=1 origin d1eb12d4b115c301201de27d667284e1a80f2ab5 \
     && git checkout --detach FETCH_HEAD \
-    && test "$(git rev-parse HEAD)" = 3efdc9c0d8a5b7a441cba3069b0fdc33d1931adb
-COPY fail-closed-v1.patch webutilities-audit.patch /tmp/
+    && test "$(git rev-parse HEAD)" = d1eb12d4b115c301201de27d667284e1a80f2ab5
+COPY official-local-cache.patch webutilities-audit.patch /tmp/
 RUN printf '%s  %s\n' \
-        5c801dea0cbed7265cfa0e716d2f126ae1ed934c96000046cf89c89b701ccde0 /tmp/fail-closed-v1.patch \
+        04fb2e9321520b29c3a2399370cfa64fbeef9ef58e3d5f770a357f56021583b2 /tmp/official-local-cache.patch \
         f258207452fd3a3106d9fa0e2cac397ba76ea8c40e88206c84ff3ad8ff2013cc /tmp/webutilities-audit.patch \
         | sha256sum --check \
-    && git apply --unidiff-zero /tmp/fail-closed-v1.patch \
+    && git apply /tmp/official-local-cache.patch \
     && git apply --unidiff-zero /tmp/webutilities-audit.patch \
     && git diff --check \
     && dotnet publish src/Runner.Worker/Runner.Worker.csproj \
         -c Release -r "linux-${TARGETARCH}" \
         -p:PackageRuntime="linux-${TARGETARCH}" -p:Version=2.338.2 \
-        -o /worker --verbosity minimal
+        -o /worker --verbosity minimal \
+    && dotnet publish src/Runner.Listener/Runner.Listener.csproj \
+        -c Release -r "linux-${TARGETARCH}" \
+        -p:PackageRuntime="linux-${TARGETARCH}" -p:Version=2.338.2 \
+        -o /listener --verbosity minimal
 
 FROM ${RUNNER_BASE_IMAGE} AS runner
 
@@ -135,8 +139,7 @@ RUN set -x \
     && ruby --version \
     && sdkmanager --version 2>&1 | head -1
 
-# Install GitHub CLI and the audited Worker overlay. The fork's original
-# Listener keeps its upstream cache endpoint behavior when local cache is off.
+# Install GitHub CLI and the audited Worker and Listener overlays.
 USER root
 RUN mkdir -p -m 0755 /etc/apt/keyrings \
     && curl -fsSL -o /tmp/githubcli-archive-keyring.gpg https://cli.github.com/packages/githubcli-archive-keyring.gpg \
@@ -146,7 +149,8 @@ RUN mkdir -p -m 0755 /etc/apt/keyrings \
     && apt-get update \
     && apt-get install -y --no-install-recommends gh \
     && rm -rf /var/lib/apt/lists/* /tmp/githubcli-archive-keyring.gpg
-COPY --chown=1001:123 --from=cache-worker /worker/Runner.Worker.dll /worker/Runner.Worker.deps.json /worker/Microsoft.AspNetCore.WebUtilities.dll /home/runner/bin/
+COPY --chown=1001:123 --from=patched-runner /worker/Runner.Worker.dll /worker/Runner.Worker.deps.json /worker/Microsoft.AspNetCore.WebUtilities.dll /home/runner/bin/
+COPY --chown=1001:123 --from=patched-runner /listener/Runner.Listener.dll /home/runner/bin/
 COPY --chmod=0755 check-unified-cache.sh /usr/local/bin/runner-local-cache-check
 RUN mkdir -p /usr/local/share/runscaler \
     && /usr/local/bin/runner-local-cache-check --emit-manifest > /usr/local/share/runscaler/local-actions-cache.manifest \

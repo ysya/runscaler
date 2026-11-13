@@ -1,0 +1,98 @@
+diff --git a/src/Runner.Listener/Runner.cs b/src/Runner.Listener/Runner.cs
+index 31c8713..1cad9e2 100644
+--- a/src/Runner.Listener/Runner.cs
++++ b/src/Runner.Listener/Runner.cs
+@@ -607,7 +607,12 @@ namespace GitHub.Runner.Listener
+                             HostContext.WritePerfCounter($"MessageReceived_{message.MessageType}");
+                             if (string.Equals(message.MessageType, AgentRefreshMessage.MessageType, StringComparison.OrdinalIgnoreCase))
+                             {
+-                                if (autoUpdateInProgress == false)
++                                if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("CUSTOM_ACTIONS_RESULTS_URL")))
++                                {
++                                    // Keep the patched runner from being replaced by an unpatched self-update.
++                                    Trace.Info("Refresh message received, skip autoupdate while local cache is enabled.");
++                                }
++                                else if (autoUpdateInProgress == false)
+                                 {
+                                     autoUpdateInProgress = true;
+                                     AgentRefreshMessage runnerUpdateMessage = JsonUtility.FromString<AgentRefreshMessage>(message.Body);
+@@ -644,7 +649,12 @@ namespace GitHub.Runner.Listener
+                             }
+                             else if (string.Equals(message.MessageType, RunnerRefreshMessage.MessageType, StringComparison.OrdinalIgnoreCase))
+                             {
+-                                if (autoUpdateInProgress == false)
++                                if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("CUSTOM_ACTIONS_RESULTS_URL")))
++                                {
++                                    // Keep the patched runner from being replaced by an unpatched self-update.
++                                    Trace.Info("Refresh message received, skip autoupdate while local cache is enabled.");
++                                }
++                                else if (autoUpdateInProgress == false)
+                                 {
+                                     autoUpdateInProgress = true;
+                                     RunnerRefreshMessage brokerRunnerUpdateMessage = JsonUtility.FromString<RunnerRefreshMessage>(message.Body);
+diff --git a/src/Runner.Worker/Handlers/ContainerActionHandler.cs b/src/Runner.Worker/Handlers/ContainerActionHandler.cs
+index 099495c..44d9705 100644
+--- a/src/Runner.Worker/Handlers/ContainerActionHandler.cs
++++ b/src/Runner.Worker/Handlers/ContainerActionHandler.cs
+@@ -221,7 +221,14 @@ namespace GitHub.Runner.Worker.Handlers
+             var systemConnection = ExecutionContext.Global.Endpoints.Single(x => string.Equals(x.Name, WellKnownServiceEndpointNames.SystemVssConnection, StringComparison.OrdinalIgnoreCase));
+             Environment["ACTIONS_RUNTIME_URL"] = systemConnection.Url.AbsoluteUri;
+             Environment["ACTIONS_RUNTIME_TOKEN"] = systemConnection.Authorization.Parameters[EndpointAuthorizationParameters.AccessToken];
+-            if (systemConnection.Data.TryGetValue("CacheServerUrl", out var cacheUrl) && !string.IsNullOrEmpty(cacheUrl))
++
++            string customActionsResultsUrl = System.Environment.GetEnvironmentVariable("CUSTOM_ACTIONS_RESULTS_URL");
++
++            if (!string.IsNullOrEmpty(customActionsResultsUrl))
++            {
++                Environment["ACTIONS_CACHE_URL"] = customActionsResultsUrl;
++            }
++            else if (systemConnection.Data.TryGetValue("CacheServerUrl", out var cacheUrl) && !string.IsNullOrEmpty(cacheUrl))
+             {
+                 Environment["ACTIONS_CACHE_URL"] = cacheUrl;
+             }
+@@ -234,7 +241,11 @@ namespace GitHub.Runner.Worker.Handlers
+                 Environment["ACTIONS_ID_TOKEN_REQUEST_URL"] = generateIdTokenUrl;
+                 Environment["ACTIONS_ID_TOKEN_REQUEST_TOKEN"] = systemConnection.Authorization.Parameters[EndpointAuthorizationParameters.AccessToken];
+             }
+-            if (systemConnection.Data.TryGetValue("ResultsServiceUrl", out var resultsUrl) && !string.IsNullOrEmpty(resultsUrl))
++            if (!string.IsNullOrEmpty(customActionsResultsUrl))
++            {
++                Environment["ACTIONS_RESULTS_URL"] = customActionsResultsUrl;
++            }
++            else if (systemConnection.Data.TryGetValue("ResultsServiceUrl", out var resultsUrl) && !string.IsNullOrEmpty(resultsUrl))
+             {
+                 Environment["ACTIONS_RESULTS_URL"] = resultsUrl;
+             }
+diff --git a/src/Runner.Worker/Handlers/NodeScriptActionHandler.cs b/src/Runner.Worker/Handlers/NodeScriptActionHandler.cs
+index 85ff327..24642a7 100644
+--- a/src/Runner.Worker/Handlers/NodeScriptActionHandler.cs
++++ b/src/Runner.Worker/Handlers/NodeScriptActionHandler.cs
+@@ -55,7 +55,14 @@ namespace GitHub.Runner.Worker.Handlers
+             var systemConnection = ExecutionContext.Global.Endpoints.Single(x => string.Equals(x.Name, WellKnownServiceEndpointNames.SystemVssConnection, StringComparison.OrdinalIgnoreCase));
+             Environment["ACTIONS_RUNTIME_URL"] = systemConnection.Url.AbsoluteUri;
+             Environment["ACTIONS_RUNTIME_TOKEN"] = systemConnection.Authorization.Parameters[EndpointAuthorizationParameters.AccessToken];
+-            if (systemConnection.Data.TryGetValue("CacheServerUrl", out var cacheUrl) && !string.IsNullOrEmpty(cacheUrl))
++
++            string customActionsResultsUrl = System.Environment.GetEnvironmentVariable("CUSTOM_ACTIONS_RESULTS_URL");
++
++            if (!string.IsNullOrEmpty(customActionsResultsUrl))
++            {
++                Environment["ACTIONS_CACHE_URL"] = customActionsResultsUrl;
++            }
++            else if (systemConnection.Data.TryGetValue("CacheServerUrl", out var cacheUrl) && !string.IsNullOrEmpty(cacheUrl))
+             {
+                 Environment["ACTIONS_CACHE_URL"] = cacheUrl;
+             }
+@@ -68,7 +75,11 @@ namespace GitHub.Runner.Worker.Handlers
+                 Environment["ACTIONS_ID_TOKEN_REQUEST_URL"] = generateIdTokenUrl;
+                 Environment["ACTIONS_ID_TOKEN_REQUEST_TOKEN"] = systemConnection.Authorization.Parameters[EndpointAuthorizationParameters.AccessToken];
+             }
+-            if (systemConnection.Data.TryGetValue("ResultsServiceUrl", out var resultsUrl) && !string.IsNullOrEmpty(resultsUrl))
++            if (!string.IsNullOrEmpty(customActionsResultsUrl))
++            {
++                Environment["ACTIONS_RESULTS_URL"] = customActionsResultsUrl;
++            }
++            else if (systemConnection.Data.TryGetValue("ResultsServiceUrl", out var resultsUrl) && !string.IsNullOrEmpty(resultsUrl))
+             {
+                 Environment["ACTIONS_RESULTS_URL"] = resultsUrl;
+             }

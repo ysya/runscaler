@@ -83,7 +83,7 @@ docker compose --env-file deploy/local-cache/.env -f deploy/local-cache/compose.
 並設定全域 `[actions-cache].advertise-url`。使用已驗證的統一 `actions-runner`
 映像；canary 驗證時固定 digest。詳見[設定](configuration.zh-TW.md)與
 [映像建置及維護](../images/actions-runner/README.md#build-and-verification)。
-單純 fork base image 不會提供已安裝的 capability checker。
+單純使用官方 runner base image 不會提供已修補的元件或已安裝的 capability checker。
 
 Runscaler 先完成 volume 歸屬設定，再執行
 `/usr/local/bin/runner-local-cache-check`，成功後才啟動 listener。

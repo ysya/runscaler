@@ -172,9 +172,9 @@ dind = true
 # max-runners = 2
 # runner-image = "ghcr.io/cirruslabs/macos-golden-gate-xcode:latest"
 
-# --- Host-local Actions cache (Linux amd64, opt-in) ---
-# A stock runner or bare fork image does not provide Runscaler's capability check.
-# Use the accepted cache-capable variant's immutable digest after image validation.
+# --- Host-local Actions cache (Linux amd64/arm64, opt-in) ---
+# The unified actions-runner image supports both GitHub and native local cache.
+# Pin its accepted index digest instead of latest for a canary rollout.
 # Do not put the cache service's data volume in cache-volumes or [[docker.cache]].
 # [[scaleset]]
 # url = "https://github.com/<owner>"
@@ -182,15 +182,15 @@ dind = true
 # labels = ["runscaler-local-cache-canary"]
 # token = "env:RUNNER_TOKEN"
 # max-runners = 1
-# runner-image = "<verified-local-cache-image>@sha256:<accepted-digest>"
+# runner-image = "ghcr.io/ysya/actions-runner:latest"
 # [scaleset.docker]
-# platform = "linux/amd64"
+# platform = "linux/amd64" # or linux/arm64
 # native-actions-cache = true # uses [actions-cache].advertise-url below
 # cache-volumes = [] # only if overriding inherited language-cache mounts
 # cache = []         # only if overriding inherited [[docker.cache]] mounts
 
 # Native Go receiver: global settings, not inherited by scale sets. Configure
-# a private listener, a verified cache-capable image above, and workflow cache
+# a private listener, the unified runner image above, and workflow cache
 # steps before removing legacy cache-volume mounts. The byte limit is shared
 # across all cached entries; it is not a per-tool limit or hard disk quota.
 # [actions-cache]

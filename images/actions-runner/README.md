@@ -14,7 +14,7 @@ The `ghcr.io/ysya/actions-runner:latest` image provides one Linux amd64/arm64 ru
 
 The arm64 image also includes amd64 glibc, libstdc++, and zlib for Android tools distributed only as x86-64 binaries.
 
-The Android SDK and NDK dominate image size. On the previous amd64 image, the SDK directory was about 2.56 GB uncompressed, including about 2.05 GB of NDK. The cache-capable image added about 15.5 MB compressed over the standard image. Removing the NDK or other build toolchains would change supported workflows; this build keeps them.
+The Android SDK and NDK dominate image size. On the previous amd64 image, the SDK directory was about 2.56 GB uncompressed, including about 2.05 GB of NDK. The accepted unified candidate has 2,074.1 MB of compressed OCI layers on amd64 and 1,958.8 MB on arm64. This is about 6.0 MB and 7.0 MB above the previous standard image, respectively. Clearing the npm install cache in the build layer removed about 28.7 MB and 26.3 MB from the two candidate images. Removing the NDK or other build toolchains would change supported workflows; this build keeps them.
 
 ## Use
 
@@ -35,6 +35,6 @@ docker build --platform linux/arm64 -t actions-runner:check images/actions-runne
 
 The Dockerfile pins the multiarchitecture fork base and .NET SDK build stage. It fetches an exact runner source commit, verifies and applies `fail-closed-v1.patch`, and updates the vulnerable transitive `Microsoft.AspNetCore.WebUtilities` dependency to 8.0.34 with `webutilities-audit.patch`. Only the resulting Worker assembly, its dependency manifest, and the updated WebUtilities assembly enter the final image; the SDK build stage is discarded. The installed checker pins the Worker, Listener, dependency files, patches, platform, and base identity.
 
-The `Build Runner Image` workflow builds both architectures on pull requests and publishes the multiarchitecture `latest` tag from `main`. ARM64 local-cache runtime and client acceptance must pass before merging the image change. The old `actions-runner-local-cache` package remains available for rollback until its removal is separately approved.
+The `Build Runner Image` workflow builds both architectures on pull requests and publishes the multiarchitecture `latest` tag from `main`. The ARM64 signed-job cache acceptance is recorded in the [unified runner compatibility report](../../docs/unified-runner-compatibility.md). The old `actions-runner-local-cache` package remains available for rollback until its removal is separately approved.
 
-See [local-cache compatibility evidence](../../docs/local-actions-cache-compatibility.md) and [operator setup](../../docs/local-actions-cache.md) for the existing amd64 acceptance and local-cache behavior.
+See the [original amd64 compatibility evidence](../../docs/local-actions-cache-compatibility.md) and [operator setup](../../docs/local-actions-cache.md) for local-cache behavior.

@@ -41,39 +41,40 @@ type DockerAPI interface {
 
 // DockerProvider runs GitHub Actions runners as Docker containers.
 type DockerProvider struct {
-	dockerClient     DockerAPI
-	actionsCacheURL  string
-	runnerImage      string
-	dockerSocket     string
-	dind             bool
-	workspaceRoot    string
-	workspaceMu      sync.Mutex
-	workspaces       map[string]*runnerWorkspace
-	sharedVolume     string                    // container path of the shared volume ("" = disabled)
-	sharedVolumeName string                    // named volume backing the shared-volume mount
-	cacheVolumes     []config.CacheVolumeMount // persistent named cache volumes (never cleaned up)
-	network          string                    // pre-existing network to attach containers to ("" = default bridge)
-	memoryBytes      int64                     // container memory limit in bytes (0 = unlimited)
-	nanoCPUs         int64                     // container CPU limit in nanoseconds (0 = unlimited)
-	pidsLimit        int64                     // container pids limit (0 = unlimited)
-	platform         *ocispec.Platform         // nil = use host default
-	logger           *slog.Logger
-	readiness        bool
-	readyTimeout     time.Duration
-	readySettle      time.Duration
-	readyPoll        time.Duration
-	captureLogs      bool
-	imageMu          sync.Mutex
-	imagePulls       map[string]*imagePull
-}
-
-type imagePull struct {
-	done chan struct{}
-	err  error
+	dockerClient          DockerAPI
+	actionsCacheURL       string
+	runnerImage           string
+	dockerSocket          string
+	dind                  bool
+	workspaceRoot         string
+	workspaceMu           sync.Mutex
+	workspaces            map[string]*runnerWorkspace
+	sharedVolume          string                    // container path of the shared volume ("" = disabled)
+	sharedVolumeName      string                    // named volume backing the shared-volume mount
+	cacheVolumes          []config.CacheVolumeMount // persistent named cache volumes (never cleaned up)
+	network               string                    // pre-existing network to attach containers to ("" = default bridge)
+	memoryBytes           int64                     // container memory limit in bytes (0 = unlimited)
+	nanoCPUs              int64                     // container CPU limit in nanoseconds (0 = unlimited)
+	pidsLimit             int64                     // container pids limit (0 = unlimited)
+	platform              *ocispec.Platform         // nil = use host default
+	logger                *slog.Logger
+	readiness             bool
+	readyTimeout          time.Duration
+	readySettle           time.Duration
+	readyPoll             time.Duration
+	captureLogs           bool
+	imageCoordinator      *DockerImagePullCoordinator
+	localImageCoordinator DockerImagePullCoordinator
 }
 
 // NewDockerProvider creates a DockerProvider from scale set config.
 func NewDockerProvider(ss config.ScaleSetConfig, client DockerAPI, logger *slog.Logger) *DockerProvider {
+	return NewDockerProviderWithCoordinator(ss, client, logger, nil)
+}
+
+// NewDockerProviderWithCoordinator shares missing-image pulls across Docker
+// scale sets. A nil coordinator gives the provider a private coordinator.
+func NewDockerProviderWithCoordinator(ss config.ScaleSetConfig, client DockerAPI, logger *slog.Logger, coordinator *DockerImagePullCoordinator) *DockerProvider {
 	p := &DockerProvider{
 		dockerClient:     client,
 		runnerImage:      ss.RunnerImage,
@@ -92,8 +93,8 @@ func NewDockerProvider(ss config.ScaleSetConfig, client DockerAPI, logger *slog.
 		readyTimeout:     ss.DockerReadyTimeout(),
 		readySettle:      defaultReadySettle,
 		readyPoll:        500 * time.Millisecond,
+		imageCoordinator: coordinator,
 	}
-	p.imagePulls = make(map[string]*imagePull)
 	// Validate() already surfaced parse errors before startup; on error no
 	// cache volumes are mounted rather than a partial set.
 	p.cacheVolumes, _ = ss.Docker.ParseCacheVolumes()
@@ -242,29 +243,20 @@ func (p *DockerProvider) ensureRunnerImage(ctx context.Context) error {
 		return fmt.Errorf("inspect runner image %s: %w", p.runnerImage, err)
 	}
 
-	p.imageMu.Lock()
-	if p.imagePulls == nil {
-		p.imagePulls = make(map[string]*imagePull)
+	coordinator := p.imageCoordinator
+	if coordinator == nil {
+		coordinator = &p.localImageCoordinator
 	}
-	if pull, ok := p.imagePulls[p.runnerImage]; ok {
-		p.imageMu.Unlock()
-		select {
-		case <-pull.done:
-			return pull.err
-		case <-ctx.Done():
-			return ctx.Err()
+	return coordinator.ensure(ctx, p.imagePullKey(), func() error {
+		// Another scale set may have completed its pull after the first
+		// inspection, before this call claimed the coordinator slot.
+		if err := p.inspectRunnerImage(ctx); err == nil {
+			return nil
+		} else if !cerrdefs.IsNotFound(err) {
+			return fmt.Errorf("inspect runner image %s: %w", p.runnerImage, err)
 		}
-	}
-	pull := &imagePull{done: make(chan struct{})}
-	p.imagePulls[p.runnerImage] = pull
-	p.imageMu.Unlock()
-
-	pull.err = p.pullRunnerImage(ctx)
-	close(pull.done)
-	p.imageMu.Lock()
-	delete(p.imagePulls, p.runnerImage)
-	p.imageMu.Unlock()
-	return pull.err
+		return p.pullRunnerImage(ctx)
+	})
 }
 
 func (p *DockerProvider) pullRunnerImage(ctx context.Context) error {

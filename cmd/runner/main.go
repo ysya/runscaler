@@ -539,6 +539,7 @@ func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) e
 
 	// Run each scale set in its own goroutine
 	var wg sync.WaitGroup
+	dockerImagePullCoordinator := provider.NewDockerImagePullCoordinator()
 	errs := make(chan error, len(scaleSets)+1)
 	runCtx, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
@@ -552,7 +553,7 @@ func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) e
 		go func() {
 			defer wg.Done()
 			ssLogger := config.NewScaleSetLoggerWithWriter(cfg.LogLevel, cfg.LogFormat, ss.ScaleSetName, i, console, logWriter(logFile))
-			if err := runScaleSetController(runCtx, drain, cfg.EffectiveDrainTimeout(), ss, dockerClients[ss.Docker.Socket], ssLogger, healthServer, tartCoordinator, guard, capacityAllocators[i], diagnosticStore, cfg.Diagnostics.CaptureLogs); err != nil {
+			if err := runScaleSetController(runCtx, drain, cfg.EffectiveDrainTimeout(), ss, dockerClients[ss.Docker.Socket], ssLogger, healthServer, tartCoordinator, dockerImagePullCoordinator, guard, capacityAllocators[i], diagnosticStore, cfg.Diagnostics.CaptureLogs); err != nil {
 				errs <- fmt.Errorf("scaleset %q: %w", ss.ScaleSetName, err)
 				cancelRun()
 			}
@@ -605,7 +606,7 @@ func watchNativeCacheFailure(ctx context.Context, failures <-chan error, cancelR
 // shared disk-pressure guard built once in runManager() (nil when the disk guard
 // is disabled); it is wired into this ScaleSetController as its
 // pre-job-start check, see controller.WithDiskChecker below.
-func runScaleSetController(ctx context.Context, drain <-chan struct{}, drainTimeout time.Duration, ss config.ScaleSetConfig, dockerClient *dockerclient.Client, logger *slog.Logger, h *health.HealthServer, tartCoordinator *provider.TartHostCoordinator, guard *diskguard.Guard, capacityAllocator *capacity.Allocator, diagnosticStore *diagnostics.Store, captureLogs bool) error {
+func runScaleSetController(ctx context.Context, drain <-chan struct{}, drainTimeout time.Duration, ss config.ScaleSetConfig, dockerClient *dockerclient.Client, logger *slog.Logger, h *health.HealthServer, tartCoordinator *provider.TartHostCoordinator, dockerImagePullCoordinator *provider.DockerImagePullCoordinator, guard *diskguard.Guard, capacityAllocator *capacity.Allocator, diagnosticStore *diagnostics.Store, captureLogs bool) error {
 	// Create scaleset client
 	scalesetClient, err := ss.NewScalesetClient(logger)
 	if err != nil {
@@ -629,7 +630,7 @@ func runScaleSetController(ctx context.Context, drain <-chan struct{}, drainTime
 		tb.StartPool(ctx) // starts warm pool if tart-pool-size > 0
 		instanceProvider = tb
 	} else {
-		dp := provider.NewDockerProvider(ss, dockerClient, logger)
+		dp := provider.NewDockerProviderWithCoordinator(ss, dockerClient, logger, dockerImagePullCoordinator)
 		dp.EnableDiagnosticLogs(captureLogs && diagnosticStore != nil)
 		instanceProvider = dp
 	}

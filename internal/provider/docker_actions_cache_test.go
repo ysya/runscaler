@@ -78,7 +78,7 @@ func TestDockerProviderActionsCacheURLStaysEnvironmentData(t *testing.T) {
 }
 
 func TestLocalCacheCheckerRequiresEndpoint(t *testing.T) {
-	script, err := filepath.Abs("../../images/actions-runner/check-local-cache.sh")
+	script, err := filepath.Abs("../../images/actions-runner/check-unified-cache.sh")
 	if err != nil {
 		t.Fatal(err)
 	}

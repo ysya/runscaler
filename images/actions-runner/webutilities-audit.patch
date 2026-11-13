@@ -1,0 +1,6 @@
+diff --git a/src/Runner.Worker/Runner.Worker.csproj b/src/Runner.Worker/Runner.Worker.csproj
+index 6a7f36e..683c459 100644
+--- a/src/Runner.Worker/Runner.Worker.csproj
++++ b/src/Runner.Worker/Runner.Worker.csproj
+@@ -26,0 +27 @@
++    <PackageReference Include="Microsoft.AspNetCore.WebUtilities" Version="8.0.34" />

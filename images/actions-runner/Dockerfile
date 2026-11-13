@@ -111,7 +111,8 @@ RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_MAJOR}.x | sudo -E bash -
     && sudo rm -rf /var/lib/apt/lists/*
 
 # ── pnpm ──────────────────────────────────────────────────────────────────────
-RUN sudo npm install -g pnpm
+RUN sudo npm install -g pnpm \
+    && sudo npm cache clean --force
 
 # ── Temp directory owned by runner ─────────────────────────────────────────
 # Redirect all temp file creation to a runner-owned directory so that any

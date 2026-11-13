@@ -25,8 +25,8 @@ type AppleContainerProvider struct {
 }
 
 type AppleInstance struct {
-	ID            string `json:"id"`
 	Configuration struct {
+		ID     string            `json:"id"`
 		Labels map[string]string `json:"labels"`
 	} `json:"configuration"`
 	Status struct {
@@ -62,7 +62,7 @@ func (p *AppleContainerProvider) StartInstance(ctx context.Context, name, jit st
 		return "", err
 	}
 	for _, item := range items {
-		if item.ID == name {
+		if item.Configuration.ID == name {
 			return "", fmt.Errorf("apple container name already exists")
 		}
 	}
@@ -98,7 +98,7 @@ func (p *AppleContainerProvider) RemoveInstance(ctx context.Context, id string) 
 		return err
 	}
 	for _, item := range items {
-		if item.ID != id {
+		if item.Configuration.ID != id {
 			continue
 		}
 		if item.Configuration.Labels["io.github.runscaler.apple-owner"] != p.owner {
@@ -125,7 +125,7 @@ func (p *AppleContainerProvider) RemoveInstance(ctx context.Context, id string) 
 				}
 				found := false
 				for _, candidate := range current {
-					if candidate.ID == id {
+					if candidate.Configuration.ID == id {
 						found = true
 						if candidate.Configuration.Labels["io.github.runscaler.apple-owner"] != p.owner {
 							return fmt.Errorf("apple container ownership changed during cleanup")
@@ -151,7 +151,7 @@ func (p *AppleContainerProvider) Reconcile(ctx context.Context) error {
 	}
 	for _, item := range items {
 		if item.Configuration.Labels["io.github.runscaler.apple-owner"] == p.owner {
-			if err = p.RemoveInstance(ctx, item.ID); err != nil {
+			if err = p.RemoveInstance(ctx, item.Configuration.ID); err != nil {
 				return err
 			}
 		}
@@ -167,7 +167,7 @@ func (p *AppleContainerProvider) WaitInstance(ctx context.Context, id string) er
 		}
 		found := false
 		for _, item := range items {
-			if item.ID == id {
+			if item.Configuration.ID == id {
 				found = true
 				if item.Status.State == "stopped" {
 					return nil

@@ -23,7 +23,7 @@ type appleFake struct {
 
 func appleItem(id, owner, state string) AppleInstance {
 	var item AppleInstance
-	item.ID = id
+	item.Configuration.ID = id
 	item.Configuration.Labels = map[string]string{"io.github.runscaler.apple-owner": owner}
 	item.Status.State = state
 	return item
@@ -67,7 +67,7 @@ func (f *appleFake) Run(_ context.Context, _ string, args ...string) ([]byte, er
 		return []byte(name), nil
 	case "stop":
 		for i, item := range f.items {
-			if item.ID == args[len(args)-1] {
+			if item.Configuration.ID == args[len(args)-1] {
 				f.items[i].Status.State = "stopped"
 			}
 		}
@@ -77,7 +77,7 @@ func (f *appleFake) Run(_ context.Context, _ string, args ...string) ([]byte, er
 			return nil, errors.New("cleanup failed")
 		}
 		for i, item := range f.items {
-			if item.ID == args[len(args)-1] {
+			if item.Configuration.ID == args[len(args)-1] {
 				f.items = append(f.items[:i], f.items[i+1:]...)
 				break
 			}
@@ -117,7 +117,7 @@ func TestAppleLifecycleAndForeignPreservation(t *testing.T) {
 	if err = p.RemoveInstance(context.Background(), id); err != nil {
 		t.Fatal(err)
 	}
-	if len(f.items) != 1 || f.items[0].ID != "foreign" {
+	if len(f.items) != 1 || f.items[0].Configuration.ID != "foreign" {
 		t.Fatal(f.items)
 	}
 	if err = p.RemoveInstance(context.Background(), "foreign"); err == nil {

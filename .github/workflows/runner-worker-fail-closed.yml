@@ -9,6 +9,11 @@ on:
       - images/actions-runner/check-fail-closed.sh
       - images/actions-runner/Dockerfile.fail-closed
   workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the verified fail-closed runner image
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -72,7 +77,7 @@ jobs:
 
   publish:
     needs: linux-amd64
-    if: github.ref == 'refs/heads/feat/native-actions-cache-v2-acceptance'
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && inputs.publish
     runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:

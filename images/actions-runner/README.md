@@ -92,7 +92,8 @@ See [operator setup and rollback](../../docs/local-actions-cache.md).
 ## Native v2 fail-closed variant
 
 `Dockerfile.fail-closed` adds a reviewed Worker assembly to the previously
-verified amd64 local-cache image, without rebuilding the toolchain. The Worker
+verified amd64 local-cache image, without rebuilding the toolchain. It also
+installs the GitHub CLI for workflows that dispatch or inspect runs. The Worker
 comes from the exact fork source revision and
 [`fail-closed-v1.patch`](fail-closed-v1.patch), which changes both Node and
 container action handlers to set `ACTIONS_CACHE_URL` to the local Results URL
@@ -101,10 +102,11 @@ legacy `/_apis/artifactcache/` API locally. The original GitHub cache URL is
 retained only for runners without a custom local endpoint.
 
 The dedicated [CI workflow](../../.github/workflows/runner-worker-fail-closed.yml)
-builds and tests the pinned source, checks the patch and Worker SHA-256, then
-publishes a run-specific `actions-runner-local-cache` tag and registry
-attestation. Its image checker pins the new Worker, the existing Listener and
-the parent image. Use only the inspected immutable image digest with native v2
-mode; the earlier image does not enforce local-only legacy cache routing.
+builds and tests the pinned source and checks the patch and Worker SHA-256.
+Dispatch it from `main` with `publish=true` to publish a run-specific
+`actions-runner-local-cache` tag and registry attestation. Its image checker
+pins the new Worker, the existing Listener and the parent image. Use only the
+inspected immutable image digest with native v2 mode; the earlier image does
+not enforce local-only legacy cache routing.
 Review the private signed-job acceptance record for the verified digest and
 scoped client results before rollout.

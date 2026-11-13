@@ -11,6 +11,7 @@ import (
 
 	dockerclient "github.com/moby/moby/client"
 	"github.com/moby/moby/client/pkg/jsonmessage"
+	"github.com/moby/moby/client/pkg/versions"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -18,6 +19,21 @@ import (
 	"github.com/ysya/runscaler/internal/config"
 	"github.com/ysya/runscaler/internal/provider"
 )
+
+const minDockerAPIVersion = "1.49"
+
+func requireDockerAPIVersion(serverVersion, clientVersion string) error {
+	if serverVersion == "" {
+		return fmt.Errorf("docker daemon did not report an API version; Docker Engine 28.1 or newer (API %s+) is required", minDockerAPIVersion)
+	}
+	if versions.LessThan(serverVersion, minDockerAPIVersion) {
+		return fmt.Errorf("docker daemon API version %s is too old; Docker Engine 28.1 or newer (API %s+) is required", serverVersion, minDockerAPIVersion)
+	}
+	if clientVersion == "" || versions.LessThan(clientVersion, minDockerAPIVersion) {
+		return fmt.Errorf("docker client is using API version %q; API %s+ is required (check DOCKER_API_VERSION)", clientVersion, minDockerAPIVersion)
+	}
+	return nil
+}
 
 func runOptionalImagePreflight(cmd *cobra.Command, scaleSets []config.ScaleSetConfig, pullDocker, ensureTart func(context.Context, config.ScaleSetConfig) error) error {
 	preflight, err := cmd.Flags().GetBool("preflight")

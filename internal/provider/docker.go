@@ -3,7 +3,6 @@ package provider
 import (
 	"context"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"strconv"
@@ -237,7 +236,7 @@ func (p *DockerProvider) StartInstance(ctx context.Context, name string, jitConf
 // a runner. The controller normally pulls images during startup, but the
 // daemon cache may be pruned while the controller remains running.
 func (p *DockerProvider) ensureRunnerImage(ctx context.Context) error {
-	if _, err := p.dockerClient.ImageInspect(ctx, p.runnerImage); err == nil {
+	if err := p.inspectRunnerImage(ctx); err == nil {
 		return nil
 	} else if !cerrdefs.IsNotFound(err) {
 		return fmt.Errorf("inspect runner image %s: %w", p.runnerImage, err)
@@ -281,14 +280,23 @@ func (p *DockerProvider) pullRunnerImage(ctx context.Context) error {
 		return fmt.Errorf("failed to pull runner image %s: %w", p.runnerImage, err)
 	}
 	defer response.Close()
-	if _, err := io.Copy(io.Discard, response); err != nil {
-		return fmt.Errorf("failed to read pull response for runner image %s: %w", p.runnerImage, err)
+	if err := response.Wait(pullCtx); err != nil {
+		return fmt.Errorf("failed to pull runner image %s: %w", p.runnerImage, err)
 	}
-	if _, err := p.dockerClient.ImageInspect(ctx, p.runnerImage); err != nil {
+	if err := p.inspectRunnerImage(ctx); err != nil {
 		return fmt.Errorf("runner image %s is still unavailable after pull: %w", p.runnerImage, err)
 	}
 	p.logger.Info("Runner image pulled successfully", slog.String("image", p.runnerImage))
 	return nil
+}
+
+func (p *DockerProvider) inspectRunnerImage(ctx context.Context) error {
+	if p.platform != nil {
+		_, err := p.dockerClient.ImageInspect(ctx, p.runnerImage, dockerclient.ImageInspectWithPlatform(p.platform))
+		return err
+	}
+	_, err := p.dockerClient.ImageInspect(ctx, p.runnerImage)
+	return err
 }
 
 // RemoveInstance removes a runner and its explicitly owned child resources.

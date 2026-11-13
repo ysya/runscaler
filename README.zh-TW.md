@@ -90,6 +90,8 @@ Go cache-v2 接收器。具備快取能力的 runner 與 BuildKit 容器透過
 
 ### Linux 系統服務
 
+Docker scale set 需要 Docker API 1.49 以上版本（Docker Engine 28.1+）。
+
 先在主機上啟動 Docker，再執行：
 
 ```bash

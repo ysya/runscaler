@@ -344,7 +344,8 @@ func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) e
 			if err != nil {
 				return fmt.Errorf("failed to create Docker client for %s: %w", ss.Docker.Socket, err)
 			}
-			if _, err := client.Ping(ctx, dockerclient.PingOptions{NegotiateAPIVersion: true}); err != nil {
+			ping, err := client.Ping(ctx, dockerclient.PingOptions{NegotiateAPIVersion: true})
+			if err != nil {
 				_ = client.Close()
 				return fmt.Errorf("cannot connect to Docker at %s: %w\n\n"+
 					"  Possible fixes:\n"+
@@ -353,6 +354,10 @@ func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) e
 					"  3. Re-login or run: newgrp docker\n"+
 					"  4. Or check the docker socket path in your config",
 					ss.Docker.Socket, err)
+			}
+			if err := requireDockerAPIVersion(ping.APIVersion, client.ClientVersion()); err != nil {
+				_ = client.Close()
+				return fmt.Errorf("docker at %s: %w", ss.Docker.Socket, err)
 			}
 			dockerClients[ss.Docker.Socket] = client
 		}

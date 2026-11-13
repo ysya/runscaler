@@ -81,6 +81,8 @@ installer checks the config, Docker access, and GitHub credentials before starti
 
 ### Linux system service
 
+Docker scale sets require Docker API 1.49 or newer (Docker Engine 28.1+).
+
 Start Docker on the host, then run:
 
 ```bash

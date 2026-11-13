@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"iter"
 	"log/slog"
 	"slices"
 	"strings"
@@ -12,9 +13,11 @@ import (
 
 	cerrdefs "github.com/containerd/errdefs"
 	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/jsonstream"
 	"github.com/moby/moby/api/types/mount"
 	"github.com/moby/moby/api/types/volume"
 	dockerclient "github.com/moby/moby/client"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 
 	"github.com/ysya/runscaler/internal/config"
 	"github.com/ysya/runscaler/internal/shell"
@@ -40,13 +43,48 @@ type mockDocker struct {
 
 	// Optional overrides for ContainerWait. When unset, the wait succeeds
 	// immediately with status 0.
-	waitStatus        int64
-	waitErr           error
-	removeErr         error
-	startErr          error
-	startHook         func()
-	rejectCanceled    bool
-	volumeRemoveErrOn string
+	waitStatus           int64
+	waitErr              error
+	removeErr            error
+	startErr             error
+	startHook            func()
+	rejectCanceled       bool
+	volumeRemoveErrOn    string
+	imagePresent         bool
+	imagePlatformMissing bool
+	imagePulls           int
+	imagePullErr         error
+	imageStreamErr       error
+}
+
+type mockImagePullResponse struct {
+	io.Reader
+	err error
+}
+
+func (mockImagePullResponse) Close() error { return nil }
+func (mockImagePullResponse) JSONMessages(context.Context) iter.Seq2[jsonstream.Message, error] {
+	return nil
+}
+func (r mockImagePullResponse) Wait(context.Context) error { return r.err }
+
+func (m *mockDocker) ImageInspect(_ context.Context, _ string, options ...dockerclient.ImageInspectOption) (dockerclient.ImageInspectResult, error) {
+	if !m.imagePresent || (len(options) > 0 && m.imagePlatformMissing) {
+		return dockerclient.ImageInspectResult{}, cerrdefs.ErrNotFound
+	}
+	return dockerclient.ImageInspectResult{}, nil
+}
+func (m *mockDocker) ImagePull(_ context.Context, _ string, _ dockerclient.ImagePullOptions) (dockerclient.ImagePullResponse, error) {
+	m.imagePulls++
+	if m.imagePullErr != nil {
+		return nil, m.imagePullErr
+	}
+	if m.imageStreamErr != nil {
+		return mockImagePullResponse{Reader: strings.NewReader(`{"errorDetail":{"code":403,"message":"registry denied"}}`), err: m.imageStreamErr}, nil
+	}
+	m.imagePresent = true
+	m.imagePlatformMissing = false
+	return mockImagePullResponse{Reader: strings.NewReader("{}")}, nil
 }
 
 func (m *mockDocker) VolumeCreate(_ context.Context, options dockerclient.VolumeCreateOptions) (dockerclient.VolumeCreateResult, error) {
@@ -126,7 +164,7 @@ func (m *mockDocker) ContainerWait(_ context.Context, _ string, _ dockerclient.C
 }
 
 func newTestDockerProvider(sharedVolume string, dind bool) (*DockerProvider, *mockDocker) {
-	md := &mockDocker{}
+	md := &mockDocker{imagePresent: true}
 	b := &DockerProvider{
 		dockerClient:     md,
 		runnerImage:      "test-image:latest",
@@ -143,7 +181,7 @@ func newTestDockerProvider(sharedVolume string, dind bool) (*DockerProvider, *mo
 // constructor path (volume-name default, cache-volume parsing) is exercised.
 // DinD is disabled to keep tests hermetic (no host socket stat).
 func newConfigDockerProvider(dc config.DockerConfig) (*DockerProvider, *mockDocker) {
-	md := &mockDocker{}
+	md := &mockDocker{imagePresent: true}
 	dind := false
 	dc.DinD = &dind
 	ss := config.ScaleSetConfig{
@@ -154,7 +192,7 @@ func newConfigDockerProvider(dc config.DockerConfig) (*DockerProvider, *mockDock
 }
 
 func newTestDockerProviderWithResources(memory int64, cpu int64) (*DockerProvider, *mockDocker) {
-	md := &mockDocker{}
+	md := &mockDocker{imagePresent: true}
 	b := &DockerProvider{
 		dockerClient: md,
 		runnerImage:  "test-image:latest",
@@ -203,6 +241,58 @@ func assertFixOwnCmd(t *testing.T, cmd []string, targets ...string) {
 	}
 	if !strings.HasSuffix(script, "exec /home/runner/run.sh") {
 		t.Errorf("script should end with exec run.sh, got: %q", script)
+	}
+}
+
+func TestDockerProvider_StartInstance_PullsMissingImage(t *testing.T) {
+	b, md := newTestDockerProvider("", false)
+	md.imagePresent = false
+	if _, err := b.StartInstance(context.Background(), "runner-missing-image", "jit"); err != nil {
+		t.Fatalf("StartInstance() error: %v", err)
+	}
+	if md.imagePulls != 1 {
+		t.Fatalf("image pulls = %d, want 1", md.imagePulls)
+	}
+	if len(md.createCalls) != 1 {
+		t.Fatalf("container creates = %d, want 1", len(md.createCalls))
+	}
+}
+
+func TestDockerProvider_StartInstance_ReturnsPullFailure(t *testing.T) {
+	b, md := newTestDockerProvider("", false)
+	md.imagePresent = false
+	md.imagePullErr = errors.New("registry unavailable")
+	if _, err := b.StartInstance(context.Background(), "runner-pull-failure", "jit"); err == nil || !strings.Contains(err.Error(), "failed to pull runner image") {
+		t.Fatalf("StartInstance() error = %v, want pull failure", err)
+	}
+	if len(md.createCalls) != 0 {
+		t.Fatalf("container creates = %d, want 0", len(md.createCalls))
+	}
+}
+
+func TestDockerProvider_StartInstance_PullsMissingConfiguredPlatform(t *testing.T) {
+	p, md := newTestDockerProvider("", false)
+	p.platform = &ocispec.Platform{OS: "linux", Architecture: "arm64"}
+	md.imagePlatformMissing = true
+	if _, err := p.StartInstance(context.Background(), "runner-missing-platform", "jit"); err != nil {
+		t.Fatalf("StartInstance() error: %v", err)
+	}
+	if md.imagePulls != 1 {
+		t.Fatalf("image pulls = %d, want 1 for the missing platform", md.imagePulls)
+	}
+}
+
+func TestDockerProvider_StartInstance_ReturnsPullStreamError(t *testing.T) {
+	p, md := newTestDockerProvider("", false)
+	md.imagePresent = false
+	streamErr := errors.New("registry denied")
+	md.imageStreamErr = streamErr
+	_, err := p.StartInstance(context.Background(), "runner-pull-stream-error", "jit")
+	if !errors.Is(err, streamErr) {
+		t.Fatalf("StartInstance() error = %v, want registry stream error", err)
+	}
+	if len(md.createCalls) != 0 {
+		t.Fatalf("container creates = %d, want 0", len(md.createCalls))
 	}
 }
 

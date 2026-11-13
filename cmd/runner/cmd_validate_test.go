@@ -145,6 +145,27 @@ func TestPrepareRunnerImagesOnlyCallsEachUniqueTarget(t *testing.T) {
 	}
 }
 
+func TestRequireDockerAPIVersion(t *testing.T) {
+	for _, tc := range []struct {
+		serverVersion string
+		clientVersion string
+		wantErr       bool
+	}{
+		{serverVersion: "", clientVersion: "1.56", wantErr: true},
+		{serverVersion: "1.48", clientVersion: "1.48", wantErr: true},
+		{serverVersion: "1.49", clientVersion: "1.48", wantErr: true},
+		{serverVersion: "1.49", clientVersion: "1.49", wantErr: false},
+		{serverVersion: "1.56", clientVersion: "1.56", wantErr: false},
+	} {
+		t.Run(tc.serverVersion+"/"+tc.clientVersion, func(t *testing.T) {
+			err := requireDockerAPIVersion(tc.serverVersion, tc.clientVersion)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("requireDockerAPIVersion(%q, %q) error = %v, want error %v", tc.serverVersion, tc.clientVersion, err, tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestValidateGitHubAccessUsesTheConfiguredRunnerGroup(t *testing.T) {
 	ss := validScaleSet("builders-set", 0)
 	ss.RunnerGroup = "builders"

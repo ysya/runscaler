@@ -75,13 +75,19 @@ func runValidate(cmd *cobra.Command, args []string) error {
 				fmt.Printf("  ✗ Docker client for %s: %s\n", socket, err)
 				return fmt.Errorf("validation failed")
 			}
-			if _, err := dockerClient.Ping(ctx, dockerclient.PingOptions{NegotiateAPIVersion: true}); err != nil {
+			ping, err := dockerClient.Ping(ctx, dockerclient.PingOptions{NegotiateAPIVersion: true})
+			if err != nil {
 				_ = dockerClient.Close()
 				fmt.Printf("  ✗ Docker connectivity at %s: %s\n", socket, err)
 				fmt.Println("\n  Possible fixes:")
 				fmt.Println("  1. Ensure Docker is running")
 				fmt.Println("  2. Add your user to the docker group: sudo usermod -aG docker $USER")
 				fmt.Println("  3. Re-login or run: newgrp docker")
+				return fmt.Errorf("validation failed")
+			}
+			if err := requireDockerAPIVersion(ping.APIVersion, dockerClient.ClientVersion()); err != nil {
+				_ = dockerClient.Close()
+				fmt.Printf("  ✗ Docker at %s: %s\n", socket, err)
 				return fmt.Errorf("validation failed")
 			}
 			dockerClients[socket] = dockerClient

@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"strconv"
@@ -26,6 +27,8 @@ import (
 // its own interface for the daemon-maintenance calls it needs.
 type DockerAPI interface {
 	RunnerCleanupAPI
+	ImageInspect(ctx context.Context, image string, options ...dockerclient.ImageInspectOption) (dockerclient.ImageInspectResult, error)
+	ImagePull(ctx context.Context, ref string, options dockerclient.ImagePullOptions) (dockerclient.ImagePullResponse, error)
 	VolumeCreate(ctx context.Context, options dockerclient.VolumeCreateOptions) (dockerclient.VolumeCreateResult, error)
 	ContainerCreate(ctx context.Context, options dockerclient.ContainerCreateOptions) (dockerclient.ContainerCreateResult, error)
 	ContainerStart(ctx context.Context, containerID string, options dockerclient.ContainerStartOptions) (dockerclient.ContainerStartResult, error)
@@ -61,6 +64,13 @@ type DockerProvider struct {
 	readySettle      time.Duration
 	readyPoll        time.Duration
 	captureLogs      bool
+	imageMu          sync.Mutex
+	imagePulls       map[string]*imagePull
+}
+
+type imagePull struct {
+	done chan struct{}
+	err  error
 }
 
 // NewDockerProvider creates a DockerProvider from scale set config.
@@ -84,6 +94,7 @@ func NewDockerProvider(ss config.ScaleSetConfig, client DockerAPI, logger *slog.
 		readySettle:      defaultReadySettle,
 		readyPoll:        500 * time.Millisecond,
 	}
+	p.imagePulls = make(map[string]*imagePull)
 	// Validate() already surfaced parse errors before startup; on error no
 	// cache volumes are mounted rather than a partial set.
 	p.cacheVolumes, _ = ss.Docker.ParseCacheVolumes()
@@ -108,6 +119,9 @@ func parsePlatform(s string) *ocispec.Platform {
 
 // StartInstance creates and starts a new ephemeral Docker container runner.
 func (p *DockerProvider) StartInstance(ctx context.Context, name string, jitConfig string) (string, error) {
+	if err := p.ensureRunnerImage(ctx); err != nil {
+		return "", err
+	}
 	workspace, err := p.prepareWorkspace(ctx, name)
 	if err != nil {
 		return "", err
@@ -217,6 +231,64 @@ func (p *DockerProvider) StartInstance(ctx context.Context, name string, jitConf
 		slog.Int("mounts", len(mounts)),
 	)
 	return c.ID, nil
+}
+
+// ensureRunnerImage repairs a missing local cache entry before Docker creates
+// a runner. The controller normally pulls images during startup, but the
+// daemon cache may be pruned while the controller remains running.
+func (p *DockerProvider) ensureRunnerImage(ctx context.Context) error {
+	if _, err := p.dockerClient.ImageInspect(ctx, p.runnerImage); err == nil {
+		return nil
+	} else if !cerrdefs.IsNotFound(err) {
+		return fmt.Errorf("inspect runner image %s: %w", p.runnerImage, err)
+	}
+
+	p.imageMu.Lock()
+	if p.imagePulls == nil {
+		p.imagePulls = make(map[string]*imagePull)
+	}
+	if pull, ok := p.imagePulls[p.runnerImage]; ok {
+		p.imageMu.Unlock()
+		select {
+		case <-pull.done:
+			return pull.err
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	pull := &imagePull{done: make(chan struct{})}
+	p.imagePulls[p.runnerImage] = pull
+	p.imageMu.Unlock()
+
+	pull.err = p.pullRunnerImage(ctx)
+	close(pull.done)
+	p.imageMu.Lock()
+	delete(p.imagePulls, p.runnerImage)
+	p.imageMu.Unlock()
+	return pull.err
+}
+
+func (p *DockerProvider) pullRunnerImage(ctx context.Context) error {
+	p.logger.Info("Runner image is missing locally, pulling it", slog.String("image", p.runnerImage))
+	pullCtx, cancel := context.WithTimeout(ctx, 30*time.Minute)
+	defer cancel()
+	options := dockerclient.ImagePullOptions{}
+	if p.platform != nil {
+		options.Platforms = []ocispec.Platform{*p.platform}
+	}
+	response, err := p.dockerClient.ImagePull(pullCtx, p.runnerImage, options)
+	if err != nil {
+		return fmt.Errorf("failed to pull runner image %s: %w", p.runnerImage, err)
+	}
+	defer response.Close()
+	if _, err := io.Copy(io.Discard, response); err != nil {
+		return fmt.Errorf("failed to read pull response for runner image %s: %w", p.runnerImage, err)
+	}
+	if _, err := p.dockerClient.ImageInspect(ctx, p.runnerImage); err != nil {
+		return fmt.Errorf("runner image %s is still unavailable after pull: %w", p.runnerImage, err)
+	}
+	p.logger.Info("Runner image pulled successfully", slog.String("image", p.runnerImage))
+	return nil
 }
 
 // RemoveInstance removes a runner and its explicitly owned child resources.

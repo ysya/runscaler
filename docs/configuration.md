@@ -110,7 +110,7 @@ provider = "tart"
 url = "https://github.com/your-org"
 name = "macos-runners"
 token = "ghp_xxx"
-max-runners = 2          # Apple limits 2 concurrent macOS VMs per host
+max-runners = 2          # logical runners; Apple limits 2 concurrent macOS VMs per host
 runner-image = "ghcr.io/cirruslabs/macos-golden-gate-xcode:latest"
 labels = ["self-hosted", "macOS"]
 log-level = "info"
@@ -120,6 +120,7 @@ cpu = 4                  # CPU cores per VM (0 = use image default)
 memory = 8192            # Memory in MB per VM (0 = use image default)
 runner-dir = "/Users/admin/actions-runner"  # default
 pool-size = 2            # pre-warm 2 VMs for instant job pickup (~2s vs ~30s cold boot)
+# runners-per-vm = 1     # logical runners sharing one VM; set max-runners to 2 × this value for both VM slots
 # home = "/Volumes/Data/tart"          # TART_HOME for the tart CLI ("" = ~/.tart)
 # cache-budget = 80                    # cap OCI/IPSW cache to N GB via `tart prune` (0 = disabled)
 # cache-cleanup-interval = "24h"       # how often the prune sweep runs
@@ -458,6 +459,8 @@ labels = ["self-hosted", "macOS"]
 pool-size = 2
 ```
 
+Tart normally gives each logical runner a fresh VM. Set `[tart] runners-per-vm` above 1 to pack multiple logical runners into each VM when the host's two-VM limit is the bottleneck. Each runner gets a separate copied runner directory and work tree, while the VM's CPU, memory and OS-level state remain shared. Set `max-runners` to the number of logical runners you want, and leave `pool-size` at 0 in this mode.
+
 ## CLI Flags
 
 | Flag                | TOML key             | Default                                 | Description                                       |
@@ -485,6 +488,7 @@ pool-size = 2
 | `--tart-memory`     | `[tart] memory`      | `0` (image default)                     | Memory in MB per VM (Tart provider)                |
 | `--tart-runner-dir` | `[tart] runner-dir`  | `/Users/admin/actions-runner`           | Runner install directory inside Tart VM           |
 | `--tart-pool-size`  | `[tart] pool-size`   | `0`                                     | Number of pre-warmed VMs for instant job pickup   |
+| —                   | `[tart] runners-per-vm` | `1`                                  | Logical runners sharing each VM; `pool-size` must be 0 when greater than 1 |
 | `--tart-net-bridged` | `[tart] net-bridged` | `""` (Tart's NAT)                      | Host interface to bridge each VM to               |
 | `--log-level`       | `log-level`          | `info`                                  | Log level (debug/info/warn/error)                 |
 | `--log-format`      | `log-format`         | `text`                                  | Log format (text/json)                            |

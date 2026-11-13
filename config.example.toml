@@ -130,6 +130,7 @@ dind = true
 # cpu = 0        # 0 = use image default
 # memory = 0     # MB, 0 = use image default
 # pool-size = 0  # pre-warmed VMs, 0 = disabled
+# runners-per-vm = 1  # logical runners sharing one VM; pool-size must be 0 when greater than 1
 # home = "/Users/admin/.tart"             # TART_HOME for tart CLI ("" = ~/.tart)
 # cache-cleanup = true                    # periodic `tart prune` of the OCI/IPSW cache (default on)
 # cache-max-age = "168h"                  # prune cache entries not accessed within this window

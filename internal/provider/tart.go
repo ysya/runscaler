@@ -115,6 +115,11 @@ type warmVM struct {
 	release sync.Once          // host slot must be returned exactly once
 }
 
+type runnerAllocation struct {
+	vm  *warmVM
+	dir string
+}
+
 // TartHostCoordinator enforces the Apple host-wide VM limit and assigns MAC
 // slots uniquely across every Tart-backed scale set in this process.
 type TartHostCoordinator struct {
@@ -159,17 +164,18 @@ func (c *TartHostCoordinator) release(idx int) { c.slots <- idx }
 // StartInstance picks a warm VM from the pool (near-instant) instead of
 // cold-starting one (~30s). The pool is refilled in the background.
 type TartProvider struct {
-	baseImage   string
-	runnerDir   string
-	home        string // TART_HOME ("" = tart default ~/.tart)
-	cpu         int    // 0 = use image default
-	memory      int    // MB, 0 = use image default
-	poolSize    int
-	maxRunners  int
-	logger      *slog.Logger
-	cmd         CommandRunner
-	coordinator *TartHostCoordinator
-	retryConfig config.RetryConfig
+	baseImage    string
+	runnerDir    string
+	home         string // TART_HOME ("" = tart default ~/.tart)
+	cpu          int    // 0 = use image default
+	memory       int    // MB, 0 = use image default
+	poolSize     int
+	maxRunners   int
+	runnersPerVM int
+	logger       *slog.Logger
+	cmd          CommandRunner
+	coordinator  *TartHostCoordinator
+	retryConfig  config.RetryConfig
 
 	// Guest network, applied before each runner starts (see TartConfig).
 	mtu        int      // 0 = auto, -1 = off, otherwise a fixed MTU
@@ -193,7 +199,15 @@ type TartProvider struct {
 	// vmSlots is a pool of slot indices limiting total concurrent VMs.
 	// Each slot has a deterministic MAC address to prevent DHCP lease exhaustion.
 	// Apple Silicon enforces a max of 2 concurrent macOS VMs per host.
-	activeVMs sync.Map // instanceID -> *warmVM, for exit watching and cleanup
+	activeVMs     sync.Map // instanceID -> *warmVM, for exit watching and cleanup
+	sharedMu      sync.Mutex
+	sharedVMs     map[string]*sharedVM
+	activeRunners sync.Map // runner name -> runnerAllocation
+}
+
+type sharedVM struct {
+	vm      *warmVM
+	runners map[string]string
 }
 
 // NewTartProviderWithCoordinator creates a TartProvider from scale set config.
@@ -204,21 +218,23 @@ func NewTartProviderWithCoordinator(ss config.ScaleSetConfig, logger *slog.Logge
 		coordinator = NewTartHostCoordinator(config.MaxTartVMsPerHost)
 	}
 	p := &TartProvider{
-		baseImage:   ss.RunnerImage,
-		runnerDir:   ss.Tart.RunnerDir,
-		home:        ss.Tart.Home,
-		cpu:         ss.Tart.CPU,
-		memory:      ss.Tart.Memory,
-		poolSize:    ss.Tart.PoolSize,
-		maxRunners:  ss.MaxRunners,
-		logger:      logger,
-		cmd:         TartCommandRunner(ss.Tart.Home),
-		coordinator: coordinator,
-		retryConfig: ss.EffectiveRetry(),
-		mtu:         ss.Tart.MTU,
-		dns:         ss.Tart.DNS,
-		netBridged:  ss.Tart.NetBridged,
-		githubHost:  registrationHost(ss.RegistrationURL),
+		baseImage:    ss.RunnerImage,
+		runnerDir:    ss.Tart.RunnerDir,
+		home:         ss.Tart.Home,
+		cpu:          ss.Tart.CPU,
+		memory:       ss.Tart.Memory,
+		poolSize:     ss.Tart.PoolSize,
+		maxRunners:   ss.MaxRunners,
+		runnersPerVM: max(1, ss.Tart.RunnersPerVM),
+		logger:       logger,
+		cmd:          TartCommandRunner(ss.Tart.Home),
+		coordinator:  coordinator,
+		retryConfig:  ss.EffectiveRetry(),
+		mtu:          ss.Tart.MTU,
+		dns:          ss.Tart.DNS,
+		netBridged:   ss.Tart.NetBridged,
+		githubHost:   registrationHost(ss.RegistrationURL),
+		sharedVMs:    make(map[string]*sharedVM),
 	}
 	return p
 }
@@ -515,6 +531,9 @@ func (p *TartProvider) destroyVM(vm *warmVM) {
 // If a warm pool is available, picks a pre-booted VM (near-instant).
 // Otherwise, cold-starts a new VM (~30s).
 func (p *TartProvider) StartInstance(ctx context.Context, name string, jitConfig string) (string, error) {
+	if p.runnersPerVM > 1 {
+		return p.startSharedRunner(ctx, name, jitConfig)
+	}
 	// Try to get a warm VM from the pool.
 	// When pool is enabled, we MUST wait for it rather than cold-starting,
 	// because pool VMs already hold VM slots — cold-starting would deadlock
@@ -543,7 +562,7 @@ func (p *TartProvider) StartInstance(ctx context.Context, name string, jitConfig
 				slog.String("vmName", vm.name),
 				slog.String("runner", name),
 			)
-			if err := p.runRunner(ctx, vm.name, jitConfig); err != nil {
+			if err := p.runRunner(ctx, vm.name, p.runnerDir, jitConfig); err != nil {
 				p.destroyVM(vm)
 				return "", fmt.Errorf("failed to start runner: %w", err)
 			}
@@ -559,7 +578,7 @@ func (p *TartProvider) StartInstance(ctx context.Context, name string, jitConfig
 		return "", err
 	}
 
-	if err := p.runRunner(ctx, vm.name, jitConfig); err != nil {
+	if err := p.runRunner(ctx, vm.name, p.runnerDir, jitConfig); err != nil {
 		p.destroyVM(vm)
 		return "", fmt.Errorf("failed to start runner: %w", err)
 	}
@@ -572,30 +591,112 @@ func (p *TartProvider) StartInstance(ctx context.Context, name string, jitConfig
 	return name, nil
 }
 
+func (p *TartProvider) startSharedRunner(ctx context.Context, name, jitConfig string) (string, error) {
+	p.sharedMu.Lock()
+	defer p.sharedMu.Unlock()
+	if p.sharedVMs == nil {
+		p.sharedVMs = make(map[string]*sharedVM)
+	}
+	var shared *sharedVM
+	for _, candidate := range p.sharedVMs {
+		if len(candidate.runners) < p.runnersPerVM {
+			shared = candidate
+			break
+		}
+	}
+	created := false
+	if shared == nil {
+		vm, err := p.bootVM(ctx, "runner-vm-"+name)
+		if err != nil {
+			return "", err
+		}
+		shared = &sharedVM{vm: vm, runners: make(map[string]string)}
+		p.sharedVMs[vm.name] = shared
+		created = true
+	}
+	dir := "/tmp/runscaler-runners/" + name
+	if err := p.prepareRunnerDir(ctx, shared.vm.name, dir); err != nil {
+		if created {
+			delete(p.sharedVMs, shared.vm.name)
+			p.destroyVM(shared.vm)
+		}
+		return "", err
+	}
+	if err := p.runRunner(ctx, shared.vm.name, dir, jitConfig); err != nil {
+		_ = p.cleanupRunner(ctx, shared.vm.name, dir)
+		if created {
+			delete(p.sharedVMs, shared.vm.name)
+			p.destroyVM(shared.vm)
+		}
+		return "", err
+	}
+	shared.runners[name] = dir
+	p.activeRunners.Store(name, runnerAllocation{vm: shared.vm, dir: dir})
+	return name, nil
+}
+
+func (p *TartProvider) prepareRunnerDir(ctx context.Context, vmName, dir string) error {
+	cmd := fmt.Sprintf("mkdir -p %s && cp -R %s/. %s/", shell.Quote(dir), shell.Quote(p.runnerDir), shell.Quote(dir))
+	if _, err := p.cmd.Run(ctx, "tart", "exec", vmName, "sh", "-c", cmd); err != nil {
+		return fmt.Errorf("failed to prepare runner directory %s on %s: %w", dir, vmName, err)
+	}
+	return nil
+}
+
+func (p *TartProvider) cleanupRunner(ctx context.Context, vmName, dir string) error {
+	cmd := fmt.Sprintf("pkill -TERM -f %s/bin/Runner.Listener 2>/dev/null || true; rm -rf %s", shell.Quote(dir), shell.Quote(dir))
+	_, err := p.cmd.Run(ctx, "tart", "exec", vmName, "sh", "-c", cmd)
+	return err
+}
+
 // RemoveInstance stops and deletes a Tart VM, releasing its VM slot.
 func (p *TartProvider) RemoveInstance(ctx context.Context, instanceID string) error {
-	_, stopErr := p.cmd.Run(ctx, "tart", "stop", instanceID)
-	if stopErr != nil {
-		p.logger.Warn("Failed to stop VM (may already be stopped)", slog.String("name", instanceID), slog.Any("error", stopErr))
+	if value, ok := p.activeRunners.LoadAndDelete(instanceID); ok {
+		allocation := value.(runnerAllocation)
+		p.sharedMu.Lock()
+		for vmName, shared := range p.sharedVMs {
+			if shared.vm != allocation.vm {
+				continue
+			}
+			delete(shared.runners, instanceID)
+			_ = p.cleanupRunner(ctx, shared.vm.name, allocation.dir)
+			if len(shared.runners) == 0 {
+				delete(p.sharedVMs, vmName)
+				p.sharedMu.Unlock()
+				return p.removeVM(ctx, shared.vm)
+			}
+			p.sharedMu.Unlock()
+			return nil
+		}
+		p.sharedMu.Unlock()
+		return nil
 	}
-	_, deleteErr := p.cmd.Run(ctx, "tart", "delete", instanceID)
+	return p.removeVM(ctx, &warmVM{name: instanceID})
+}
+
+func (p *TartProvider) removeVM(ctx context.Context, vm *warmVM) error {
+	_, stopErr := p.cmd.Run(ctx, "tart", "stop", vm.name)
+	if stopErr != nil {
+		p.logger.Warn("Failed to stop VM (may already be stopped)", slog.String("name", vm.name), slog.Any("error", stopErr))
+	}
+	_, deleteErr := p.cmd.Run(ctx, "tart", "delete", vm.name)
 	if tartInstanceAbsent(deleteErr) {
 		deleteErr = nil
 	}
-	value, tracked := p.activeVMs.Load(instanceID)
+	value, tracked := p.activeVMs.Load(vm.name)
 	knownStopped := stopErr == nil || deleteErr == nil
 	if tracked {
 		knownStopped = knownStopped || vmExited(value.(*warmVM))
 	}
 	if tracked && knownStopped {
-		if value, ok := p.activeVMs.LoadAndDelete(instanceID); ok {
+		if value, ok := p.activeVMs.LoadAndDelete(vm.name); ok {
 			vm := value.(*warmVM)
 			vm.cancel()
 			p.releaseVM(vm)
 		}
 	}
 	if deleteErr != nil {
-		return fmt.Errorf("failed to delete VM %s: %w", instanceID, deleteErr)
+		return fmt.Errorf("failed to delete VM %s: %w", vm.name, deleteErr)
 	}
 	return nil
 }
@@ -617,6 +718,21 @@ func tartInstanceAbsent(err error) bool {
 }
 
 func (p *TartProvider) WaitInstance(ctx context.Context, instanceID string) error {
+	if value, ok := p.activeRunners.Load(instanceID); ok {
+		allocation := value.(runnerAllocation)
+		for {
+			alive, err := p.runnerAlive(ctx, allocation.vm.name, allocation.dir)
+			if err != nil {
+				return err
+			}
+			if !alive {
+				return nil
+			}
+			if err := backoff.Sleep(ctx, cmp.Or(p.runnerPoll, defaultRunnerPoll)); err != nil {
+				return err
+			}
+		}
+	}
 	value, ok := p.activeVMs.Load(instanceID)
 	if !ok {
 		return fmt.Errorf("unknown Tart VM %s", instanceID)
@@ -712,10 +828,14 @@ func tartListNames(out []byte) (map[string]bool, error) {
 // its value is safely held in a shell variable that the background subshell
 // inherits.
 func runnerStartCmd(runScript, jitPath string) string {
+	return runnerStartCmdTo(runScript, jitPath, "/tmp/runner.log")
+}
+
+func runnerStartCmdTo(runScript, jitPath, logPath string) string {
 	return fmt.Sprintf(
 		"JIT=$(cat %[2]s); rm -f %[2]s; "+
-			"ACTIONS_RUNNER_INPUT_JITCONFIG=\"$JIT\" nohup %[1]s > /tmp/runner.log 2>&1 &",
-		shell.Quote(runScript), shell.Quote(jitPath),
+			"ACTIONS_RUNNER_INPUT_JITCONFIG=\"$JIT\" nohup %[1]s > %[3]s 2>&1 &",
+		shell.Quote(runScript), shell.Quote(jitPath), shell.Quote(logPath),
 	)
 }
 
@@ -728,13 +848,13 @@ func writeJITCmd(path, jitConfig string) string {
 }
 
 // Uses Virtio gRPC (Guest Agent) instead of SSH — no network dependency.
-func (p *TartProvider) runRunner(ctx context.Context, vmName, jitConfig string) error {
+func (p *TartProvider) runRunner(ctx context.Context, vmName, runnerDir, jitConfig string) error {
 	// Before the runner first dials GitHub: a pooled VM may have booted while
 	// the host's VPN was in a different state.
 	p.configureGuestNetwork(ctx, vmName)
 
 	// Verify runner binary exists before attempting to start
-	runScript := p.runnerDir + "/run.sh"
+	runScript := runnerDir + "/run.sh"
 	if _, err := p.cmd.Run(ctx, "tart", "exec", vmName, "test", "-x", runScript); err != nil {
 		return fmt.Errorf("runner not found at %s on %s: %w", runScript, vmName, err)
 	}
@@ -746,14 +866,14 @@ func (p *TartProvider) runRunner(ctx context.Context, vmName, jitConfig string) 
 		return fmt.Errorf("failed to write JIT config on %s: %w", vmName, err)
 	}
 
-	if _, err := p.cmd.Run(ctx, "tart", "exec", vmName, "sh", "-c", runnerStartCmd(runScript, jitConfigPath)); err != nil {
+	if _, err := p.cmd.Run(ctx, "tart", "exec", vmName, "sh", "-c", runnerStartCmdTo(runScript, jitConfigPath, runnerLogPath(p.runnerDir, runnerDir))); err != nil {
 		return fmt.Errorf("failed to start runner on %s: %w", vmName, err)
 	}
 
 	// Hand the VM over only once the runner holds a session with GitHub. A
 	// runner that dies or never connects leaves the VM running, so nothing
 	// else would notice while its job stays queued.
-	return p.waitRunnerListening(ctx, vmName)
+	return p.waitRunnerListening(ctx, vmName, runnerDir)
 }
 
 // defaultRunnerPoll spaces the readiness checks while a runner starts. Each
@@ -763,7 +883,7 @@ const defaultRunnerPoll = 2 * time.Second
 // waitRunnerListening polls until the runner prints "Listening for Jobs",
 // then checks that it survives its first poll for messages. Errors carry the
 // runner's own explanation, since the VM is deleted right after.
-func (p *TartProvider) waitRunnerListening(ctx context.Context, vmName string) error {
+func (p *TartProvider) waitRunnerListening(ctx context.Context, vmName, runnerDir string) error {
 	poll := cmp.Or(p.runnerPoll, defaultRunnerPoll)
 	timeout := cmp.Or(p.runnerListenTimeout, config.DefaultReadyTimeout)
 	deadline := time.Now().Add(timeout)
@@ -771,42 +891,46 @@ func (p *TartProvider) waitRunnerListening(ctx context.Context, vmName string) e
 		if err := backoff.Sleep(ctx, poll); err != nil {
 			return err
 		}
-		alive, err := p.runnerAlive(ctx, vmName)
+		alive, err := p.runnerAlive(ctx, vmName, runnerDir)
 		if err != nil {
 			return fmt.Errorf("runner readiness check failed on %s: %w", vmName, err)
 		}
 		if !alive {
 			// Guest-agent startup and Runner.Listener creation are asynchronous.
 			// A missing process before any log exists is not evidence of failure.
-			if log := p.runnerLogTail(ctx, vmName); strings.TrimSpace(log) != "" {
+			if log := p.runnerLogTail(ctx, vmName, runnerLogPath(p.runnerDir, runnerDir)); strings.TrimSpace(log) != "" {
 				return fmt.Errorf("runner process exited on %s before connecting to GitHub; runner log:\n%s", vmName, log)
 			}
 		}
-		if _, err := p.cmd.Run(ctx, "tart", "exec", vmName, "grep", "-q", readyMarker, "/tmp/runner.log"); err == nil {
+		if _, err := p.cmd.Run(ctx, "tart", "exec", vmName, "grep", "-q", readyMarker, runnerLogPath(p.runnerDir, runnerDir)); err == nil {
 			break
 		}
 		if time.Now().After(deadline) {
 			return fmt.Errorf("runner on %s did not connect to GitHub within %s; newest runner diagnostics:\n%s",
-				vmName, timeout, p.runnerDiagTail(ctx, vmName))
+				vmName, timeout, p.runnerDiagTail(ctx, vmName, runnerDir))
 		}
 	}
 
 	if err := backoff.Sleep(ctx, cmp.Or(p.runnerSettle, defaultReadySettle)); err != nil {
 		return err
 	}
-	alive, err := p.runnerAlive(ctx, vmName)
+	alive, err := p.runnerAlive(ctx, vmName, runnerDir)
 	if err != nil {
 		return fmt.Errorf("runner readiness check failed on %s after connecting to GitHub: %w", vmName, err)
 	}
 	if !alive {
 		return fmt.Errorf("runner process exited on %s right after connecting to GitHub; runner log:\n%s",
-			vmName, p.runnerLogTail(ctx, vmName))
+			vmName, p.runnerLogTail(ctx, vmName, runnerLogPath(p.runnerDir, runnerDir)))
 	}
 	return nil
 }
 
-func (p *TartProvider) runnerAlive(ctx context.Context, vmName string) (bool, error) {
-	_, err := p.cmd.Run(ctx, "tart", "exec", vmName, "pgrep", "-f", "Runner.Listener")
+func (p *TartProvider) runnerAlive(ctx context.Context, vmName, runnerDir string) (bool, error) {
+	pattern := "Runner.Listener"
+	if runnerDir != p.runnerDir {
+		pattern = runnerDir + "/bin/Runner.Listener"
+	}
+	_, err := p.cmd.Run(ctx, "tart", "exec", vmName, "pgrep", "-f", pattern)
 	if err == nil {
 		return true, nil
 	}
@@ -829,15 +953,22 @@ func (p *TartProvider) runnerAlive(ctx context.Context, vmName string) (bool, er
 	return false, err
 }
 
-func (p *TartProvider) runnerLogTail(ctx context.Context, vmName string) string {
-	out, _ := p.cmd.Run(ctx, "tart", "exec", vmName, "tail", "-20", "/tmp/runner.log")
+func (p *TartProvider) runnerLogTail(ctx context.Context, vmName, logPath string) string {
+	out, _ := p.cmd.Run(ctx, "tart", "exec", vmName, "tail", "-20", logPath)
 	return strings.TrimSpace(string(out))
+}
+
+func runnerLogPath(baseDir, runnerDir string) string {
+	if baseDir == runnerDir {
+		return "/tmp/runner.log"
+	}
+	return runnerDir + "/runner.log"
 }
 
 // runnerDiagTail returns the end of the newest Runner_*.log, where the
 // runner records the connection failures it never prints to its stdout.
-func (p *TartProvider) runnerDiagTail(ctx context.Context, vmName string) string {
-	dir := p.runnerDir + "/_diag"
+func (p *TartProvider) runnerDiagTail(ctx context.Context, vmName, runnerDir string) string {
+	dir := runnerDir + "/_diag"
 	out, err := p.cmd.Run(ctx, "tart", "exec", vmName, "ls", "-t", dir)
 	if err != nil {
 		return fmt.Sprintf("(could not list %s: %v)", dir, err)

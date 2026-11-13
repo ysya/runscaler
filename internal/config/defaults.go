@@ -124,6 +124,8 @@ const (
 	DefaultReadyTimeout = 5 * time.Minute
 )
 
+const DefaultTartRunnersPerVM = 1
+
 // MaxTartVMsPerHost is Apple's limit on concurrently running macOS VMs per
 // host. It is a hard limit, not a default: Tart validation, the warm pool
 // and the host-wide VM slots all enforce it.

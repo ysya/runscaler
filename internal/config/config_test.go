@@ -433,6 +433,27 @@ func TestTartDefaults(t *testing.T) {
 	}
 }
 
+func TestTartRunnersPerVM(t *testing.T) {
+	c := validScaleSetConfig()
+	validTart(&c)
+	c.MaxRunners = 4
+	c.Tart.RunnersPerVM = 2
+	if err := c.Validate(); err != nil {
+		t.Fatalf("two runners per VM should allow four logical runners: %v", err)
+	}
+
+	c.MaxRunners = 5
+	if err := c.Validate(); err == nil || !contains(err.Error(), "max-runners must be <= 4") {
+		t.Fatalf("five logical runners unexpectedly passed: %v", err)
+	}
+
+	c.MaxRunners = 2
+	c.Tart.PoolSize = 1
+	if err := c.Validate(); err == nil || !contains(err.Error(), "pool-size must be 0") {
+		t.Fatalf("warm pool unexpectedly passed in shared-VM mode: %v", err)
+	}
+}
+
 func TestNewSystemInfo(t *testing.T) {
 	info := NewSystemInfo(42, "1.0.0")
 	if info.ScaleSetID != 42 {

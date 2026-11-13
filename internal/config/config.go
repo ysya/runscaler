@@ -378,11 +378,12 @@ func (dc DockerConfig) ParseCacheVolumes() ([]CacheVolumeMount, error) {
 
 // TartConfig holds Tart VM-specific provider settings.
 type TartConfig struct {
-	Home      string `mapstructure:"home"`       // TART_HOME for tart CLI ("" = default ~/.tart)
-	RunnerDir string `mapstructure:"runner-dir"` // Runner binary path in VM
-	CPU       int    `mapstructure:"cpu"`        // Number of CPU cores (0 = use image default)
-	Memory    int    `mapstructure:"memory"`     // Memory in MB (0 = use image default)
-	PoolSize  int    `mapstructure:"pool-size"`  // Pre-warmed VM count (0 = disabled)
+	Home         string `mapstructure:"home"`           // TART_HOME for tart CLI ("" = default ~/.tart)
+	RunnerDir    string `mapstructure:"runner-dir"`     // Runner binary path in VM
+	CPU          int    `mapstructure:"cpu"`            // Number of CPU cores (0 = use image default)
+	Memory       int    `mapstructure:"memory"`         // Memory in MB (0 = use image default)
+	PoolSize     int    `mapstructure:"pool-size"`      // Pre-warmed VM count (0 = disabled)
+	RunnersPerVM int    `mapstructure:"runners-per-vm"` // Logical runners sharing one VM (default 1)
 
 	// MTU is applied to the guest's network interface before the runner
 	// starts. A host whose route to GitHub runs through a tunnel (Cloudflare
@@ -464,6 +465,9 @@ func (ss *ScaleSetConfig) applyDefaults() {
 	}
 	if ss.Provider == "tart" && ss.Tart.RunnerDir == "" {
 		ss.Tart.RunnerDir = DefaultTartRunnerDir
+	}
+	if ss.Provider == "tart" && ss.Tart.RunnersPerVM == 0 {
+		ss.Tart.RunnersPerVM = DefaultTartRunnersPerVM
 	}
 }
 
@@ -631,11 +635,21 @@ func (ss *ScaleSetConfig) ValidationErrors() []error {
 			}
 		}
 	case "tart":
-		if ss.MaxRunners > MaxTartVMsPerHost {
-			add(fmt.Errorf("max-runners must be <= %d for the Tart provider (Apple host limit)", MaxTartVMsPerHost))
+		runnersPerVM := ss.Tart.RunnersPerVM
+		if runnersPerVM == 0 {
+			runnersPerVM = DefaultTartRunnersPerVM
+		}
+		if runnersPerVM < 1 {
+			add(fmt.Errorf("tart runners-per-vm must be >= 1"))
+		}
+		if ss.MaxRunners > MaxTartVMsPerHost*runnersPerVM {
+			add(fmt.Errorf("max-runners must be <= %d for the Tart provider (two macOS VMs × runners-per-vm)", MaxTartVMsPerHost*runnersPerVM))
 		}
 		if ss.Tart.PoolSize < 0 || ss.Tart.PoolSize > ss.MaxRunners {
 			add(fmt.Errorf("tart pool-size must be between 0 and max-runners"))
+		}
+		if runnersPerVM > 1 && ss.Tart.PoolSize != 0 {
+			add(fmt.Errorf("tart pool-size must be 0 when runners-per-vm is greater than 1"))
 		}
 		// Below 1280 the guest loses IPv6; above 1500 the NAT cannot carry it.
 		if ss.Tart.MTU != 0 && ss.Tart.MTU != -1 && (ss.Tart.MTU < 1280 || ss.Tart.MTU > 1500) {

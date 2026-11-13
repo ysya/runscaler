@@ -167,6 +167,46 @@ func TestTartProvider_StartInstance_Success(t *testing.T) {
 	}
 }
 
+func TestTartProvider_SharedVMKeepsVMUntilLastRunner(t *testing.T) {
+	cmd := &mockCommandRunner{results: map[string]cmdResult{
+		"tart clone":  {},
+		"tart run":    {},
+		"tart exec":   {},
+		"tart stop":   {},
+		"tart delete": {},
+	}}
+	p := newTestTartProvider(cmd)
+	p.runnersPerVM = 2
+
+	first, err := p.StartInstance(context.Background(), "runner-one", "jit-one")
+	if err != nil {
+		t.Fatalf("first StartInstance() error: %v", err)
+	}
+	second, err := p.StartInstance(context.Background(), "runner-two", "jit-two")
+	if err != nil {
+		t.Fatalf("second StartInstance() error: %v", err)
+	}
+	if first != "runner-one" || second != "runner-two" {
+		t.Fatalf("instance IDs = %q, %q, want runner names", first, second)
+	}
+	if got := cmd.callCount("tart clone"); got != 1 {
+		t.Fatalf("clone count = %d, want one shared VM", got)
+	}
+
+	if err := p.RemoveInstance(context.Background(), first); err != nil {
+		t.Fatalf("first RemoveInstance() error: %v", err)
+	}
+	if got := cmd.callCount("tart delete"); got != 0 {
+		t.Fatalf("delete count after first runner = %d, want 0", got)
+	}
+	if err := p.RemoveInstance(context.Background(), second); err != nil {
+		t.Fatalf("second RemoveInstance() error: %v", err)
+	}
+	if got := cmd.callCount("tart delete"); got != 1 {
+		t.Fatalf("delete count after last runner = %d, want 1", got)
+	}
+}
+
 // runnerDiagListing is `ls -t` of the runner's _diag directory after a job:
 // newest first, with a Worker log ahead of the Runner log.
 const runnerDiagListing = "Worker_20261007-230510-utc.log\nRunner_20261007-230024-utc.log\n"
@@ -237,7 +277,7 @@ func TestTartProvider_RunnerAliveSurfacesTartTransportError(t *testing.T) {
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	p := &TartProvider{cmd: execCommandRunner{}}
 
-	alive, err := p.runnerAlive(context.Background(), "runner-abc")
+	alive, err := p.runnerAlive(context.Background(), "runner-abc", p.runnerDir)
 	if alive {
 		t.Fatal("runnerAlive() reported a Tart transport error as alive")
 	}
@@ -256,7 +296,7 @@ func TestTartProvider_RunnerAliveMalformedExitStatusDoesNotPanic(t *testing.T) {
 	}
 	p := newTestTartProvider(cmd)
 
-	alive, err := p.runnerAlive(context.Background(), "runner-abc")
+	alive, err := p.runnerAlive(context.Background(), "runner-abc", p.runnerDir)
 	if alive {
 		t.Fatal("runnerAlive() reported a malformed-status process as alive")
 	}

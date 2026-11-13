@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+
+: "${ACTIONS_RUNNER_INPUT_JITCONFIG:?runscaler must provide the JIT configuration}"
+exec /opt/actions-runner/run.sh

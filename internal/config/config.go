@@ -99,8 +99,16 @@ type ScaleSetConfig struct {
 	// Docker provider settings
 	Docker DockerConfig `mapstructure:"docker"`
 
+	AppleContainer AppleContainerConfig `mapstructure:"apple-container"`
+
 	// Tart VM provider settings
 	Tart TartConfig `mapstructure:"tart"`
+}
+
+// AppleContainerConfig bounds each independently booted Linux job VM.
+type AppleContainerConfig struct {
+	CPU    int `mapstructure:"cpu"`
+	Memory int `mapstructure:"memory"`
 }
 
 // DockerConfig holds Docker-specific provider settings.
@@ -649,8 +657,12 @@ func (ss *ScaleSetConfig) ValidationErrors() []error {
 		if b := ss.Tart.NetBridged; b != "" && (strings.HasPrefix(b, "-") || strings.ContainsAny(b, " \t\n=")) {
 			add(fmt.Errorf("tart net-bridged %q is not a host interface name", b))
 		}
+	case "apple-container":
+		if ss.AppleContainer.CPU < 1 || ss.AppleContainer.Memory < 512 {
+			add(fmt.Errorf("apple-container requires positive CPU and at least 512 MB memory"))
+		}
 	default:
-		add(fmt.Errorf("unsupported provider %q (must be %q or \"tart\")", ss.Provider, DefaultProvider))
+		add(fmt.Errorf("unsupported provider %q (must be %q, \"apple-container\" or \"tart\")", ss.Provider, DefaultProvider))
 	}
 
 	return problems

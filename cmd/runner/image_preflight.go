@@ -56,7 +56,7 @@ func prepareRunnerImages(ctx context.Context, scaleSets []config.ScaleSetConfig,
 	type dockerImage struct{ socket, image, platform string }
 	dockerDone := make(map[dockerImage]bool)
 	for _, ss := range scaleSets {
-		if ss.IsTart() {
+		if ss.Provider != config.DefaultProvider {
 			continue
 		}
 		key := dockerImage{ss.Docker.Socket, ss.RunnerImage, ss.Docker.Platform}

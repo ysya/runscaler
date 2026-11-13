@@ -319,7 +319,7 @@ func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) e
 	for _, ss := range scaleSets {
 		if ss.IsTart() {
 			needsTart = true
-		} else {
+		} else if ss.Provider == config.DefaultProvider {
 			needsDocker = true
 		}
 	}
@@ -334,7 +334,7 @@ func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) e
 	}()
 	if needsDocker {
 		for _, ss := range scaleSets {
-			if ss.IsTart() || dockerClients[ss.Docker.Socket] != nil {
+			if ss.Provider != config.DefaultProvider || dockerClients[ss.Docker.Socket] != nil {
 				continue
 			}
 			client, err := dockerclient.New(
@@ -406,11 +406,21 @@ func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) e
 	for _, ss := range scaleSets {
 		if ss.IsTart() {
 			tartHomes = append(tartHomes, ss.Tart.Home)
-		} else if ss.Docker.WorkspaceRoot != "" {
+		} else if ss.Provider == config.DefaultProvider && ss.Docker.WorkspaceRoot != "" {
 			workspaceRoots = append(workspaceRoots, ss.Docker.WorkspaceRoot)
 		}
 	}
 	reconcileOrphans(ctx, dockerClients, tartHomes, logger, workspaceRoots...)
+	for _, ss := range scaleSets {
+		if ss.Provider == "apple-container" {
+			if _, err := exec.LookPath("container"); err != nil {
+				return err
+			}
+			if err := provider.NewAppleContainerProvider(ss).Reconcile(ctx); err != nil {
+				return err
+			}
+		}
+	}
 
 	// Keep the local Results receiver available until every scale set finishes
 	// draining. Its separate listener has no streaming write timeout.
@@ -629,6 +639,8 @@ func runScaleSetController(ctx context.Context, drain <-chan struct{}, drainTime
 		tb := provider.NewTartProviderWithCoordinator(ss, logger, tartCoordinator)
 		tb.StartPool(ctx) // starts warm pool if tart-pool-size > 0
 		instanceProvider = tb
+	} else if ss.Provider == "apple-container" {
+		instanceProvider = provider.NewAppleContainerProvider(ss)
 	} else {
 		dp := provider.NewDockerProviderWithCoordinator(ss, dockerClient, logger, dockerImagePullCoordinator)
 		dp.EnableDiagnosticLogs(captureLogs && diagnosticStore != nil)
@@ -799,7 +811,7 @@ func watchScaleSetDrain(listenCtx context.Context, drain <-chan struct{}, timeou
 func groupDockerScaleSets(scaleSets []config.ScaleSetConfig) map[string][]config.ScaleSetConfig {
 	grouped := make(map[string][]config.ScaleSetConfig)
 	for _, ss := range scaleSets {
-		if !ss.IsTart() {
+		if ss.Provider == config.DefaultProvider {
 			grouped[ss.Docker.Socket] = append(grouped[ss.Docker.Socket], ss)
 		}
 	}

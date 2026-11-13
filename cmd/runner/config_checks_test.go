@@ -93,3 +93,13 @@ func TestCheckScaleSetsNativeActionsCacheRequiresMatchingReceiver(t *testing.T) 
 		})
 	}
 }
+
+func TestGroupDockerScaleSetsExcludesAppleContainer(t *testing.T) {
+	docker := validScaleSet("docker", 0)
+	apple := validScaleSet("apple", 0)
+	apple.Provider = "apple-container"
+	got := groupDockerScaleSets([]config.ScaleSetConfig{docker, apple})
+	if len(got) != 1 || len(got[config.DefaultDockerSocket]) != 1 || got[config.DefaultDockerSocket][0].ScaleSetName != "docker" {
+		t.Fatalf("groupDockerScaleSets() = %#v, want only the Docker scale set", got)
+	}
+}

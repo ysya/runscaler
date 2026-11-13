@@ -11,6 +11,13 @@ Auto-scale GitHub Actions self-hosted runners as Docker containers or macOS VMs.
 
 Runners are **ephemeral** — each container/VM handles exactly one job and is removed upon completion. No Kubernetes required.
 
+**Pre-1.0 stability:** Runscaler is under active development. Minor releases may
+change or remove commands, configuration options, runner images, and cache
+formats. Patch releases aim to preserve compatibility. Read the
+[release notes](https://github.com/ysya/runscaler/releases) and
+[upgrade requirements](#upgrade-requirements) before upgrading, and back up
+configuration and data you need to keep.
+
 ## Table of Contents
 
 - [How It Works](#how-it-works)

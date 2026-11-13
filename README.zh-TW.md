@@ -13,6 +13,11 @@
 
 runner 採用**短生命週期**模式 — 每個容器／VM 只處理一個工作，完成後便會移除。不需要 Kubernetes。
 
+**1.0 前的相容性：** Runscaler 仍在持續開發。次版本可能變更或移除指令、設定選項、
+runner 映像檔與快取格式；修訂版本則以維持相容性為目標。升級前請閱讀
+[發版說明](https://github.com/ysya/runscaler/releases)與[升級前準備](#upgrade-requirements)，
+並備份需要保留的設定與資料。
+
 <a id="table-of-contents"></a>
 
 ## 目錄

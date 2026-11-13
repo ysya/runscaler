@@ -2,10 +2,6 @@
 FROM ghcr.io/ysya/actions-runner-local-cache@sha256:ce94d981fbd73f15788bf98af0055d8ccea29a50932484e50c962c67cd45d577
 
 USER root
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends gh \
-    && rm -rf /var/lib/apt/lists/* \
-    && gh --version
 COPY --chown=1001:123 --chmod=0644 worker/Runner.Worker.dll /home/runner/bin/Runner.Worker.dll
 COPY --chmod=0755 check-fail-closed.sh /usr/local/bin/runner-local-cache-check
 RUN mkdir -p /usr/local/share/runscaler \

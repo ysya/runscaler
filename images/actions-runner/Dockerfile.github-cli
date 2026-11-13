@@ -1,0 +1,10 @@
+# Preserve the verified native v2 cache Worker and its immutable image identity.
+FROM ghcr.io/ysya/actions-runner-local-cache@sha256:0fd6bdb1342bd3cdb63e0d3b4ee4da7a4fae68f7b61e39bd1153d8181f76e2a5
+
+USER root
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends gh \
+    && rm -rf /var/lib/apt/lists/*
+USER runner
+RUN gh --version \
+    && CUSTOM_ACTIONS_RESULTS_URL=http://offline-cache.invalid:9/ /usr/local/bin/runner-local-cache-check

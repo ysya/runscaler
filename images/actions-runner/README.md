@@ -108,3 +108,12 @@ the parent image. Use only the inspected immutable image digest with native v2
 mode; the earlier image does not enforce local-only legacy cache routing.
 Review the private signed-job acceptance record for the verified digest and
 scoped client results before rollout.
+
+## GitHub CLI overlay
+
+`Dockerfile.github-cli` adds the official GitHub `gh` package to the verified native v2
+fail-closed image without rebuilding its Worker. The
+[GitHub CLI image workflow](../../.github/workflows/runner-image-github-cli.yml)
+builds and checks the image on any manual dispatch. Dispatch from `main` with
+`publish=true` to publish an immutable digest and attestation. Pin the inspected
+digest in the Runscaler scale set configuration.

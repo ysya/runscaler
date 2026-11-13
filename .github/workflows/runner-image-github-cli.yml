@@ -12,8 +12,8 @@ permissions:
   contents: read
 
 env:
-  IMAGE: ghcr.io/${{ github.repository_owner }}/actions-runner-local-cache
-  TAG: gh-cli-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+  IMAGE: ghcr.io/${{ github.repository_owner }}/actions-runner
+  TAG: cache-v2-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}-amd64
   DOCKER_BUILD_RECORD_UPLOAD: 'false'
 
 jobs:
@@ -39,6 +39,12 @@ jobs:
           docker run --rm --entrypoint /usr/local/bin/runner-local-cache-check \
             -e CUSTOM_ACTIONS_RESULTS_URL=http://offline-cache.invalid:9/ \
             local-runner-github-cli:check
+      - name: Check standard runner startup without local cache
+        run: |
+          set -euo pipefail
+          docker run --rm --network none --entrypoint /bin/bash local-runner-github-cli:check -c \
+            'test -z "${CUSTOM_ACTIONS_RESULTS_URL:-}" && /home/runner/run.sh --version' \
+            | grep -qx '2.338.2'
 
   publish:
     needs: validate

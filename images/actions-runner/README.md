@@ -112,8 +112,15 @@ scoped client results before rollout.
 ## GitHub CLI overlay
 
 `Dockerfile.github-cli` adds the official GitHub `gh` package to the verified native v2
-fail-closed image without rebuilding its Worker. The
-[GitHub CLI image workflow](../../.github/workflows/runner-image-github-cli.yml)
+fail-closed image without rebuilding its Worker. The same image uses GitHub's
+cache service when Runscaler does not supply a local endpoint, and the verified
+local v2 receiver when `native-actions-cache = true` supplies one. Local mode
+does not fall back to GitHub caching if its receiver fails. This combined image
+is verified for Linux amd64 only; `actions-runner:latest` continues to provide
+the standard multi-architecture image until the arm64 local-cache gate passes.
+The [GitHub CLI image workflow](../../.github/workflows/runner-image-github-cli.yml)
 builds and checks the image on any manual dispatch. Dispatch from `main` with
-`publish=true` to publish an immutable digest and attestation. Pin the inspected
-digest in the Runscaler scale set configuration.
+`publish=true` to publish an immutable `actions-runner:cache-v2-*` tag, digest,
+and attestation. Pin the inspected digest in the Runscaler scale set
+configuration. The old `actions-runner-local-cache` package remains the pinned
+build input for this overlay until its reviewed base and Worker are migrated.

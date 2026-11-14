@@ -1,6 +1,7 @@
 package actionscache
 
 import (
+	"cmp"
 	"context"
 	"crypto/rsa"
 	"encoding/base64"
@@ -10,7 +11,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/url"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -49,8 +50,8 @@ func (p Principal) CanRead(scope string) bool {
 }
 
 func (p Principal) ReadableScopes() []string {
-	grants := append([]Grant(nil), p.Grants...)
-	sort.SliceStable(grants, func(i, j int) bool { return grants[i].Permission > grants[j].Permission })
+	grants := slices.Clone(p.Grants)
+	slices.SortStableFunc(grants, func(a, b Grant) int { return cmp.Compare(b.Permission, a.Permission) })
 	var scopes []string
 	for _, grant := range grants {
 		if grant.Permission&1 != 0 {

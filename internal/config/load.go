@@ -238,9 +238,7 @@ func scalesetDefaults(settings map[string]any) map[string]any {
 // override value wins. Neither input is mutated.
 func deepMerge(base, override map[string]any) map[string]any {
 	out := make(map[string]any, len(base)+len(override))
-	for k, v := range base {
-		out[k] = v
-	}
+	maps.Copy(out, base)
 	for k, v := range override {
 		if baseMap, ok := out[k].(map[string]any); ok {
 			if overrideMap, ok := v.(map[string]any); ok {
@@ -257,7 +255,7 @@ func deepMerge(base, override map[string]any) map[string]any {
 // config (weakly typed input, duration strings, comma-separated strings to
 // slices) and returns the sorted input keys that matched no struct field.
 // Nested keys come back dotted (e.g. "docker.foo").
-func decodeStrict(src map[string]any, dst any) ([]string, error) {
+func decodeStrict[T any](src map[string]any, dst *T) ([]string, error) {
 	var md mapstructure.Metadata
 	dec, err := mapstructure.NewDecoder(&mapstructure.DecoderConfig{
 		Metadata:         &md,

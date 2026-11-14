@@ -1,13 +1,14 @@
 package main
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"os"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -349,8 +350,8 @@ func formatStatus(h health.HealthResponse, endpoint string, now time.Time, color
 	}
 
 	if len(h.Disk) > 0 {
-		disks := append([]health.DiskStatus(nil), h.Disk...)
-		sort.Slice(disks, func(i, j int) bool { return disks[i].Filesystem < disks[j].Filesystem })
+		disks := slices.Clone(h.Disk)
+		slices.SortFunc(disks, func(a, b health.DiskStatus) int { return cmp.Compare(a.Filesystem, b.Filesystem) })
 		fmt.Fprintln(&b)
 		fmt.Fprintln(&b, styles.section("DISK"))
 		for _, disk := range disks {

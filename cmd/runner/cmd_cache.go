@@ -1,11 +1,12 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
 	"os"
-	"sort"
+	"slices"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -148,6 +149,10 @@ func policyString(budgetBytes uint64, onExceed string) string {
 	return fmt.Sprintf("budget=%s on-exceed=%s", bytesize.Format(budgetBytes), onExceed)
 }
 
+func compareCacheRows(a, b cacheRow) int {
+	return cmp.Or(cmp.Compare(a.Filesystem, b.Filesystem), cmp.Compare(a.Store, b.Store))
+}
+
 // buildCacheRows measures every store and stats the filesystem it lives on,
 // building one row per store. A store that fails either call still gets a
 // row (see cacheRow.MeasureError's doc comment) — the rest proceed
@@ -187,12 +192,7 @@ func buildCacheRows(stores []cachestore.CacheStore) []cacheRow {
 		rows = append(rows, row)
 	}
 
-	sort.Slice(rows, func(i, j int) bool {
-		if rows[i].Filesystem != rows[j].Filesystem {
-			return rows[i].Filesystem < rows[j].Filesystem
-		}
-		return rows[i].Store < rows[j].Store
-	})
+	slices.SortFunc(rows, compareCacheRows)
 	return rows
 }
 
@@ -261,12 +261,7 @@ func runCache(cmd *cobra.Command, args []string) error {
 	rows := buildCacheRows(stores)
 	if cfg.ActionsCache.Enabled {
 		rows = append(rows, nativeActionsCacheRow(cfg.ActionsCache))
-		sort.Slice(rows, func(i, j int) bool {
-			if rows[i].Filesystem != rows[j].Filesystem {
-				return rows[i].Filesystem < rows[j].Filesystem
-			}
-			return rows[i].Store < rows[j].Store
-		})
+		slices.SortFunc(rows, compareCacheRows)
 	}
 
 	if jsonOutput {

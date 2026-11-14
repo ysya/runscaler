@@ -1,9 +1,9 @@
 package main
 
 import (
+	"cmp"
 	"log/slog"
 	"slices"
-	"sort"
 	"time"
 
 	dockerclient "github.com/moby/moby/client"
@@ -474,6 +474,6 @@ func diskStatusesFor(stores []cachestore.CacheStore) []health.DiskStatus {
 			TotalBytes:  st.TotalBytes,
 		})
 	}
-	sort.Slice(statuses, func(i, j int) bool { return statuses[i].Filesystem < statuses[j].Filesystem })
+	slices.SortFunc(statuses, func(a, b health.DiskStatus) int { return cmp.Compare(a.Filesystem, b.Filesystem) })
 	return statuses
 }

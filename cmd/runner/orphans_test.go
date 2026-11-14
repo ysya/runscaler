@@ -24,6 +24,33 @@ type fakeContainer struct {
 	labels map[string]string
 }
 
+func TestUniqueSortedStringsPreservesEmptyOutputAndInput(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		values []string
+		want   []string
+	}{
+		{name: "nil"},
+		{name: "empty", values: []string{}},
+		{name: "duplicates", values: []string{"b", "a", "b", "c", "a"}, want: []string{"a", "b", "c"}},
+		{name: "sorted", values: []string{"a", "b"}, want: []string{"a", "b"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			before := slices.Clone(tc.values)
+			got := uniqueSortedStrings(tc.values)
+			if got == nil || !slices.Equal(got, tc.want) {
+				t.Fatalf("uniqueSortedStrings() = %#v, want non-nil %v", got, tc.want)
+			}
+			if len(got) > 0 {
+				got[0] = "changed"
+			}
+			if !slices.Equal(tc.values, before) {
+				t.Fatal("uniqueSortedStrings mutated or aliased its input")
+			}
+		})
+	}
+}
+
 // orphanFake supports orphan lifecycle cleanup and doctor's volume inspection.
 // ContainerList reads containers; ContainerRemove records IDs and can fail one.
 // VolumeInspect uses volumes; cleanup's VolumeList uses cleanupVolumes so tests

@@ -243,7 +243,7 @@ type TartProvider struct {
 	poolWg   sync.WaitGroup
 
 	// activeVMs tracks runner VMs for exit watching and cleanup.
-	activeVMs sync.Map // instanceID -> *warmVM, for exit watching and cleanup
+	activeVMs typedSyncMap[string, *warmVM]
 }
 
 // NewTartProviderWithCoordinator creates a TartProvider from scale set config.
@@ -692,17 +692,16 @@ func (p *TartProvider) RemoveInstance(ctx context.Context, instanceID string) er
 	if tartInstanceAbsent(deleteErr) {
 		deleteErr = nil
 	}
-	value, tracked := p.activeVMs.Load(instanceID)
+	vm, tracked := p.activeVMs.Load(instanceID)
 	knownStopped := stopErr == nil || deleteErr == nil
 	if tracked {
-		knownStopped = knownStopped || vmExited(value.(*warmVM))
+		knownStopped = knownStopped || vmExited(vm)
 	}
 	if tracked && !knownStopped {
-		p.releaseVMWhenExited(value.(*warmVM))
+		p.releaseVMWhenExited(vm)
 	}
 	if tracked && knownStopped {
-		if value, ok := p.activeVMs.LoadAndDelete(instanceID); ok {
-			vm := value.(*warmVM)
+		if vm, ok := p.activeVMs.LoadAndDelete(instanceID); ok {
 			vm.cancel()
 			p.releaseVM(vm)
 		}
@@ -730,11 +729,10 @@ func tartInstanceAbsent(err error) bool {
 }
 
 func (p *TartProvider) WaitInstance(ctx context.Context, instanceID string) error {
-	value, ok := p.activeVMs.Load(instanceID)
+	vm, ok := p.activeVMs.Load(instanceID)
 	if !ok {
 		return fmt.Errorf("unknown Tart VM %s", instanceID)
 	}
-	vm := value.(*warmVM)
 	select {
 	case <-vm.done:
 		return nil

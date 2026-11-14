@@ -501,6 +501,13 @@ func checkTart(ctx context.Context, mode resourceCheck, homes map[string]bool) (
 // through the same ownership rules and removal path as startup
 // reconciliation (findOrphanTartVMs, removeOrphanTartVMs).
 func checkTartVMs(ctx context.Context, runner provider.CommandRunner, home string, mode resourceCheck) (int, error) {
+	if mode == removeOrphans {
+		release, err := provider.AcquireTartInspectionLock(ctx, home)
+		if err != nil {
+			return 0, err
+		}
+		defer release()
+	}
 	orphans, err := findOrphanTartVMs(ctx, runner)
 	if err != nil {
 		fmt.Printf("  ✗ Failed to list Tart VMs: %s\n", err)

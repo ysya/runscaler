@@ -305,24 +305,31 @@ func (p *TartProvider) fillPool(slot int) {
 
 // EnsureImage checks if the base image exists locally, and pulls it if not.
 func (p *TartProvider) EnsureImage(ctx context.Context) error {
-	out, err := p.cmd.Run(ctx, "tart", "list", "--format", "json")
+	return EnsureTartImage(ctx, p.cmd, p.baseImage, p.logger)
+}
+
+// EnsureTartImage checks if image exists locally through runner, and pulls it
+// if not. It needs no TartProvider, so a preflight can check an image without
+// building one.
+func EnsureTartImage(ctx context.Context, runner CommandRunner, image string, logger *slog.Logger) error {
+	out, err := runner.Run(ctx, "tart", "list", "--format", "json")
 	if err == nil {
 		var names map[string]bool
-		if names, err = tartListNames(out); err == nil && names[p.baseImage] {
-			p.logger.Debug("Base image already exists locally", slog.String("image", p.baseImage))
+		if names, err = tartListNames(out); err == nil && names[image] {
+			logger.Debug("Base image already exists locally", slog.String("image", image))
 			return nil
 		}
 	}
 	if err != nil {
 		// If list fails, try pulling anyway
-		p.logger.Warn("Failed to list local images, will attempt pull", slog.Any("error", err))
+		logger.Warn("Failed to list local images, will attempt pull", slog.Any("error", err))
 	}
 
-	p.logger.Info("Pulling base image (this may take a while on first run)...", slog.String("image", p.baseImage))
-	if err := p.cmd.RunStreaming(ctx, "tart", "pull", p.baseImage); err != nil {
-		return fmt.Errorf("failed to pull image %s: %w", p.baseImage, err)
+	logger.Info("Pulling base image (this may take a while on first run)...", slog.String("image", image))
+	if err := runner.RunStreaming(ctx, "tart", "pull", image); err != nil {
+		return fmt.Errorf("failed to pull image %s: %w", image, err)
 	}
-	p.logger.Info("Base image pulled successfully", slog.String("image", p.baseImage))
+	logger.Info("Base image pulled successfully", slog.String("image", image))
 	return nil
 }
 

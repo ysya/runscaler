@@ -15,7 +15,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/ysya/runscaler/internal/config"
-	"github.com/ysya/runscaler/internal/provider"
 )
 
 var validateCmd = &cobra.Command{
@@ -119,16 +118,12 @@ func runValidate(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	logger := slog.New(slog.NewTextHandler(cmd.OutOrStdout(), nil))
-	var coordinator *provider.TartHostCoordinator
-	if needsTart {
-		coordinator = provider.NewTartHostCoordinator(config.MaxTartVMsPerHost)
-	}
 	if err := runOptionalImagePreflight(cmd, scaleSets,
 		func(ctx context.Context, ss config.ScaleSetConfig) error {
 			return pullDockerRunnerImage(ctx, ss, dockerClients, cmd.OutOrStdout(), logger)
 		},
 		func(ctx context.Context, ss config.ScaleSetConfig) error {
-			return ensureTartRunnerImage(ctx, ss, logger, coordinator)
+			return ensureTartRunnerImage(ctx, ss, logger)
 		}); err != nil {
 		return err
 	}

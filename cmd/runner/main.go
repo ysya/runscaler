@@ -385,7 +385,7 @@ func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) e
 			return pullDockerRunnerImage(ctx, ss, dockerClients, pullOutput, logger)
 		},
 		func(ctx context.Context, ss config.ScaleSetConfig) error {
-			return ensureTartRunnerImage(ctx, ss, logger, tartCoordinator)
+			return ensureTartRunnerImage(ctx, ss, logger)
 		}); err != nil {
 		return err
 	}

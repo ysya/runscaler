@@ -108,6 +108,6 @@ func pullDockerRunnerImage(ctx context.Context, ss config.ScaleSetConfig, client
 	return nil
 }
 
-func ensureTartRunnerImage(ctx context.Context, ss config.ScaleSetConfig, logger *slog.Logger, coordinator *provider.TartHostCoordinator) error {
-	return provider.NewTartProviderWithCoordinator(ss, logger, coordinator).EnsureImage(ctx)
+func ensureTartRunnerImage(ctx context.Context, ss config.ScaleSetConfig, logger *slog.Logger) error {
+	return provider.EnsureTartImage(ctx, provider.TartCommandRunner(ss.Tart.Home), ss.RunnerImage, logger)
 }

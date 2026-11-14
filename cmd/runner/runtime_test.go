@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"log/slog"
+	"reflect"
 	"testing"
 
 	dockerclient "github.com/moby/moby/client"
 
 	"github.com/ysya/runscaler/internal/config"
+	"github.com/ysya/runscaler/internal/diagnostics"
 	"github.com/ysya/runscaler/internal/provider"
 )
 
@@ -62,5 +64,58 @@ func TestScaleSetRuntimeNewProvider_SelectsByProviderKind(t *testing.T) {
 	}
 	if _, ok := dockerRT.newProvider(context.Background(), managerDeps{}).(*provider.DockerProvider); !ok {
 		t.Error("a Docker runtime must build a DockerProvider")
+	}
+}
+
+// A dropped argument still builds a provider of the right type: the provider
+// constructors fall back to a private coordinator when handed nil, and two
+// Tart scale sets with private coordinators would try four VMs and both hand
+// out the MAC of slot 0. The provider fields are unexported, so identity is
+// read with reflect; a renamed field panics on the zero Value instead of
+// passing.
+func TestScaleSetRuntimeNewProvider_PassesSharedBackendsAndLogCapture(t *testing.T) {
+	tartA, tartB := validScaleSet("tart-a", 0), validScaleSet("tart-b", 0)
+	tartA.Provider, tartB.Provider = "tart", "tart"
+	client := &dockerclient.Client{}
+	b := runtimeBackends{
+		dockerClients: map[string]*dockerclient.Client{config.DefaultDockerSocket: client},
+		dockerPulls:   provider.NewDockerImagePullCoordinator(),
+		tartHost:      provider.NewTartHostCoordinator(2),
+	}
+	runtimes := newScaleSetRuntimes([]config.ScaleSetConfig{tartA, tartB, validScaleSet("docker", 0)}, b)
+	logger := slog.New(slog.DiscardHandler)
+	for _, rt := range runtimes {
+		rt.logger = logger
+	}
+	field := func(p any, name string) reflect.Value { return reflect.ValueOf(p).Elem().FieldByName(name) }
+
+	for _, rt := range runtimes[:2] {
+		p := rt.newProvider(context.Background(), managerDeps{})
+		if field(p, "coordinator").Pointer() != reflect.ValueOf(b.tartHost).Pointer() {
+			t.Errorf("%s: the Tart provider must share the host coordinator", rt.config.ScaleSetName)
+		}
+	}
+
+	store := &diagnostics.Store{}
+	for _, tc := range []struct {
+		name        string
+		deps        managerDeps
+		wantCapture bool
+	}{
+		{name: "capture off without a store", deps: managerDeps{}},
+		{name: "capture on without a store", deps: managerDeps{captureLogs: true}},
+		{name: "capture off with a store", deps: managerDeps{diagnostics: store}},
+		{name: "capture on with a store", deps: managerDeps{captureLogs: true, diagnostics: store}, wantCapture: true},
+	} {
+		p := runtimes[2].newProvider(context.Background(), tc.deps)
+		if field(p, "dockerClient").Elem().Pointer() != reflect.ValueOf(client).Pointer() {
+			t.Errorf("%s: the Docker provider must carry the client for its socket", tc.name)
+		}
+		if field(p, "imageCoordinator").Pointer() != reflect.ValueOf(b.dockerPulls).Pointer() {
+			t.Errorf("%s: the Docker provider must share the image pull coordinator", tc.name)
+		}
+		if got := field(p, "captureLogs").Bool(); got != tc.wantCapture {
+			t.Errorf("%s: captureLogs = %v, want %v", tc.name, got, tc.wantCapture)
+		}
 	}
 }

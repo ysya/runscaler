@@ -540,6 +540,7 @@ func TestEnsureTartImage(t *testing.T) {
 		{name: "OCI image already cached", image: "ghcr.io/cirruslabs/macos-golden-gate-xcode:27", list: listed},
 		{name: "local golden VM", image: "ios-golden", list: listed},
 		{name: "image not present", image: "ghcr.io/cirruslabs/macos-tahoe-xcode:26.5", list: listed, wantPull: true},
+		{name: "only a similarly named VM", image: "macos-base", list: listed, wantPull: true},
 		{name: "list fails", image: "ios-golden", list: cmdResult{err: errors.New("tart list failed")}, wantPull: true},
 	}
 	for _, tt := range tests {

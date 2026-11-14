@@ -48,6 +48,8 @@ type tartRuntime struct {
 // index set to its position. A Tart scale set carries only the shared Tart
 // host; every other scale set carries the Docker client for its socket and
 // the shared image pull coordinator. logger and capacity are left unset.
+// b.dockerClients must hold a client for every non-Tart scale set's socket; a
+// missing one becomes a nil client.
 func newScaleSetRuntimes(scaleSets []config.ScaleSetConfig, b runtimeBackends) []*scaleSetRuntime {
 	runtimes := make([]*scaleSetRuntime, len(scaleSets))
 	for i, ss := range scaleSets {
@@ -72,8 +74,10 @@ type managerDeps struct {
 	captureLogs  bool
 }
 
-// newProvider builds this scale set's instance provider. It is the one place
-// that switches on the provider kind.
+// newProvider builds this scale set's instance provider from the part
+// newScaleSetRuntimes gave it. It is the one place a provider is constructed.
+// For Tart it also starts the warm pool, so call it once, when the controller
+// is about to run.
 func (rt *scaleSetRuntime) newProvider(ctx context.Context, deps managerDeps) provider.InstanceProvider {
 	if rt.tart != nil {
 		tb := provider.NewTartProviderWithCoordinator(rt.config, rt.logger, rt.tart.host)

@@ -21,9 +21,9 @@ import (
 // SAFETY: every VM this returns is assumed to belong to a previous run of
 // this process. That holds only because internal/lock guarantees a single
 // runner per host. If that guarantee is ever relaxed, this function and its
-// callers must be revisited. runner validate also creates keep-marker clones
-// without the lock; removing one can make a concurrent validate report a guest
-// detection failure, but cannot affect a running job.
+// callers must be revisited. Destructive callers must additionally hold the
+// Tart inspection lock through listing and removal, so a concurrent validate
+// can finish reading and deleting its own temporary clone first.
 func findOrphanTartVMs(ctx context.Context, runner provider.CommandRunner) ([]provider.TartVM, error) {
 	vms, err := provider.ListTartVMs(ctx, runner)
 	if err != nil {
@@ -122,28 +122,39 @@ func reconcileOrphans(ctx context.Context, dockerClients map[string]*dockerclien
 
 	for _, home := range uniqueSortedStrings(tartHomes) {
 		runner := provider.TartCommandRunner(home)
-		orphans, err := findOrphanTartVMs(ctx, runner)
-		if err != nil {
-			logger.Warn("Failed to list orphaned Tart VMs; continuing startup",
+		if err := reconcileTartHome(ctx, runner, home, logger); err != nil {
+			logger.Warn("Failed to reconcile orphaned Tart VMs; continuing startup",
 				slog.String("tartHome", home),
 				slog.Any("error", err))
-			continue
 		}
-		if len(orphans) == 0 {
-			logger.Debug("No orphaned Tart VMs found", slog.String("tartHome", home))
-			continue
-		}
-		names := make([]string, 0, len(orphans))
-		for _, vm := range orphans {
-			names = append(names, vm.Name)
-		}
-		removed := removeOrphanTartVMs(ctx, runner, orphans, logger)
-		logger.Info("Reconciled orphaned Tart VMs",
-			slog.String("tartHome", home),
-			slog.Int("found", len(orphans)),
-			slog.Int("removed", removed),
-			slog.Any("vms", names))
 	}
+}
+
+func reconcileTartHome(ctx context.Context, runner provider.CommandRunner, home string, logger *slog.Logger) error {
+	release, err := provider.AcquireTartInspectionLock(ctx, home)
+	if err != nil {
+		return err
+	}
+	defer release()
+	orphans, err := findOrphanTartVMs(ctx, runner)
+	if err != nil {
+		return err
+	}
+	if len(orphans) == 0 {
+		logger.Debug("No orphaned Tart VMs found", slog.String("tartHome", home))
+		return nil
+	}
+	names := make([]string, 0, len(orphans))
+	for _, vm := range orphans {
+		names = append(names, vm.Name)
+	}
+	removed := removeOrphanTartVMs(ctx, runner, orphans, logger)
+	logger.Info("Reconciled orphaned Tart VMs",
+		slog.String("tartHome", home),
+		slog.Int("found", len(orphans)),
+		slog.Int("removed", removed),
+		slog.Any("vms", names))
+	return nil
 }
 
 func uniqueSortedStrings(values []string) []string {

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -302,12 +303,11 @@ func TestScaleSetConfigValidate_TartProvider(t *testing.T) {
 			},
 		},
 		{
-			name: "tart exceeds host limit",
+			name: "tart accepts max-runners above two",
 			modify: func(c *ScaleSetConfig) {
 				c.Provider = "tart"
 				c.RunnerImage = "macos-base:latest"
 			},
-			wantErr: "max-runners must be <= 2",
 		},
 		{
 			name: "tart missing image",
@@ -425,8 +425,8 @@ func TestTartDefaults(t *testing.T) {
 	}
 
 	ss := sets[0]
-	if ss.Tart.RunnerDir != DefaultTartRunnerDir {
-		t.Errorf("Tart.RunnerDir = %q, want %q", ss.Tart.RunnerDir, DefaultTartRunnerDir)
+	if ss.Tart.RunnerDir != "" {
+		t.Errorf("Tart.RunnerDir = %q, want an unset guest-dependent default", ss.Tart.RunnerDir)
 	}
 	if !ss.IsTart() {
 		t.Error("IsTart() = false, want true")
@@ -881,6 +881,11 @@ func TestValidateGlobal_RejectsInvalidDisk(t *testing.T) {
 }
 
 func TestActionsCacheURLValidation(t *testing.T) {
+	// Construct synthetic credentials explicitly so the source contains no credential-shaped URL.
+	credentialURL := (&url.URL{
+		Scheme: "https", Host: "cache.example", Path: "/",
+		User: url.UserPassword("synthetic-user", "synthetic-password"),
+	}).String()
 	for _, tc := range []struct {
 		name, value string
 		valid       bool
@@ -890,11 +895,11 @@ func TestActionsCacheURLValidation(t *testing.T) {
 		{"case insensitive scheme", "HTTPS://cache.example/", true},
 		{"relative", "cache/", false}, {"scheme relative", "//cache/", false},
 		{"missing host", "http:///", false}, {"missing hostname", "http://:3000/", false}, {"missing slash", "http://cache.example", false},
-		{"userinfo", "http://user:do-not-echo-this@cache.example/", false}, {"empty userinfo", "http://@cache.example/", false},
+		{"userinfo", credentialURL, false}, {"empty userinfo", "http://@cache.example/", false},
 		{"query", "http://cache.example/?token=do-not-echo-this", false}, {"empty query", "http://cache.example/?", false},
 		{"fragment", "http://cache.example/#section/", false}, {"empty fragment", "http://cache.example/#", false},
 		{"unsupported scheme", "ftp://cache.example/", false}, {"opaque", "http:cache/", false},
-		{"malformed credential URL", "http://user:do-not-echo-this@%zz/", false}, {"invalid port", "http://cache.example:bad/", false},
+		{"malformed credential URL", credentialURL + "%zz", false}, {"invalid port", "http://cache.example:bad/", false},
 		{"whitespace", " http://cache.example/", false}, {"newline", "http://cache.example/\n", false},
 		{"encoded final slash", "http://cache.example/cache%2F", false},
 	} {

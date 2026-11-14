@@ -24,9 +24,12 @@ also include `macos-sequoia-xcode` (macOS 15) and
 `macos-golden-gate-xcode` (macOS 27). A VM cannot run a newer macOS than its
 host. Image tags select an Xcode version; pin a tag instead of `latest` for
 reproducible builds. See the image's published requirements before
-adjusting CPU or memory under `[tart]`. The
-[config builder](https://runscaler.ysya.dev/configure/) limits Tart to at
-most two VMs per host.
+adjusting CPU or memory under `[tart]`.
+
+Tart also provides arm64 Linux images: `ghcr.io/cirruslabs/ubuntu`,
+`ghcr.io/cirruslabs/debian` and `ghcr.io/cirruslabs/fedora`. Prepare a runner
+image as described under [Linux guests](configuration.md#linux-guests).
+The host remains an Apple Silicon Mac.
 
 If upgrading from the old `cirruslabs/cli` tap, uninstall its `tart` and
 `softnet` formulas before installing from `openai/tools`. Then remove the

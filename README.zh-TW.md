@@ -9,7 +9,7 @@
 
 本文件為 [英文 README](README.md) 的繁體中文版本。更新指令、設定或操作說明時，請同步維護英文與繁體中文版本（包含 `docs/` 內的文件）；若內容有差異，以英文版為準。
 
-以 Docker 容器或 macOS VM 自動擴縮 GitHub Actions 自架 runner。採用 [actions/scaleset](https://github.com/actions/scaleset)。
+以 Docker 容器或 macOS 與 Linux VM 自動擴縮 GitHub Actions 自架 runner。採用 [actions/scaleset](https://github.com/actions/scaleset)。
 
 runner 採用**短生命週期**模式 — 每個容器／VM 只處理一個工作，完成後便會移除。不需要 Kubernetes。
 
@@ -44,14 +44,14 @@ flowchart LR
         E["原生 cache-v2 接收器<br/>(Docker 選用)"]
     end
     B -- Docker API --> C["Runner 容器<br/>(短生命週期)"]
-    B -- Tart CLI --> D["macOS VM<br/>(短生命週期)"]
+    B -- Tart CLI --> D["macOS 與 Linux VM<br/>(短生命週期)"]
     C -- 私有 cache-v2 HTTP --> E
     E --> F["私有快取資料目錄"]
 ```
 
 1. 向 GitHub 註冊 [runner 規模集](https://docs.github.com/en/actions/hosting-your-own-runners/managing-self-hosted-runners-with-actions-runner-controller/about-actions-runner-controller)
 2. 透過 scaleset API 以長輪詢接收工作指派
-3. 使用 JIT（just-in-time，即時產生）runner 設定啟動 Docker 容器或 macOS VM
+3. 使用 JIT（just-in-time，即時產生）runner 設定啟動 Docker 容器或 macOS 與 Linux VM
 4. 工作完成後自動移除容器／VM
 5. 正常停止時排空執行中的工作；若異常停止，則於下次啟動時清理遺留的資源
 
@@ -71,9 +71,9 @@ Go cache-v2 接收器。具備快取能力的 runner 與 BuildKit 容器透過
 - **短生命週期 runner** — 每個工作都使用全新的容器／VM，不會殘留前一個工作的狀態
 - **自動擴縮** — 透過長輪詢依工作需求在 0 到 N 個 runner 之間擴縮（不需 cron，也沒有定期輪詢的延遲）
 - **Docker-in-Docker** — 可選用 DinD，支援需要建置容器的工作流程
-- **透過 Tart 執行 macOS VM** — 使用原生 Apple Virtualization.framework，搭配 APFS 寫入時複製（Copy-on-Write）複製機制
+- **透過 Tart 執行 macOS 與 Linux VM** — 使用原生 Apple Virtualization.framework，搭配 APFS 寫入時複製（Copy-on-Write）複製機制
 - **Tart 網路** — 預設使用共用 NAT，也可選擇橋接至主機網路介面
-- **VM 預熱集區** — 預先啟動 macOS VM，即時接手工作（約 2 秒，冷啟動則約需 30 秒）
+- **VM 預熱集區** — 預先啟動 Tart VM，即時接手工作（約 2 秒，冷啟動則約需 30 秒）
 - **原生 Actions 快取（Docker 選用）** — 內建 cache-v2 接收器，提供主機本機保留設定與狀態資訊
 - **共用工作磁碟區** — 可選用具名 Docker 磁碟區，讓工作明確交接檔案；舊快取磁碟區掛載目前仍在 sunset 期間
 - **支援多個組織** — 單一程序即可管理多個 runner 規模集，並混用 Docker 與 Tart 供應器
@@ -117,7 +117,7 @@ sudo /usr/local/bin/runner status
 
 ### macOS 使用者服務
 
-先安裝 [Tart](https://tart.run/) 並拉取與主機相容的 macOS 映像檔；
+先安裝 [Tart](https://tart.run/) 並拉取與主機相容的 macOS 或 Linux 映像檔；
 [安裝與映像檔選擇](docs/deployment.zh-TW.md#tart-prerequisites-macos)列有指令。
 然後從本機 GUI 登入階段執行：
 

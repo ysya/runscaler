@@ -168,7 +168,6 @@ function validateSet(scale, global, lang, index) {
   const min = copy(set['min-runners']) === '' ? 0 : Number(set['min-runners']);
   reject(!Number.isSafeInteger(max) || max < 1, 'set', 'max-runners', index, lang, 'Maximum runners must be a positive whole number.', '最多 runner 數量須為正整數。');
   reject(!Number.isSafeInteger(min) || min < 0 || min > max, 'set', 'min-runners', index, lang, 'Runner limits must be whole numbers with 0 ≤ minimum ≤ maximum.', 'Runner 數量須為整數，且 0 ≤ 下限 ≤ 上限。');
-  reject(provider === 'tart' && max > 2, 'set', 'max-runners', index, lang, 'Tart allows at most two concurrent VMs per host.', 'Tart 每台主機最多同時執行兩台 VM。');
   reject(!copy(set['runner-image']), 'set', 'runner-image', index, lang, 'Enter a runner image.', '請輸入 runner 映像檔。');
   if (auth === 'app') {
     let path;
@@ -217,15 +216,6 @@ export function generateFullConfig(state, lang = 'en') {
   if (!scales.length) throw new Error(message(lang, 'Add a scale set.', '請新增規模集。'));
   const global = { ...state.global, 'actions-cache': state.actionsCache };
   scales.forEach((scale, index) => validateSet(scale, global, lang, index));
-  let tartMinimum = 0;
-  let tartPool = 0;
-  scales.forEach((scale, index) => {
-    if (scale.set.provider !== 'tart') return;
-    tartMinimum += Number(scale.set['min-runners'] || 0);
-    reject(tartMinimum > 2, 'set', 'min-runners', index, lang, 'Combined Tart warm runners cannot exceed two VMs per host.', 'Tart 常駐 runner 總數不可超過每台主機兩台 VM。');
-    tartPool += Number(scale.tart?.['pool-size'] || 0);
-    reject(tartPool > 2, 'tart', 'pool-size', index, lang, 'Combined Tart warm pool cannot exceed two VMs per host.', 'Tart 預熱 VM 總數不可超過每台主機兩台 VM。');
-  });
   const names = scales.map(scale => scale.set.name.trim());
   const duplicate = names.findIndex((name, index) => names.indexOf(name) !== index);
   reject(duplicate !== -1, 'set', 'name', duplicate, lang, 'Scale-set names must be unique.', '規模集名稱不可重複。');

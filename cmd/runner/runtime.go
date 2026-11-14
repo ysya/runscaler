@@ -25,10 +25,11 @@ type runtimeBackends struct {
 // scaleSetRuntime is one scale set as the manager runs it: its resolved
 // config plus what startup connected or detected for it.
 type scaleSetRuntime struct {
-	index    int
-	config   config.ScaleSetConfig
-	logger   *slog.Logger        // set by runManager before the controller starts
-	capacity *capacity.Allocator // set by runManager when the broker exists
+	maxRunners int
+	index      int
+	config     config.ScaleSetConfig
+	logger     *slog.Logger        // set by runManager before the controller starts
+	capacity   *capacity.Allocator // set by runManager when the broker exists
 
 	// Exactly one is set.
 	docker *dockerRuntime
@@ -41,7 +42,9 @@ type dockerRuntime struct {
 }
 
 type tartRuntime struct {
-	host *provider.TartHostCoordinator
+	host       *provider.TartHostCoordinator
+	guest      provider.TartGuest
+	guestKnown bool
 }
 
 // newScaleSetRuntimes returns one runtime per scale set, in input order, with
@@ -53,7 +56,7 @@ type tartRuntime struct {
 func newScaleSetRuntimes(scaleSets []config.ScaleSetConfig, b runtimeBackends) []*scaleSetRuntime {
 	runtimes := make([]*scaleSetRuntime, len(scaleSets))
 	for i, ss := range scaleSets {
-		rt := &scaleSetRuntime{index: i, config: ss}
+		rt := &scaleSetRuntime{index: i, config: ss, maxRunners: ss.MaxRunners}
 		if ss.IsTart() {
 			rt.tart = &tartRuntime{host: b.tartHost}
 		} else {
@@ -80,7 +83,7 @@ type managerDeps struct {
 // is about to run.
 func (rt *scaleSetRuntime) newProvider(ctx context.Context, deps managerDeps) provider.InstanceProvider {
 	if rt.tart != nil {
-		tb := provider.NewTartProviderWithCoordinator(rt.config, rt.logger, rt.tart.host)
+		tb := provider.NewTartProviderWithCoordinator(rt.config, rt.logger, rt.tart.host, rt.tart.guest)
 		tb.StartPool(ctx) // starts warm pool if tart-pool-size > 0
 		return tb
 	}

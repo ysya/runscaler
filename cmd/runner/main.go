@@ -367,7 +367,7 @@ func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) e
 	var tartCoordinator *provider.TartHostCoordinator
 	// Verify Tart binary exists if any scale set uses the Tart provider.
 	if needsTart {
-		tartCoordinator = provider.NewTartHostCoordinator(config.MaxTartVMsPerHost)
+		tartCoordinator = provider.NewTartHostCoordinator(config.MaxMacOSVMsPerHost)
 		if _, err := exec.LookPath("tart"); err != nil {
 			return fmt.Errorf("tart binary not found in PATH: %w\n\n"+
 				"  Install Tart: brew install openai/tools/tart", err)
@@ -388,6 +388,16 @@ func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) e
 			return ensureTartRunnerImage(ctx, ss, logger)
 		}); err != nil {
 		return err
+	}
+
+	detect := func(ctx context.Context, home, image string) (provider.TartGuest, error) {
+		return provider.DetectTartGuest(ctx, provider.TartCommandRunner(home), home, image)
+	}
+	if err := detectTartGuests(ctx, runtimes, detect, logger); err != nil {
+		return err
+	}
+	if problems := applyTartGuestLimits(runtimes, logger); len(problems) > 0 {
+		return errors.Join(problems...)
 	}
 
 	if cfg.DryRun {
@@ -507,13 +517,9 @@ func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) e
 	// its pre-job-start check (see runScaleSetController, controller.WithDiskChecker)
 	// instead of constructing a second one.
 	guard := startDiskGuard(ctx, cacheStores, cfg, logger)
-	capacityLimit := cfg.EffectiveConcurrent(scaleSets)
+	capacityLimit := effectiveConcurrent(cfg, runtimes)
 	capacityBroker := capacity.NewBroker(capacityLimit)
-	for _, rt := range runtimes {
-		// Include the config index because scale-set names are only guaranteed
-		// unique within GitHub registration scope, not necessarily process-wide.
-		rt.capacity = capacityBroker.Register(fmt.Sprintf("%d:%s", rt.index, rt.config.ScaleSetName), rt.config.MinRunners)
-	}
+	registerCapacity(capacityBroker, runtimes)
 	if healthServer != nil {
 		healthServer.SetCapacityProvider(func() health.CapacityStatus {
 			return health.CapacityStatus{Limit: capacityBroker.Limit(), InUse: capacityBroker.InUse()}
@@ -635,7 +641,7 @@ func runScaleSetController(ctx context.Context, deps managerDeps, rt *scaleSetRu
 	}
 	controllerOpts = append(controllerOpts, controller.WithCapacityAllocator(rt.capacity))
 	controllerOpts = append(controllerOpts, controller.WithDiagnostics(deps.diagnostics, rt.config.ScaleSetName, rt.config.Provider, rt.config.Token), controller.WithRetry(rt.config.EffectiveRetry()))
-	s := controller.NewScaleSetController(scaleSet.ID, rt.config.MinRunners, rt.config.MaxRunners, instanceProvider, scalesetClient, rt.logger, controllerOpts...)
+	s := controller.NewScaleSetController(scaleSet.ID, rt.config.MinRunners, rt.maxRunners, instanceProvider, scalesetClient, rt.logger, controllerOpts...)
 	defer s.Shutdown(context.WithoutCancel(ctx))
 
 	// The listener must keep delivering JobCompleted messages while Drain
@@ -675,7 +681,7 @@ func runScaleSetController(ctx context.Context, deps managerDeps, rt *scaleSetRu
 
 	for {
 		rt.logger.Info("Listening for jobs",
-			slog.Int("maxRunners", rt.config.MaxRunners),
+			slog.Int("maxRunners", rt.maxRunners),
 			slog.Int("minRunners", rt.config.MinRunners),
 		)
 
@@ -683,7 +689,7 @@ func runScaleSetController(ctx context.Context, deps managerDeps, rt *scaleSetRu
 		if deps.health != nil {
 			deps.health.MarkDisconnected(rt.config.ScaleSetName, "connecting")
 		}
-		listenErr := listenOnce(listenCtx, scalesetClient, scaleSet.ID, sessionID, rt.config.MaxRunners, s, recorder, rt.logger, func() {
+		listenErr := listenOnce(listenCtx, scalesetClient, scaleSet.ID, sessionID, rt.maxRunners, s, recorder, rt.logger, func() {
 			if deps.health != nil {
 				deps.health.MarkConnected(rt.config.ScaleSetName)
 			}
@@ -798,7 +804,7 @@ func groupDockerScaleSets(scaleSets []config.ScaleSetConfig) map[string][]config
 
 // checkScaleSets runs the offline checks every scale set must pass before
 // runner starts it: each scale set's own settings, the host-wide capacity
-// floor, unique names and Tart's host-wide VM limit. `runner run`, `runner
+// floor, unique names and guest-independent capacity rules. `runner run`, `runner
 // validate` and service preparation all call it, so a config that validates
 // or installs also starts.
 func checkScaleSets(cfg config.Config, scaleSets []config.ScaleSetConfig) error {
@@ -833,23 +839,11 @@ func scaleSetProblems(cfg config.Config, scaleSets []config.ScaleSetConfig) []er
 func validateScaleSetCollectionProblems(scaleSets []config.ScaleSetConfig) []error {
 	var problems []error
 	names := make(map[string]int)
-	totalTartMin := 0
-	totalTartPool := 0
 	for i, ss := range scaleSets {
 		if prior, ok := names[ss.ScaleSetName]; ok {
 			problems = append(problems, fmt.Errorf("scaleset[%d] %q duplicates scaleset[%d] name; names must be unique for lifecycle and health tracking", i, ss.ScaleSetName, prior))
 		}
 		names[ss.ScaleSetName] = i
-		if ss.IsTart() {
-			totalTartMin += ss.MinRunners
-			totalTartPool += ss.Tart.PoolSize
-		}
-	}
-	if totalTartMin > config.MaxTartVMsPerHost {
-		problems = append(problems, fmt.Errorf("combined Tart min-runners is %d, exceeding the host-wide macOS VM limit of %d", totalTartMin, config.MaxTartVMsPerHost))
-	}
-	if totalTartPool > config.MaxTartVMsPerHost {
-		problems = append(problems, fmt.Errorf("combined Tart pool-size is %d, exceeding the host-wide macOS VM limit of %d", totalTartPool, config.MaxTartVMsPerHost))
 	}
 	return problems
 }

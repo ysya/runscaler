@@ -63,10 +63,10 @@ export const dockerFields = [
 
 export const tartFields = [
   field('home', 'text', 'Tart home directory', 'Tart 主目錄'),
-  field('runner-dir', 'text', 'Runner directory inside VM', 'VM 內 runner 目錄', { placeholder: '/Users/admin/actions-runner' }),
+  field('runner-dir', 'text', 'Runner directory inside VM', 'VM 內 runner 目錄', { placeholder: '/Users/admin/actions-runner', helpEn: 'Default: /Users/admin/actions-runner for macOS guests, /home/admin/actions-runner for Linux guests.', helpZh: '預設：macOS guest 為 /Users/admin/actions-runner，Linux guest 為 /home/admin/actions-runner。' }),
   field('cpu', 'number', 'VM CPU cores', 'VM CPU 核心數', { min: 0 }),
   field('memory', 'number', 'VM memory (MB)', 'VM 記憶體（MB）', { min: 0 }),
-  field('pool-size', 'number', 'Pre-warmed VMs', '預先啟動的 VM 數量', { min: 0, max: 2 }),
+  field('pool-size', 'number', 'Pre-warmed VMs', '預先啟動的 VM 數量', { min: 0, helpEn: 'Guest OS is detected from the image. macOS guests run at most two VMs per host; larger max-runners values are capped at two. Linux guests run up to max-runners plus pool-size VMs.', helpZh: '會從映像檔偵測 guest OS。macOS guest 每台主機最多兩台 VM，較大的 max-runners 值會限制為 2；Linux guest 最多執行 max-runners 加 pool-size 台 VM。' }),
   field('mtu', 'number', 'Guest MTU (0 = auto, -1 = off)', 'VM MTU（0 自動，-1 停用）', { min: -1, max: 1500 }),
   field('dns', 'lines', 'Guest DNS IPs (one per line)', 'VM DNS IP（每行一個）'),
   field('net-bridged', 'text', 'Bridged host interface', '橋接的主機網路介面', { placeholder: 'en0' }),

@@ -189,24 +189,29 @@ test('an error in the second scale set points to its own input', () => {
   fieldError(state, 'docker', 'platform', 1);
 });
 
-test('combined Tart warm minimum and pool cannot exceed two VMs', () => {
+test('the builder does not cap Tart scale sets, because it cannot see the guest', () => {
   const state = base();
   const second = baseSet();
   second.set.name = 'second-tart';
   state.scaleSets.push(second);
   for (const scale of state.scaleSets) {
     scale.set.provider = 'tart';
-    scale.set['max-runners'] = '2';
-    scale.set['min-runners'] = '1';
-    scale.tart['pool-size'] = '1';
+    scale.set['max-runners'] = '6';
+    scale.set['min-runners'] = '3';
+    scale.tart['pool-size'] = '3';
   }
-  state.scaleSets[1].set['min-runners'] = '2';
-  fieldError(state, 'set', 'min-runners', 1);
-  state.scaleSets[1].set['min-runners'] = '1';
-  state.scaleSets[1].tart['pool-size'] = '2';
-  fieldError(state, 'tart', 'pool-size', 1);
-  state.scaleSets[1].tart['pool-size'] = '1';
-  assert.match(generateFullConfig(state), /\[scaleset\.tart\]/u);
+  const toml = generateFullConfig(state);
+  assert.match(toml, /max-runners = 6/u);
+  assert.match(toml, /min-runners = 3/u);
+  assert.match(toml, /pool-size = 3/u);
+});
+
+test('a Tart warm pool still cannot exceed its own max-runners', () => {
+  const state = base();
+  state.scaleSets[0].set.provider = 'tart';
+  state.scaleSets[0].set['max-runners'] = '2';
+  state.scaleSets[0].tart['pool-size'] = '3';
+  fieldError(state, 'tart', 'pool-size');
 });
 
 test('generated mixed-provider TOML matches the Go-validated fixture', () => {

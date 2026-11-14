@@ -15,6 +15,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/ysya/runscaler/internal/config"
+	"github.com/ysya/runscaler/internal/provider"
 )
 
 var validateCmd = &cobra.Command{
@@ -125,6 +126,17 @@ func runValidate(cmd *cobra.Command, args []string) error {
 		func(ctx context.Context, ss config.ScaleSetConfig) error {
 			return ensureTartRunnerImage(ctx, ss, logger)
 		}); err != nil {
+		return err
+	}
+
+	runtimes := newScaleSetRuntimes(scaleSets, runtimeBackends{dockerClients: dockerClients})
+	present := func(ctx context.Context, home, image string) (bool, error) {
+		return provider.TartImagePresent(ctx, provider.TartCommandRunner(home), image)
+	}
+	detect := func(ctx context.Context, home, image string) (provider.TartGuest, error) {
+		return provider.DetectTartGuest(ctx, provider.TartCommandRunner(home), home, image)
+	}
+	if err := reportTartGuests(commandContext(cmd), cmd.OutOrStdout(), runtimes, present, detect, logger); err != nil {
 		return err
 	}
 

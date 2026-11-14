@@ -19,7 +19,9 @@ import (
 // SAFETY: every VM this returns is assumed to belong to a previous run of
 // this process. That holds only because internal/lock guarantees a single
 // runner per host. If that guarantee is ever relaxed, this function and its
-// callers must be revisited.
+// callers must be revisited. runner validate also creates keep-marker clones
+// without the lock; removing one can make a concurrent validate report a guest
+// detection failure, but cannot affect a running job.
 func findOrphanTartVMs(ctx context.Context, runner provider.CommandRunner) ([]provider.TartVM, error) {
 	vms, err := provider.ListTartVMs(ctx, runner)
 	if err != nil {

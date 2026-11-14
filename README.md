@@ -7,7 +7,7 @@
 
 [Website](https://runscaler.ysya.dev/) · [Config builder](https://runscaler.ysya.dev/configure/) | [English](README.md) | [繁體中文](README.zh-TW.md)
 
-Auto-scale GitHub Actions self-hosted runners as Docker containers or macOS VMs. Powered by [actions/scaleset](https://github.com/actions/scaleset).
+Auto-scale GitHub Actions self-hosted runners as Docker containers or macOS and Linux VMs. Powered by [actions/scaleset](https://github.com/actions/scaleset).
 
 Runners are **ephemeral** — each container/VM handles exactly one job and is removed upon completion. No Kubernetes required.
 
@@ -40,14 +40,14 @@ flowchart LR
         E["Native cache-v2 receiver<br/>(Docker opt-in)"]
     end
     B -- Docker API --> C["Runner Containers<br/>(ephemeral)"]
-    B -- Tart CLI --> D["macOS VMs<br/>(ephemeral)"]
+    B -- Tart CLI --> D["macOS and Linux VMs<br/>(ephemeral)"]
     C -- private cache-v2 HTTP --> E
     E --> F["Private cache data directory"]
 ```
 
 1. Registers a [runner scale set](https://docs.github.com/en/actions/hosting-your-own-runners/managing-self-hosted-runners-with-actions-runner-controller/about-actions-runner-controller) with GitHub
 2. Long-polls for job assignments via the scaleset API
-3. Spins up Docker containers or macOS VMs with JIT (just-in-time) runner configs
+3. Spins up Docker containers or macOS and Linux VMs with JIT (just-in-time) runner configs
 4. Removes containers/VMs automatically when jobs complete
 5. Drains in-flight jobs on a graceful stop and reconciles resources left by an abnormal stop at the next startup
 
@@ -66,16 +66,16 @@ See [Host-local Actions cache](docs/local-actions-cache.md) for both modes.
 - **Ephemeral runners** — each job gets a fresh container/VM, no state leakage
 - **Auto-scaling** — scales from 0 to N based on job demand via long-poll (no cron, no polling delay)
 - **Docker-in-Docker** — optional DinD support for workflows that build containers
-- **macOS VMs via Tart** — native Apple Virtualization.framework with APFS Copy-on-Write cloning
+- **macOS and Linux VMs via Tart** — native Apple Virtualization.framework with APFS Copy-on-Write cloning
 - **Tart networking** — shared NAT by default, with optional host-interface bridging
-- **VM warm pool** — pre-boot macOS VMs for instant job pickup (~2s vs ~30s cold boot)
+- **VM warm pool** — pre-boot Tart VMs for instant job pickup (~2s vs ~30s cold boot)
 - **Native Actions cache (Docker opt-in)** — built-in cache-v2 receiver with host-local retention and status visibility
 - **Shared work volume** — optional named Docker volume for explicit cross-job file handoff; legacy cache-volume mounts remain during sunset
 - **Multi-org support** — manage multiple scale sets from a single process, mixing Docker and Tart providers
 - **Self-healing capacity** — replace containers/VMs that exit before GitHub reports job completion
 - **Safe restarts** — SIGTERM/SIGQUIT stop new work and wait for in-flight jobs; startup reclaims containers/VMs left by hard kills
 - **Operational safety** — one process per host, localhost-only health checks, and built-in rotating logs
-- **Single binary** — no runtime dependencies beyond Docker (or Tart for macOS)
+- **Single binary** — no runtime dependencies beyond Docker (or Tart)
 - **Config file or flags** — TOML config with CLI flag overrides
 
 ## Quick Start
@@ -110,7 +110,7 @@ configured scale set.
 
 ### macOS user service
 
-Install [Tart](https://tart.run/) and pull a macOS image compatible with your
+Install [Tart](https://tart.run/) and pull a macOS or Linux image compatible with your
 host; [Tart setup and image choices](docs/deployment.md#tart-prerequisites-macos)
 has the commands. Then run from a local GUI login session:
 

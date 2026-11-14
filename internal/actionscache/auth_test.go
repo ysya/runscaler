@@ -9,6 +9,8 @@ import (
 	"io"
 	"math/big"
 	"net/http"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -18,6 +20,36 @@ import (
 )
 
 type transportFunc func(*http.Request) (*http.Response, error)
+
+func TestPrincipalReadableScopesPreservesPriorityTiesAndInput(t *testing.T) {
+	var grants []Grant
+	var writable, readable []string
+	for i := range 48 {
+		scope := "scope-" + strconv.Itoa(i)
+		permission := int64(i % 4)
+		grants = append(grants, Grant{Scope: scope, Permission: permission})
+		switch permission {
+		case 3:
+			writable = append(writable, scope)
+		case 1:
+			readable = append(readable, scope)
+		}
+	}
+	before := slices.Clone(grants)
+	got := (Principal{Grants: grants}).ReadableScopes()
+	want := append(writable, readable...)
+	if !slices.Equal(got, want) {
+		t.Fatalf("ReadableScopes() = %v, want %v", got, want)
+	}
+	if !slices.Equal(grants, before) {
+		t.Fatal("ReadableScopes mutated the principal's grants")
+	}
+	for _, empty := range [][]Grant{nil, {}} {
+		if got := (Principal{Grants: empty}).ReadableScopes(); got != nil {
+			t.Fatalf("empty ReadableScopes() = %v, want nil", got)
+		}
+	}
+}
 
 func (f transportFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 

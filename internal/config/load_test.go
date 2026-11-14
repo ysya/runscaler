@@ -9,6 +9,32 @@ import (
 	"github.com/spf13/viper"
 )
 
+func TestDeepMergePreservesInputsAndAcceptsNilMaps(t *testing.T) {
+	base := map[string]any{"nested": map[string]any{"keep": "base", "replace": "old"}}
+	override := map[string]any{"nested": map[string]any{"replace": "new"}}
+	merged := deepMerge(base, override)
+	nested := merged["nested"].(map[string]any)
+	if nested["keep"] != "base" || nested["replace"] != "new" {
+		t.Fatalf("merged nested settings = %v", nested)
+	}
+	nested["keep"] = "changed"
+	nested["replace"] = "changed"
+	baseNested := base["nested"].(map[string]any)
+	overrideNested := override["nested"].(map[string]any)
+	if baseNested["keep"] != "base" || baseNested["replace"] != "old" || overrideNested["replace"] != "new" {
+		t.Fatal("recursive merge mutated or aliased its input maps")
+	}
+	if got := deepMerge(nil, map[string]any{"value": "override"}); got["value"] != "override" {
+		t.Fatalf("merge with nil base = %v", got)
+	}
+	if got := deepMerge(map[string]any{"value": "base"}, nil); got["value"] != "base" {
+		t.Fatalf("merge with nil override = %v", got)
+	}
+	if got := deepMerge(nil, nil); got == nil || len(got) != 0 {
+		t.Fatalf("merge with nil inputs = %#v, want non-nil empty map", got)
+	}
+}
+
 // loadTOML parses the TOML source through a fresh viper instance and Load,
 // mirroring the production path in cmd/runner.
 func loadTOML(t *testing.T, src string) Config {

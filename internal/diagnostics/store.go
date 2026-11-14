@@ -8,7 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -191,7 +191,7 @@ func prune(dir *os.File, now time.Time) error {
 		reports = append(reports, report{entry.Name(), info.Size(), info.ModTime()})
 		total += info.Size()
 	}
-	sort.Slice(reports, func(i, j int) bool { return reports[i].modified.Before(reports[j].modified) })
+	slices.SortFunc(reports, func(a, b report) int { return a.modified.Compare(b.modified) })
 	count := len(reports)
 	for _, r := range reports {
 		if count <= 20 && total <= 2*1024*1024 && now.Sub(r.modified) <= 7*24*time.Hour {

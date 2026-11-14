@@ -101,9 +101,9 @@ func applyInstalledIdentity(opts *installOpts, target *installationTarget) {
 	if target.RuntimeUser != "" && target.RuntimeUser != "root" && target.RuntimeUser != "0" {
 		opts.runtimeUser = target.RuntimeUser
 		opts.runtimeGroup = target.RuntimeGroup
-		opts.supplementaryGroups = append([]string(nil), target.SupplementaryGroups...)
+		opts.supplementaryGroups = slices.Clone(target.SupplementaryGroups)
 	}
-	opts.environmentFiles = append([]string(nil), target.EnvironmentFiles...)
+	opts.environmentFiles = slices.Clone(target.EnvironmentFiles)
 }
 
 // auditServiceTree is deliberately read-only. Only an empty root-owned

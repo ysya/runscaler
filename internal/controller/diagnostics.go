@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"log/slog"
+	"slices"
 	"time"
 
 	"github.com/ysya/runscaler/internal/diagnostics"
@@ -15,7 +16,7 @@ func WithDiagnostics(store *diagnostics.Store, scaleSet, kind string, secrets ..
 		s.diagnostics = store
 		s.diagnosticScaleSet = scaleSet
 		s.diagnosticProvider = kind
-		s.diagnosticSecrets = append([]string(nil), secrets...)
+		s.diagnosticSecrets = slices.Clone(secrets)
 	}
 }
 
@@ -39,7 +40,7 @@ func (s *ScaleSetController) collectFailure(ctx context.Context, name, id string
 	s.runtimeMu.Lock()
 	s.runtime.LastFailure = &metrics.FailureSummary{Reason: reason, Timestamp: time.Now().UTC(), ExitCode: d.ExitCode, OOMKilled: d.OOMKilled, FinishedAt: d.FinishedAt}
 	s.runtimeMu.Unlock()
-	secrets := append(append([]string(nil), s.diagnosticSecrets...), jit)
+	secrets := append(slices.Clone(s.diagnosticSecrets), jit)
 	_, err = s.diagnostics.Save(diagCtx, diagnostics.Record{ScaleSet: s.diagnosticScaleSet, Provider: s.diagnosticProvider, Runner: name, Instance: id, Reason: reason, ExitDiagnostics: d}, secrets...)
 	if err != nil {
 		s.logger.Warn("Runner failure report could not be saved", slog.String("name", name))

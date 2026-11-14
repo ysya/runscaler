@@ -4,9 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
-	"sort"
+	"slices"
 	"sync"
 	"time"
 
@@ -250,11 +251,7 @@ func (h *HealthServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	names := make([]string, 0, len(h.controllers))
-	for name := range h.controllers {
-		names = append(names, name)
-	}
-	sort.Strings(names)
+	names := slices.Sorted(maps.Keys(h.controllers))
 	for _, name := range names {
 		controller := h.controllers[name]
 		idle, busy := controller.InstanceCounts()

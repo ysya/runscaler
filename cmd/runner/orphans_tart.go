@@ -1,9 +1,11 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"log/slog"
-	"sort"
+	"maps"
+	"slices"
 
 	"github.com/moby/moby/api/types/container"
 	dockerclient "github.com/moby/moby/client"
@@ -33,7 +35,7 @@ func findOrphanTartVMs(ctx context.Context, runner provider.CommandRunner) ([]pr
 			orphans = append(orphans, vm)
 		}
 	}
-	sort.Slice(orphans, func(i, j int) bool { return orphans[i].Name < orphans[j].Name })
+	slices.SortFunc(orphans, func(a, b provider.TartVM) int { return cmp.Compare(a.Name, b.Name) })
 	return orphans, nil
 }
 
@@ -69,11 +71,7 @@ func removeOrphanTartVMs(ctx context.Context, runner provider.CommandRunner, orp
 func reconcileOrphans(ctx context.Context, dockerClients map[string]*dockerclient.Client, tartHomes []string, logger *slog.Logger, workspaceRoots ...string) {
 	workspacesSafeToRemove := len(dockerClients) > 0
 	var remainingContainers []container.Summary
-	sockets := make([]string, 0, len(dockerClients))
-	for socket := range dockerClients {
-		sockets = append(sockets, socket)
-	}
-	sort.Strings(sockets)
+	sockets := slices.Sorted(maps.Keys(dockerClients))
 	for _, socket := range sockets {
 		client := dockerClients[socket]
 		orphans, err := findOrphanContainers(ctx, client)
@@ -149,14 +147,12 @@ func reconcileOrphans(ctx context.Context, dockerClients map[string]*dockerclien
 }
 
 func uniqueSortedStrings(values []string) []string {
+	if len(values) == 0 {
+		return []string{}
+	}
 	seen := make(map[string]struct{}, len(values))
 	for _, value := range values {
 		seen[value] = struct{}{}
 	}
-	result := make([]string, 0, len(seen))
-	for value := range seen {
-		result = append(result, value)
-	}
-	sort.Strings(result)
-	return result
+	return slices.Sorted(maps.Keys(seen))
 }

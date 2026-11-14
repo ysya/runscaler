@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"log/slog"
 	"testing"
 
 	dockerclient "github.com/moby/moby/client"
@@ -41,5 +43,24 @@ func TestNewScaleSetRuntimes_AssignsProviderSpecificParts(t *testing.T) {
 	}
 	if rt := runtimes[3]; rt.docker != nil || rt.tart == nil || rt.tart.host != b.tartHost {
 		t.Error("the Tart scale set must carry only the shared Tart host")
+	}
+}
+
+func TestScaleSetRuntimeNewProvider_SelectsByProviderKind(t *testing.T) {
+	logger := slog.New(slog.DiscardHandler)
+	tart := validScaleSet("tart", 0)
+	tart.Provider = "tart"
+	tartRT := &scaleSetRuntime{config: tart, logger: logger, tart: &tartRuntime{host: provider.NewTartHostCoordinator(2)}}
+	if _, ok := tartRT.newProvider(context.Background(), managerDeps{}).(*provider.TartProvider); !ok {
+		t.Error("a Tart runtime must build a TartProvider")
+	}
+
+	dockerRT := &scaleSetRuntime{
+		config: validScaleSet("docker", 0),
+		logger: logger,
+		docker: &dockerRuntime{client: &dockerclient.Client{}, pulls: provider.NewDockerImagePullCoordinator()},
+	}
+	if _, ok := dockerRT.newProvider(context.Background(), managerDeps{}).(*provider.DockerProvider); !ok {
+		t.Error("a Docker runtime must build a DockerProvider")
 	}
 }

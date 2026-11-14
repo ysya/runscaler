@@ -1,12 +1,17 @@
 package main
 
 import (
+	"context"
 	"log/slog"
+	"time"
 
 	dockerclient "github.com/moby/moby/client"
 
 	"github.com/ysya/runscaler/internal/capacity"
 	"github.com/ysya/runscaler/internal/config"
+	"github.com/ysya/runscaler/internal/diagnostics"
+	"github.com/ysya/runscaler/internal/diskguard"
+	"github.com/ysya/runscaler/internal/health"
 	"github.com/ysya/runscaler/internal/provider"
 )
 
@@ -55,4 +60,27 @@ func newScaleSetRuntimes(scaleSets []config.ScaleSetConfig, b runtimeBackends) [
 		runtimes[i] = rt
 	}
 	return runtimes
+}
+
+// managerDeps are the process-wide dependencies every controller shares.
+type managerDeps struct {
+	drain        <-chan struct{}
+	drainTimeout time.Duration
+	health       *health.HealthServer
+	guard        *diskguard.Guard
+	diagnostics  *diagnostics.Store
+	captureLogs  bool
+}
+
+// newProvider builds this scale set's instance provider. It is the one place
+// that switches on the provider kind.
+func (rt *scaleSetRuntime) newProvider(ctx context.Context, deps managerDeps) provider.InstanceProvider {
+	if rt.tart != nil {
+		tb := provider.NewTartProviderWithCoordinator(rt.config, rt.logger, rt.tart.host)
+		tb.StartPool(ctx) // starts warm pool if tart-pool-size > 0
+		return tb
+	}
+	dp := provider.NewDockerProviderWithCoordinator(rt.config, rt.docker.client, rt.logger, rt.docker.pulls)
+	dp.EnableDiagnosticLogs(deps.captureLogs && deps.diagnostics != nil)
+	return dp
 }

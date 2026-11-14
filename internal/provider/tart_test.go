@@ -528,3 +528,33 @@ func TestTartProvider_EnsureImage(t *testing.T) {
 		})
 	}
 }
+
+func TestEnsureTartImage(t *testing.T) {
+	listed := cmdResult{output: []byte(tartListWithLocalVMs)}
+	tests := []struct {
+		name     string
+		image    string
+		list     cmdResult
+		wantPull bool
+	}{
+		{name: "OCI image already cached", image: "ghcr.io/cirruslabs/macos-golden-gate-xcode:27", list: listed},
+		{name: "local golden VM", image: "ios-golden", list: listed},
+		{name: "image not present", image: "ghcr.io/cirruslabs/macos-tahoe-xcode:26.5", list: listed, wantPull: true},
+		{name: "only a similarly named VM", image: "macos-base", list: listed, wantPull: true},
+		{name: "list fails", image: "ios-golden", list: cmdResult{err: errors.New("tart list failed")}, wantPull: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := &mockCommandRunner{results: map[string]cmdResult{
+				"tart list --format json": tt.list,
+				"tart pull":               {},
+			}}
+			if err := EnsureTartImage(context.Background(), cmd, tt.image, slog.New(slog.DiscardHandler)); err != nil {
+				t.Fatalf("EnsureTartImage() error: %v", err)
+			}
+			if pulled := callIndex(cmd.getCalls(), "tart", "pull", tt.image) >= 0; pulled != tt.wantPull {
+				t.Errorf("pulled = %v, want %v; calls: %v", pulled, tt.wantPull, cmd.getCalls())
+			}
+		})
+	}
+}

@@ -30,7 +30,6 @@ import (
 	"github.com/ysya/runscaler/internal/config"
 	"github.com/ysya/runscaler/internal/controller"
 	"github.com/ysya/runscaler/internal/diagnostics"
-	"github.com/ysya/runscaler/internal/diskguard"
 	"github.com/ysya/runscaler/internal/health"
 	"github.com/ysya/runscaler/internal/layout"
 	runnerlock "github.com/ysya/runscaler/internal/lock"
@@ -376,6 +375,7 @@ func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) e
 		logger.Info("Tart provider enabled")
 
 	}
+	runtimes := newScaleSetRuntimes(scaleSets, runtimeBackends{dockerClients: dockerClients, dockerPulls: provider.NewDockerImagePullCoordinator(), tartHost: tartCoordinator})
 	pullOutput := io.Writer(os.Stdout)
 	if logFile != nil {
 		pullOutput = io.MultiWriter(os.Stdout, logFile)
@@ -385,7 +385,7 @@ func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) e
 			return pullDockerRunnerImage(ctx, ss, dockerClients, pullOutput, logger)
 		},
 		func(ctx context.Context, ss config.ScaleSetConfig) error {
-			return ensureTartRunnerImage(ctx, ss, logger, tartCoordinator)
+			return ensureTartRunnerImage(ctx, ss, logger)
 		}); err != nil {
 		return err
 	}
@@ -509,11 +509,10 @@ func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) e
 	guard := startDiskGuard(ctx, cacheStores, cfg, logger)
 	capacityLimit := cfg.EffectiveConcurrent(scaleSets)
 	capacityBroker := capacity.NewBroker(capacityLimit)
-	capacityAllocators := make([]*capacity.Allocator, len(scaleSets))
-	for i, ss := range scaleSets {
+	for _, rt := range runtimes {
 		// Include the config index because scale-set names are only guaranteed
 		// unique within GitHub registration scope, not necessarily process-wide.
-		capacityAllocators[i] = capacityBroker.Register(fmt.Sprintf("%d:%s", i, ss.ScaleSetName), ss.MinRunners)
+		rt.capacity = capacityBroker.Register(fmt.Sprintf("%d:%s", rt.index, rt.config.ScaleSetName), rt.config.MinRunners)
 	}
 	if healthServer != nil {
 		healthServer.SetCapacityProvider(func() health.CapacityStatus {
@@ -539,7 +538,6 @@ func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) e
 
 	// Run each scale set in its own goroutine
 	var wg sync.WaitGroup
-	dockerImagePullCoordinator := provider.NewDockerImagePullCoordinator()
 	errs := make(chan error, len(scaleSets)+1)
 	runCtx, cancelRun := context.WithCancel(ctx)
 	defer cancelRun()
@@ -548,13 +546,14 @@ func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) e
 		cacheMonitorDone = watchNativeCacheFailure(runCtx, nativeCache.Failures(), cancelRun, errs)
 	}
 
-	for i, ss := range scaleSets {
+	deps := managerDeps{drain: drain, drainTimeout: cfg.EffectiveDrainTimeout(), health: healthServer, guard: guard, diagnostics: diagnosticStore, captureLogs: cfg.Diagnostics.CaptureLogs}
+	for _, rt := range runtimes {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			ssLogger := config.NewScaleSetLoggerWithWriter(cfg.LogLevel, cfg.LogFormat, ss.ScaleSetName, i, console, logWriter(logFile))
-			if err := runScaleSetController(runCtx, drain, cfg.EffectiveDrainTimeout(), ss, dockerClients[ss.Docker.Socket], ssLogger, healthServer, tartCoordinator, dockerImagePullCoordinator, guard, capacityAllocators[i], diagnosticStore, cfg.Diagnostics.CaptureLogs); err != nil {
-				errs <- fmt.Errorf("scaleset %q: %w", ss.ScaleSetName, err)
+			rt.logger = config.NewScaleSetLoggerWithWriter(cfg.LogLevel, cfg.LogFormat, rt.config.ScaleSetName, rt.index, console, logWriter(logFile))
+			if err := runScaleSetController(runCtx, deps, rt); err != nil {
+				errs <- fmt.Errorf("scaleset %q: %w", rt.config.ScaleSetName, err)
 				cancelRun()
 			}
 		}()
@@ -602,20 +601,20 @@ func watchNativeCacheFailure(ctx context.Context, failures <-chan error, cancelR
 	return done
 }
 
-// runScaleSetController manages the lifecycle of a single scale set. guard is the
+// runScaleSetController manages the lifecycle of a single scale set. deps.guard is the
 // shared disk-pressure guard built once in runManager() (nil when the disk guard
 // is disabled); it is wired into this ScaleSetController as its
 // pre-job-start check, see controller.WithDiskChecker below.
-func runScaleSetController(ctx context.Context, drain <-chan struct{}, drainTimeout time.Duration, ss config.ScaleSetConfig, dockerClient *dockerclient.Client, logger *slog.Logger, h *health.HealthServer, tartCoordinator *provider.TartHostCoordinator, dockerImagePullCoordinator *provider.DockerImagePullCoordinator, guard *diskguard.Guard, capacityAllocator *capacity.Allocator, diagnosticStore *diagnostics.Store, captureLogs bool) error {
+func runScaleSetController(ctx context.Context, deps managerDeps, rt *scaleSetRuntime) error {
 	// Create scaleset client
-	scalesetClient, err := ss.NewScalesetClient(logger)
+	scalesetClient, err := rt.config.NewScalesetClient(rt.logger)
 	if err != nil {
 		return fmt.Errorf("failed to create scaleset client: %w", err)
 	}
 
 	// The scale set is registered once and kept across restarts (see
 	// ensureScaleSet), so it is deliberately not deleted on exit.
-	scaleSet, err := ensureScaleSet(ctx, scalesetClient, ss, logger)
+	scaleSet, err := ensureScaleSet(ctx, scalesetClient, rt.config, rt.logger)
 	if err != nil {
 		return err
 	}
@@ -624,28 +623,19 @@ func runScaleSetController(ctx context.Context, drain <-chan struct{}, drainTime
 	scalesetClient.SetSystemInfo(config.NewSystemInfo(scaleSet.ID, version))
 
 	// Create the instance provider once; it persists across reconnections.
-	var instanceProvider provider.InstanceProvider
-	if ss.IsTart() {
-		tb := provider.NewTartProviderWithCoordinator(ss, logger, tartCoordinator)
-		tb.StartPool(ctx) // starts warm pool if tart-pool-size > 0
-		instanceProvider = tb
-	} else {
-		dp := provider.NewDockerProviderWithCoordinator(ss, dockerClient, logger, dockerImagePullCoordinator)
-		dp.EnableDiagnosticLogs(captureLogs && diagnosticStore != nil)
-		instanceProvider = dp
-	}
+	instanceProvider := rt.newProvider(ctx, deps)
 
-	// guard is a *diskguard.Guard; only wrap it into the controller.DiskChecker
+	// deps.guard is a *diskguard.Guard; only wrap it into the controller.DiskChecker
 	// option when non-nil so a disabled guard doesn't become a non-nil
 	// interface holding a nil pointer (which would panic the first time
 	// startInstance called NeedsReclaim on it).
 	var controllerOpts []controller.Option
-	if guard != nil {
-		controllerOpts = append(controllerOpts, controller.WithDiskChecker(guard))
+	if deps.guard != nil {
+		controllerOpts = append(controllerOpts, controller.WithDiskChecker(deps.guard))
 	}
-	controllerOpts = append(controllerOpts, controller.WithCapacityAllocator(capacityAllocator))
-	controllerOpts = append(controllerOpts, controller.WithDiagnostics(diagnosticStore, ss.ScaleSetName, ss.Provider, ss.Token), controller.WithRetry(ss.EffectiveRetry()))
-	s := controller.NewScaleSetController(scaleSet.ID, ss.MinRunners, ss.MaxRunners, instanceProvider, scalesetClient, logger, controllerOpts...)
+	controllerOpts = append(controllerOpts, controller.WithCapacityAllocator(rt.capacity))
+	controllerOpts = append(controllerOpts, controller.WithDiagnostics(deps.diagnostics, rt.config.ScaleSetName, rt.config.Provider, rt.config.Token), controller.WithRetry(rt.config.EffectiveRetry()))
+	s := controller.NewScaleSetController(scaleSet.ID, rt.config.MinRunners, rt.config.MaxRunners, instanceProvider, scalesetClient, rt.logger, controllerOpts...)
 	defer s.Shutdown(context.WithoutCancel(ctx))
 
 	// The listener must keep delivering JobCompleted messages while Drain
@@ -654,12 +644,12 @@ func runScaleSetController(ctx context.Context, drain <-chan struct{}, drainTime
 	// zero and every graceful stop degenerates into a timeout.
 	listenCtx, cancelListen := context.WithCancel(ctx)
 	defer cancelListen()
-	go watchScaleSetDrain(listenCtx, drain, drainTimeout, s, cancelListen, logger)
+	go watchScaleSetDrain(listenCtx, deps.drain, deps.drainTimeout, s, cancelListen, rt.logger)
 
-	if ss.Docker.SharedVolume != "" {
-		logger.Info("Shared volume enabled",
-			slog.String("path", ss.Docker.SharedVolume),
-			slog.Bool("dind", ss.IsDinD()),
+	if rt.config.Docker.SharedVolume != "" {
+		rt.logger.Info("Shared volume enabled",
+			slog.String("path", rt.config.Docker.SharedVolume),
+			slog.Bool("dind", rt.config.IsDinD()),
 		)
 	}
 
@@ -667,10 +657,10 @@ func runScaleSetController(ctx context.Context, drain <-chan struct{}, drainTime
 	recorder := &metrics.Recorder{}
 
 	// Register with health server
-	if h != nil {
-		h.RegisterController(ss.ScaleSetName, s)
-		h.RegisterMetrics(ss.ScaleSetName, recorder)
-		defer h.UnregisterController(ss.ScaleSetName)
+	if deps.health != nil {
+		deps.health.RegisterController(rt.config.ScaleSetName, s)
+		deps.health.RegisterMetrics(rt.config.ScaleSetName, recorder)
+		defer deps.health.UnregisterController(rt.config.ScaleSetName)
 	}
 
 	// Session ID for message session
@@ -678,24 +668,24 @@ func runScaleSetController(ctx context.Context, drain <-chan struct{}, drainTime
 	if err != nil {
 		hostname = uuid.NewString()
 	}
-	sessionID := fmt.Sprintf("%s-%s", hostname, ss.ScaleSetName)
+	sessionID := fmt.Sprintf("%s-%s", hostname, rt.config.ScaleSetName)
 
 	// Reconnection loop: recreate session + listener on transient failures
 	var reconnect listenerBackoff
 
 	for {
-		logger.Info("Listening for jobs",
-			slog.Int("maxRunners", ss.MaxRunners),
-			slog.Int("minRunners", ss.MinRunners),
+		rt.logger.Info("Listening for jobs",
+			slog.Int("maxRunners", rt.config.MaxRunners),
+			slog.Int("minRunners", rt.config.MinRunners),
 		)
 
 		listenStart := time.Now()
-		if h != nil {
-			h.MarkDisconnected(ss.ScaleSetName, "connecting")
+		if deps.health != nil {
+			deps.health.MarkDisconnected(rt.config.ScaleSetName, "connecting")
 		}
-		listenErr := listenOnce(listenCtx, scalesetClient, scaleSet.ID, sessionID, ss.MaxRunners, s, recorder, logger, func() {
-			if h != nil {
-				h.MarkConnected(ss.ScaleSetName)
+		listenErr := listenOnce(listenCtx, scalesetClient, scaleSet.ID, sessionID, rt.config.MaxRunners, s, recorder, rt.logger, func() {
+			if deps.health != nil {
+				deps.health.MarkConnected(rt.config.ScaleSetName)
 			}
 		})
 		if listenCtx.Err() != nil || errors.Is(listenErr, context.Canceled) {
@@ -710,12 +700,12 @@ func runScaleSetController(ctx context.Context, drain <-chan struct{}, drainTime
 		// A listener that stayed connected for a while failed afresh, so the
 		// ramp starts over and the reconnect is quick.
 		delay := reconnect.next(time.Since(listenStart), listenErr)
-		logger.Warn("Listener disconnected, will reconnect",
+		rt.logger.Warn("Listener disconnected, will reconnect",
 			slog.Any("error", listenErr),
 			slog.Duration("backoff", delay),
 		)
-		if h != nil {
-			h.MarkDisconnected(ss.ScaleSetName, listenErr.Error())
+		if deps.health != nil {
+			deps.health.MarkDisconnected(rt.config.ScaleSetName, listenErr.Error())
 		}
 		if backoff.Sleep(listenCtx, delay) != nil {
 			return nil

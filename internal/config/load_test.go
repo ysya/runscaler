@@ -956,8 +956,8 @@ runner-image = "custom-macos:latest"
 	if sets[1].RunnerImage != "custom-macos:latest" {
 		t.Errorf("sets[1].RunnerImage = %q, want custom", sets[1].RunnerImage)
 	}
-	if sets[1].Tart.RunnerDir != DefaultTartRunnerDir {
-		t.Errorf("sets[1].Tart.RunnerDir = %q, want %q", sets[1].Tart.RunnerDir, DefaultTartRunnerDir)
+	if sets[1].Tart.RunnerDir != "" {
+		t.Errorf("Tart.RunnerDir = %q, want an unset guest-dependent default", sets[1].Tart.RunnerDir)
 	}
 }
 

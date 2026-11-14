@@ -54,7 +54,7 @@ func TestPoolWorkerBacksOffBootFailuresAndCancelsCooldown(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("pool cooldown ignored cancellation")
 	}
-	if len(p.coordinator.slots) != cap(p.coordinator.slots) {
+	if len(p.coordinator.macOSPermits) != cap(p.coordinator.macOSPermits) {
 		t.Fatal("failed pool boot leaked host slot")
 	}
 }

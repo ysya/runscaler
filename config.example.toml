@@ -126,7 +126,8 @@ dind = true
 # on-exceed = "warn"                       # warn (default: log only, leave data for the tool's own LRU) | wipe (delete everything)
 
 # [tart]
-# runner-dir = "/Users/admin/actions-runner"
+# Guest OS is detected from the runner image at startup.
+# runner-dir = "/Users/admin/actions-runner" # macOS default; Linux: /home/admin/actions-runner
 # cpu = 0        # 0 = use image default
 # memory = 0     # MB, 0 = use image default
 # pool-size = 0  # pre-warmed VMs, 0 = disabled

@@ -18,4 +18,4 @@
 | `shared-volume-name` | 讓每個 runner 規模集的共用磁碟區使用不同的具名磁碟區，避免不同信任等級的 runner 規模集共用檔案 |
 | `dind = false` | 完全不掛載 socket，提供容器層級最強的隔離，但無法建置映像檔 |
 
-Tart 供應器在 Hypervisor 邊界進行隔離：每個工作都會取得從基礎映像檔複製的全新 macOS VM，並在結束後刪除。
+Tart 供應器在 Hypervisor 邊界進行隔離：每個工作都會取得從基礎映像檔複製的全新 VM，並在結束後刪除。

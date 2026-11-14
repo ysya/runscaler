@@ -462,9 +462,6 @@ func (ss *ScaleSetConfig) applyDefaults() {
 	if ss.Provider == DefaultProvider && ss.Docker.Socket == "" {
 		ss.Docker.Socket = DefaultDockerSocket
 	}
-	if ss.Provider == "tart" && ss.Tart.RunnerDir == "" {
-		ss.Tart.RunnerDir = DefaultTartRunnerDir
-	}
 }
 
 // IsDinD returns whether Docker-in-Docker is enabled for this scale set.
@@ -631,9 +628,6 @@ func (ss *ScaleSetConfig) ValidationErrors() []error {
 			}
 		}
 	case "tart":
-		if ss.MaxRunners > MaxTartVMsPerHost {
-			add(fmt.Errorf("max-runners must be <= %d for the Tart provider (Apple host limit)", MaxTartVMsPerHost))
-		}
 		if ss.Tart.PoolSize < 0 || ss.Tart.PoolSize > ss.MaxRunners {
 			add(fmt.Errorf("tart pool-size must be between 0 and max-runners"))
 		}

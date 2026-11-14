@@ -83,7 +83,7 @@ volume。此選項需搭配 `dind = true`。
 
 停用 `prune`／`buildx-cleanup` 只會關閉*這個* daemon 的例行清理；一旦檔案系統實際出現空間壓力，主機層級的磁碟保護機制（請見[快取](caching.zh-TW.md)）仍會透過這兩種方式回收資源，不受這些開關影響。
 
-**Tart 供應器（macOS）：**
+**Tart 供應器（macOS 與 Linux guest）：**
 
 ```toml
 # config.toml
@@ -91,7 +91,7 @@ provider = "tart"
 url = "https://github.com/your-org"
 name = "macos-runners"
 token = "ghp_xxx"
-max-runners = 2          # Apple limits 2 concurrent macOS VMs per host
+max-runners = 2          # macOS guest 每台主機最多兩台；較大值會被限制為 2
 runner-image = "ghcr.io/cirruslabs/macos-golden-gate-xcode:latest"
 labels = ["self-hosted", "macOS"]
 log-level = "info"
@@ -109,11 +109,49 @@ pool-size = 2            # pre-warm 2 VMs for instant job pickup (~2s vs ~30s co
 # net-bridged = "en0"                  # bridge VMs to this host interface instead of Tart's NAT
 ```
 
+runscaler 會在啟動時從 Tart 映像檔偵測 guest OS，無須新增設定。macOS guest
+共用每台主機兩台 VM 的上限；`max-runners` 大於 2 時會限制為 2。
+macOS 規模集的 `min-runners` 或 `pool-size`，個別或合計超過 2 時會停止啟動。
+Linux guest 不占 macOS 名額；每組最多執行 `max-runners` 台使用中的 VM，另加
+`pool-size` 台預熱 VM。省略 `max-runners` 時預設為 10，請依主機 CPU 與記憶體
+調整。
+
+<a id="linux-guests"></a>
+
+**Linux guest。**
+
+Linux 映像檔需要執行中的 Tart Guest Agent、安裝於 `runner-dir` 且具有可執行
+`run.sh` 的 arm64 GitHub Actions runner，以及供就緒檢查使用的 `pgrep`。
+網路調整另需 guest agent 的 `admin` 使用者可免密碼執行 `sudo`，以及 `ip`；
+DNS 覆寫需要 `resolvectl`，缺少時會保留映像檔原有的 DNS。請先準備包含這些
+工具的黃金範本 VM。Tart 基礎 Linux 映像檔的磁碟起始大小為 20 GB；工作需要
+更多空間時，請建立較大的黃金範本映像檔。
+
+例如，將 `ghcr.io/cirruslabs/ubuntu:latest` 複製為本機 VM `ubuntu-runner`，
+安裝 runner 與必要工具，停止 VM 後即可使用：
+
+```toml
+provider = "tart"
+url = "https://github.com/your-org"
+name = "linux-tart-runners"
+token = "ghp_xxx"
+runner-image = "ubuntu-runner" # prepared from ghcr.io/cirruslabs/ubuntu:latest
+max-runners = 4
+labels = ["self-hosted", "linux", "arm64"]
+
+[tart]
+cpu = 4
+memory = 8192
+```
+
+guest 偵測與容量規則如上。Linux Tart 規模集與混合範例中的 macOS 規模集使用
+相同的 `[[scaleset]]` 結構。
+
 設定 `home` 後，自己執行 tart 指令時也應指向相同目錄，例如 `TART_HOME=/Volumes/Data/tart tart list`。直接執行 `tart list` 會讀取 `~/.tart`，因此看不到 runner 的映像檔或 VM。
 
 Xcode VM 映像檔體積龐大（每個 50–80 GB），而 `:latest` 標籤會使舊的映像層累積在 `$TART_HOME/cache/` 下；請設定 `cache-budget` 來限制其大小。清理作業只會處理 OCI/IPSW 快取，絕不會動到本機 VM。每次 prune 前，都會將每個 Tart runner 規模集的 `runner-image` 標記為剛使用過，因此即使一週沒有工作，也不會再把下次工作要複製的映像檔清除；在 `cache-budget` 限制下，該映像檔也會最後才被移除。
 
-**透過 VPN 連線的主機（Cloudflare WARP、Tailscale 出口節點、企業 VPN）。** 若通道無法承載 1500 位元組的封包，主機本身仍可正常運作，但 VM 的連線會失效：客體系統宣告完整大小的 TCP MSS，伺服器便以 1500 位元組的封包回應，而通道會丟棄這些封包，導致 VM 的每次 TLS 交握都停滯；runner 雖然啟動，卻始終無法連線，因此工作會一直排隊。預設情況下（`mtu = 0`），runner 會在每個 runner 啟動前查詢主機通往該 runner 規模集 GitHub 主機的路由；若該路由的 MTU 小於 1500，就會將客體系統的 MTU 設為相同值（透過 Cirrus Labs 映像檔允許的 `sudo -n ifconfig`）。若通道僅承載通往部分目的地的流量，請設定固定的 `mtu`；若要讓客體系統維持原狀，請設為 `-1`。Tart 的 NAT 也會透過主機代理 DNS，而該代理可能在主機中斷 VPN 連線後停止回應；可設定 `dns`，讓客體系統使用自己的 DNS 解析伺服器。
+**透過 VPN 連線的主機（Cloudflare WARP、Tailscale 出口節點、企業 VPN）。** 若通道無法承載 1500 位元組的封包，主機本身仍可正常運作，但 VM 的連線會失效：客體系統宣告完整大小的 TCP MSS，伺服器便以 1500 位元組的封包回應，而通道會丟棄這些封包，導致 VM 的每次 TLS 交握都停滯；runner 雖然啟動，卻始終無法連線，因此工作會一直排隊。預設情況下（`mtu = 0`），runner 會在每個 runner 啟動前查詢主機通往該 runner 規模集 GitHub 主機的路由；若該路由的 MTU 小於 1500，就會將客體系統的 MTU 設為相同值（macOS 使用 `sudo -n ifconfig`，Linux 使用 `sudo -n ip link`）。若通道僅承載通往部分目的地的流量，請設定固定的 `mtu`；若要讓客體系統維持原狀，請設為 `-1`。Tart 的 NAT 也會透過主機代理 DNS，而該代理可能在主機中斷 VPN 連線後停止回應；可設定 `dns`，讓客體系統使用自己的 DNS 解析伺服器。
 
 **選擇 Tart 網路模式（v0.12.0+）。** 共用 NAT 仍是預設模式。若 VM 已能取得位址並連線至 GitHub，請保持 `net-bridged` 未設定或為空；升級不需要變更網路設定。NAT 會讓 VM 留在主機的私有網路中，而不是為每個 VM 配發區域網路上的位址。
 
@@ -350,7 +388,7 @@ pool-size = 2
 | `--shared-volume` | `[docker] shared-volume` | | Docker 共用磁碟區路徑（Docker 供應器） |
 | `--tart-cpu` | `[tart] cpu` | `0`（映像檔預設值） | 每個 VM 的 CPU 核心數（Tart 供應器） |
 | `--tart-memory` | `[tart] memory` | `0`（映像檔預設值） | 每個 VM 的記憶體大小，單位為 MB（Tart 供應器） |
-| `--tart-runner-dir` | `[tart] runner-dir` | `/Users/admin/actions-runner` | Tart VM 內的 runner 安裝目錄 |
+| `--tart-runner-dir` | `[tart] runner-dir` | `/Users/admin/actions-runner`（macOS）、`/home/admin/actions-runner`（Linux） | Tart VM 內的 runner 安裝目錄 |
 | `--tart-pool-size` | `[tart] pool-size` | `0` | 預先暖機、可立即接收工作的 VM 數量 |
 | `--tart-net-bridged` | `[tart] net-bridged` | `""`（Tart 的 NAT） | 每個 VM 要橋接至的主機介面 |
 | `--log-level` | `log-level` | `info` | 記錄層級（debug/info/warn/error） |
@@ -361,6 +399,6 @@ pool-size = 2
 
 適用於整個程序的 `drain-timeout` 與進階調校設定鍵（清理、快取磁碟區、隔離）刻意設計為只能透過設定檔設定；完整清單請見 `config.example.toml`。
 
-與 GitLab Runner 相同，`concurrent` 是整個管理程序的上限，而各 runner 規模集的 `max-runners` 則是其個別上限。控制器會在 JIT／供應器 啟動前預留全域容量，因此多個組織，以及混合使用 Docker/Tart 的 runner 規模集，合計都無法超額占用主機容量。系統會先為每個 runner 規模集預留 `min-runners` 下限所需的容量，再以先進先出（FIFO）順序分配剩餘容量。將 `concurrent` 保持為 `0` 時，會以所有已設定的 `max-runners` 值總和作為上限，以維持向下相容的行為。
+與 GitLab Runner 相同，`concurrent` 限制管理程序內的 runner 總數，`max-runners` 則是各規模集的個別上限。控制器會在 JIT／供應器啟動前預留全域容量。Tart 預熱 VM 不持有此容量租約，因此數量會加在 `concurrent` 之外。系統會先預留各組 `min-runners` 下限所需的容量，再以先進先出（FIFO）順序分配剩餘容量。`concurrent = 0` 會使用套用 macOS 限制後的有效 `max-runners` 總和。
 
 使用 `provider` TOML 設定鍵與 `--provider` 旗標選擇 Docker 或 Tart。

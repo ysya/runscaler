@@ -6,18 +6,19 @@ import "time"
 // All flag definitions, config templates, and fallback logic
 // should reference these constants instead of hardcoding values.
 const (
-	DefaultProvider      = "docker"
-	DefaultMaxRunners    = 10
-	DefaultRunnerImage   = "ghcr.io/actions/actions-runner:latest"
-	DefaultRunnerGroup   = "default"
-	DefaultDockerSocket  = "/var/run/docker.sock"
-	DefaultDinD          = true
-	DefaultTartRunnerDir = "/Users/admin/actions-runner"
-	DefaultLogLevel      = "info"
-	DefaultLogFormat     = "text"
-	DefaultHealthPort    = 8080
-	DefaultHealthAddress = "127.0.0.1"
-	DefaultSystemName    = "dockerscaleset"
+	DefaultProvider           = "docker"
+	DefaultMaxRunners         = 10
+	DefaultRunnerImage        = "ghcr.io/actions/actions-runner:latest"
+	DefaultRunnerGroup        = "default"
+	DefaultDockerSocket       = "/var/run/docker.sock"
+	DefaultDinD               = true
+	DefaultTartRunnerDir      = "/Users/admin/actions-runner"
+	DefaultTartLinuxRunnerDir = "/home/admin/actions-runner"
+	DefaultLogLevel           = "info"
+	DefaultLogFormat          = "text"
+	DefaultHealthPort         = 8080
+	DefaultHealthAddress      = "127.0.0.1"
+	DefaultSystemName         = "dockerscaleset"
 
 	// DefaultDrainTimeout covers the longest jobs currently run on these
 	// hosts while matching GitLab Runner's documented two-hour graceful-stop
@@ -124,7 +125,6 @@ const (
 	DefaultReadyTimeout = 5 * time.Minute
 )
 
-// MaxTartVMsPerHost is Apple's limit on concurrently running macOS VMs per
-// host. It is a hard limit, not a default: Tart validation, the warm pool
-// and the host-wide VM slots all enforce it.
-const MaxTartVMsPerHost = 2
+// MaxMacOSVMsPerHost is Apple's limit on concurrently running macOS guests
+// per host. Linux Tart guests do not consume this limit.
+const MaxMacOSVMsPerHost = 2

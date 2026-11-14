@@ -20,16 +20,15 @@ func (p *TartProvider) configureGuestNetwork(ctx context.Context, vmName string)
 		return
 	}
 
-	device := "en0"
-	if out, err := p.cmd.Run(ctx, "tart", "exec", vmName, "/sbin/route", "-n", "get", "default"); err == nil {
-		if route, err := parseRouteGet(out); err == nil {
-			device = route.Interface
-		}
+	network := guestNetworkFor(p.guest)
+	device, ok := network.defaultDevice(ctx, p, vmName)
+	if !ok {
+		p.logger.Warn("Could not find the VM's default network interface; leaving its MTU and DNS alone", slog.String("vm", vmName))
+		return
 	}
 
 	if mtu > 0 {
-		if _, err := p.cmd.Run(ctx, "tart", "exec", vmName,
-			"/usr/bin/sudo", "-n", "/sbin/ifconfig", device, "mtu", strconv.Itoa(mtu)); err != nil {
+		if err := network.setMTU(ctx, p, vmName, device, mtu); err != nil {
 			p.logger.Warn("Failed to set the VM's MTU; it may not reach GitHub through the host's tunnel",
 				slog.String("vm", vmName), slog.Int("mtu", mtu), slog.Any("error", err))
 		} else {
@@ -38,7 +37,7 @@ func (p *TartProvider) configureGuestNetwork(ctx context.Context, vmName string)
 		}
 	}
 	if len(p.dns) > 0 {
-		p.setGuestDNS(ctx, vmName, device)
+		network.setDNS(ctx, p, vmName, device, p.dns)
 	}
 }
 
@@ -89,28 +88,6 @@ func (p *TartProvider) guestMTU(ctx context.Context) (int, string) {
 	p.logger.Warn("Failed to look up the host's route to GitHub; leaving the VM's MTU alone",
 		slog.String("host", host), slog.Any("error", err))
 	return 0, ""
-}
-
-// setGuestDNS points the network service behind the guest's default
-// interface at the configured resolvers.
-func (p *TartProvider) setGuestDNS(ctx context.Context, vmName, device string) {
-	out, err := p.cmd.Run(ctx, "tart", "exec", vmName, "/usr/sbin/networksetup", "-listnetworkserviceorder")
-	if err != nil {
-		p.logger.Warn("Failed to list the VM's network services; keeping its DNS",
-			slog.String("vm", vmName), slog.Any("error", err))
-		return
-	}
-	service, ok := networkServiceForDevice(out, device)
-	if !ok {
-		p.logger.Warn("No network service for the VM's default interface; keeping its DNS",
-			slog.String("vm", vmName), slog.String("interface", device))
-		return
-	}
-	args := append([]string{"exec", vmName, "/usr/bin/sudo", "-n", "/usr/sbin/networksetup", "-setdnsservers", service}, p.dns...)
-	if _, err := p.cmd.Run(ctx, "tart", args...); err != nil {
-		p.logger.Warn("Failed to set the VM's DNS servers",
-			slog.String("vm", vmName), slog.Any("error", err))
-	}
 }
 
 // registrationHost is the host part of a scale set URL, or "" when the URL

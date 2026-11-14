@@ -134,7 +134,7 @@ func TestTartProvider_BridgedMACFailureCleansUpBeforeBoot(t *testing.T) {
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 			defer cancel()
-			slot, err := p.coordinator.acquire(ctx)
+			slot, err := p.coordinator.acquire(ctx, TartGuestMacOS)
 			if err != nil {
 				t.Fatalf("failed bridged VM retained its host slot: %v", err)
 			}

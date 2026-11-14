@@ -30,7 +30,7 @@
       <div class="hero-copy">
         <p class="eyebrow"><span class="eyebrow-dot"></span> 自架 GITHUB ACTIONS RUNNER</p>
         <h1>工作來了，<em>runner 就緒。</em></h1>
-        <p class="hero-lede">一個程序在你的主機上依工作需求啟動 Docker 容器或 macOS VM。每個 runner 只執行一個工作，完成後便會移除。</p>
+        <p class="hero-lede">一個程序在你的主機上依工作需求啟動 Docker 容器或 Tart VM。每個 runner 只執行一個工作，完成後便會移除。</p>
         <div class="hero-actions">
           <a class="button button-primary" href="./configure/zh-TW.html">產生設定檔 <span aria-hidden="true">↗</span></a>
           <a class="button button-text" href="https://github.com/ysya/runscaler">查看原始碼 <span aria-hidden="true">→</span></a>
@@ -41,13 +41,13 @@
           <div><strong>1 binary</strong><span>在主機上</span></div>
         </div>
       </div>
-      <div class="hero-visual" role="img" aria-label="GitHub Actions 工作送到管理程序後，啟動 Docker 容器或 Tart macOS VM，完成後清理 runner">
+      <div class="hero-visual" role="img" aria-label="GitHub Actions 工作送到管理程序後，啟動 Docker 容器或 Tart VM，完成後清理 runner">
         <div class="visual-topline"><span class="terminal-dots" aria-hidden="true"><i></i><i></i><i></i></span><span>runscaler / 工作流程</span><span class="signal"><i></i> ONLINE</span></div>
         <div class="queue-card"><span class="node-icon">01</span><div><small>GITHUB ACTIONS</small><strong>工作排入佇列</strong></div><span class="pulse-dot"></span></div>
         <div class="flow-line"><span></span><i></i></div>
         <div class="manager-card"><span class="manager-badge">r.</span><div><small>YOUR HOST</small><strong>runscaler</strong><span>接收工作並啟動 runner</span></div></div>
         <div class="split-line" aria-hidden="true"><span></span><span></span></div>
-        <div class="provider-cards"><div><small>LINUX</small><strong>Docker</strong><span>短生命週期容器</span></div><div><small>MACOS</small><strong>Tart</strong><span>短生命週期 VM</span></div></div>
+        <div class="provider-cards"><div><small>LINUX</small><strong>Docker</strong><span>短生命週期容器</span></div><div><small>MACOS · LINUX</small><strong>Tart</strong><span>短生命週期 VM</span></div></div>
         <div class="visual-footer"><span class="footer-indicator"></span> 工作完成 <span aria-hidden="true">→</span> 移除 runner</div>
       </div>
     </section>
@@ -56,7 +56,7 @@
       <div class="section-heading"><p class="eyebrow">運作原理</p><h2>容量跟著工作佇列走。</h2><p>沿用你的主機與工作流程；Runscaler 負責中間的 runner 生命週期。</p></div>
       <div class="principle-grid">
         <article class="principle"><span class="principle-number">01 / 等待</span><h3>有工作才啟動</h3><p>透過 GitHub scale-set API 長輪詢，在收到工作指派時啟動 runner。</p></article>
-        <article class="principle"><span class="principle-number">02 / 執行</span><h3>依主機選擇環境</h3><p>在 Docker 主機使用容器；macOS 工作則可使用 Tart VM。</p></article>
+        <article class="principle"><span class="principle-number">02 / 執行</span><h3>依主機選擇環境</h3><p>在 Docker 主機使用容器；macOS 與 Linux 工作可使用 Tart VM。</p></article>
         <article class="principle"><span class="principle-number">03 / 回收</span><h3>工作結束後清理</h3><p>每個 runner 只處理一個工作。完成後會移除，重新啟動時也會清理遺留資源。</p></article>
       </div>
     </section>

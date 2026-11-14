@@ -311,7 +311,7 @@ func TestNewTartProvider_GuestNetworkFromScaleSetConfig(t *testing.T) {
 			DNS:       []string{"9.9.9.9"},
 		},
 	}
-	p := NewTartProviderWithCoordinator(ss, slog.New(slog.DiscardHandler), NewTartHostCoordinator(2))
+	p := NewTartProviderWithCoordinator(ss, slog.New(slog.DiscardHandler), NewTartHostCoordinator(2), TartGuestMacOS)
 	cmd := networkCmdRunner(routeGetHostNoVPN)
 	cmd.results["/sbin/route -n get ghes.example.com"] = cmdResult{output: []byte(routeGetHostWARP)}
 	p.cmd = cmd
@@ -487,8 +487,120 @@ func TestNewTartProvider_NetBridgedFromScaleSetConfig(t *testing.T) {
 		MaxRunners:  1,
 		Tart:        config.TartConfig{RunnerDir: "/Users/admin/actions-runner", NetBridged: "en0"},
 	}
-	p := NewTartProviderWithCoordinator(ss, slog.New(slog.DiscardHandler), NewTartHostCoordinator(2))
+	p := NewTartProviderWithCoordinator(ss, slog.New(slog.DiscardHandler), NewTartHostCoordinator(2), TartGuestMacOS)
 	if got := p.runArgs("runner-abc"); !slices.Equal(got, []string{"run", "runner-abc", "--no-graphics", "--net-bridged=en0"}) {
 		t.Errorf("runArgs = %q, want [run runner-abc --no-graphics --net-bridged=en0]", got)
+	}
+}
+
+func TestTartProvider_LinuxGuestStaysSilentWhenNothingWouldBeTuned(t *testing.T) {
+	cmd := networkCmdRunner(routeGetHostNoVPN)
+	h := &recordingHandler{}
+	p := newTestTartProvider(cmd)
+	p.logger = slog.New(h)
+	p.guest = TartGuestLinux
+
+	p.configureGuestNetwork(context.Background(), "runner-abc")
+
+	if cmd.callCount("tart exec") != 0 {
+		t.Errorf("expected no guest command and no log; calls: %v", cmd.getCalls())
+	}
+}
+
+const linuxDefaultRoute = "default via 192.168.64.1 dev enp0s1 proto dhcp src 192.168.64.7 metric 100\n"
+
+const (
+	noDefaultDevice = "Could not find the VM's default network interface; leaving its MTU and DNS alone"
+	noResolvectl    = "The VM has no resolvectl; keeping its DNS"
+)
+
+func linuxNetworkCmdRunner(hostRoute string) *mockCommandRunner {
+	cmd := networkCmdRunner(hostRoute)
+	cmd.results["tart exec runner-abc ip -o route show default"] = cmdResult{output: []byte(linuxDefaultRoute)}
+	return cmd
+}
+
+func newLinuxNetworkProvider(cmd *mockCommandRunner, h *recordingHandler) *TartProvider {
+	p := newTestTartProvider(cmd)
+	p.guest = TartGuestLinux
+	if h != nil {
+		p.logger = slog.New(h)
+	}
+	return p
+}
+
+var linuxSetMTU1380 = []string{"exec", "runner-abc", "sudo", "-n", "ip", "link", "set", "dev", "enp0s1", "mtu", "1380"}
+
+func TestLinuxDefaultRouteDevice(t *testing.T) {
+	for out, want := range map[string]string{
+		linuxDefaultRoute:               "enp0s1",
+		"default dev eth0 scope link\n": "eth0",
+		"default via 10.0.0.1 dev ens3\ndefault via 10.0.0.2 dev ens4 metric 200\n": "ens3",
+		"":                           "",
+		"default via 192.168.64.1\n": "",
+	} {
+		if got, ok := linuxDefaultRouteDevice([]byte(out)); got != want || ok != (want != "") {
+			t.Errorf("linuxDefaultRouteDevice(%q) = %q, %v; want %q", out, got, ok, want)
+		}
+	}
+}
+
+func TestTartProvider_LinuxGuestMTUUsesIPLink(t *testing.T) {
+	cmd := linuxNetworkCmdRunner(routeGetHostWARP) // 1380-byte tunnel
+	p := newLinuxNetworkProvider(cmd, nil)
+
+	p.configureGuestNetwork(context.Background(), "runner-abc")
+
+	calls := cmd.getCalls()
+	if callIndex(calls, "tart", linuxSetMTU1380...) < 0 {
+		t.Errorf("MTU was not set with ip link; calls: %v", calls)
+	}
+	if n := countCallsContaining(calls, "ifconfig") + countCallsContaining(calls, "networksetup"); n != 0 {
+		t.Errorf("ran %d macOS commands in a Linux guest; calls: %v", n, calls)
+	}
+}
+
+func TestTartProvider_LinuxGuestDNSUsesResolvectl(t *testing.T) {
+	cmd := linuxNetworkCmdRunner(routeGetHostNoVPN)
+	p := newLinuxNetworkProvider(cmd, nil)
+	p.dns = []string{"1.1.1.1", "8.8.8.8"}
+
+	p.configureGuestNetwork(context.Background(), "runner-abc")
+
+	if callIndex(cmd.getCalls(), "tart", "exec", "runner-abc", "sudo", "-n", "resolvectl", "dns", "enp0s1", "1.1.1.1", "8.8.8.8") < 0 {
+		t.Errorf("DNS was not set with resolvectl; calls: %v", cmd.getCalls())
+	}
+}
+
+func TestTartProvider_LinuxGuestWithoutResolvectlKeepsItsDNS(t *testing.T) {
+	cmd := linuxNetworkCmdRunner(routeGetHostWARP)
+	cmd.results["tart exec runner-abc sh -c command -v resolvectl"] = cmdResult{err: errors.New("exit status 1")}
+	h := &recordingHandler{}
+	p := newLinuxNetworkProvider(cmd, h)
+	p.dns = []string{"1.1.1.1"}
+
+	p.configureGuestNetwork(context.Background(), "runner-abc")
+
+	calls := cmd.getCalls()
+	if countCallsContaining(calls, "resolvectl dns") != 0 || h.count(slog.LevelWarn, noResolvectl) != 1 {
+		t.Errorf("expected no resolvectl dns call and one warning; calls: %v", calls)
+	}
+	if callIndex(calls, "tart", linuxSetMTU1380...) < 0 {
+		t.Errorf("the MTU must still be set; calls: %v", calls)
+	}
+}
+
+func TestTartProvider_LinuxGuestWithoutDefaultRouteIsLeftAlone(t *testing.T) {
+	cmd := networkCmdRunner(routeGetHostWARP)
+	cmd.results["tart exec runner-abc ip -o route show default"] = cmdResult{err: errors.New("exit status 1")}
+	h := &recordingHandler{}
+	p := newLinuxNetworkProvider(cmd, h)
+	p.dns = []string{"1.1.1.1"}
+
+	p.configureGuestNetwork(context.Background(), "runner-abc")
+
+	calls := cmd.getCalls()
+	if countCallsContaining(calls, "ip link")+countCallsContaining(calls, "resolvectl") != 0 || h.count(slog.LevelWarn, noDefaultDevice) != 1 {
+		t.Errorf("expected the guest left alone with one warning; calls: %v", calls)
 	}
 }

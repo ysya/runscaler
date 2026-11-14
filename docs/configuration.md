@@ -102,7 +102,7 @@ sweep — the host-wide disk guard (see [Caching](caching.md)) still reclaims
 through both once a filesystem is actually under pressure, regardless of
 these switches.
 
-**Tart provider (macOS):**
+**Tart provider (macOS and Linux guests):**
 
 ```toml
 # config.toml
@@ -110,7 +110,7 @@ provider = "tart"
 url = "https://github.com/your-org"
 name = "macos-runners"
 token = "ghp_xxx"
-max-runners = 2          # Apple limits 2 concurrent macOS VMs per host
+max-runners = 2          # macOS guests are capped at 2 per host; larger values are capped
 runner-image = "ghcr.io/cirruslabs/macos-golden-gate-xcode:latest"
 labels = ["self-hosted", "macOS"]
 log-level = "info"
@@ -127,6 +127,46 @@ pool-size = 2            # pre-warm 2 VMs for instant job pickup (~2s vs ~30s co
 # dns = ["1.1.1.1", "8.8.8.8"]         # guest resolvers ([] = keep the one Tart's NAT hands out)
 # net-bridged = "en0"                  # bridge VMs to this host interface instead of Tart's NAT
 ```
+
+runscaler detects each Tart image's guest OS at startup; no guest setting is
+needed. macOS guests share Apple's two-VM host limit: larger `max-runners`
+values are capped at 2. A `min-runners` or `pool-size` above 2, alone or summed
+across macOS scale sets, stops startup. Linux guests do not consume macOS
+permits. Each Linux scale set can run up to `max-runners` active VMs plus
+`pool-size` warm VMs; omitted `max-runners` defaults to 10. Set these values
+for the host's available CPU and memory.
+
+<a id="linux-guests"></a>
+
+**Linux guests.**
+
+Linux images need the Tart Guest Agent running, an arm64 GitHub Actions
+runner installed with executable `run.sh` at `runner-dir`, and `pgrep` for
+readiness checks. Network tuning also needs passwordless `sudo` for the guest
+agent's `admin` user and `ip`; DNS overrides need `resolvectl`. If it is absent,
+DNS stays as provided by the image. Prepare a golden VM with these tools
+before using it as a runner image. Tart's base Linux images start with a 20 GB
+disk; bake a larger golden image when jobs need more space.
+
+For example, clone `ghcr.io/cirruslabs/ubuntu:latest` to a local VM named
+`ubuntu-runner`, install the runner and required tools, then stop the VM and use:
+
+```toml
+provider = "tart"
+url = "https://github.com/your-org"
+name = "linux-tart-runners"
+token = "ghp_xxx"
+runner-image = "ubuntu-runner" # prepared from ghcr.io/cirruslabs/ubuntu:latest
+max-runners = 4
+labels = ["self-hosted", "linux", "arm64"]
+
+[tart]
+cpu = 4
+memory = 8192
+```
+
+See the guest detection and capacity rules above. A Linux Tart scale set uses
+the same `[[scaleset]]` structure as the macOS set in the mixed-provider example.
 
 With `home` set, point your own tart commands at the same directory —
 `TART_HOME=/Volumes/Data/tart tart list`. A bare `tart list` reads `~/.tart`
@@ -146,8 +186,8 @@ answer with 1500-byte packets the tunnel drops, and every TLS handshake from
 the VM stalls — the runner starts but never connects, so jobs stay queued. By
 default (`mtu = 0`) runner looks up the host's route to the scale set's GitHub
 host before each runner starts and, when that route's MTU is below 1500, sets
-the guest's MTU to match (`sudo -n ifconfig`, which the Cirrus Labs images
-allow). Set a fixed `mtu` if the tunnel only carries some destinations, or
+the guest's MTU to match (`sudo -n ifconfig` on macOS or `sudo -n ip link`
+on Linux). Set a fixed `mtu` if the tunnel only carries some destinations, or
 `-1` to leave guests alone. Tart's NAT also proxies DNS through the host, and
 that proxy can stop answering after the host's VPN disconnects; set `dns` to
 give the guests resolvers of their own.
@@ -484,7 +524,7 @@ pool-size = 2
 | `--shared-volume`   | `[docker] shared-volume` |                                     | Shared Docker volume path (Docker provider)        |
 | `--tart-cpu`        | `[tart] cpu`         | `0` (image default)                     | CPU cores per VM (Tart provider)                   |
 | `--tart-memory`     | `[tart] memory`      | `0` (image default)                     | Memory in MB per VM (Tart provider)                |
-| `--tart-runner-dir` | `[tart] runner-dir`  | `/Users/admin/actions-runner`           | Runner install directory inside Tart VM           |
+| `--tart-runner-dir` | `[tart] runner-dir`  | `/Users/admin/actions-runner` (macOS), `/home/admin/actions-runner` (Linux) | Runner install directory inside Tart VM           |
 | `--tart-pool-size`  | `[tart] pool-size`   | `0`                                     | Number of pre-warmed VMs for instant job pickup   |
 | `--tart-net-bridged` | `[tart] net-bridged` | `""` (Tart's NAT)                      | Host interface to bridge each VM to               |
 | `--log-level`       | `log-level`          | `info`                                  | Log level (debug/info/warn/error)                 |
@@ -497,12 +537,11 @@ Process-wide `drain-timeout` and advanced tuning keys (cleanup, cache volumes,
 isolation) are config-file only by design — see `config.example.toml` for the
 full list.
 
-Like GitLab Runner, `concurrent` is the manager-wide ceiling while each scale
-set's `max-runners` is its local ceiling. The controller reserves global
-capacity before JIT/provider startup, so multiple organizations and mixed
-Docker/Tart scale sets cannot collectively oversubscribe the host. Capacity for
-every scale set's `min-runners` floor is reserved before FIFO surplus capacity
-is handed out. Leaving `concurrent` at `0` keeps backward-compatible behavior
-by using the sum of all configured `max-runners` values.
+Like GitLab Runner, `concurrent` limits runners across the manager, while
+`max-runners` is each scale set's local limit. The controller reserves global
+capacity before JIT/provider startup. Warm Tart VMs do not hold those leases
+and come on top of `concurrent`. Every scale set's `min-runners` floor is
+reserved before FIFO surplus capacity is handed out. With `concurrent = 0`,
+the limit is the sum of effective `max-runners` values after macOS caps.
 
 Use the `provider` TOML key and `--provider` flag to select Docker or Tart.

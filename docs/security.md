@@ -14,4 +14,4 @@ Isolation knobs, all per scale set under `[docker]`:
 | `shared-volume-name` | back each scale set's shared volume with a different named volume so scale sets of different trust levels don't share files |
 | `dind = false` | no socket mount at all — strongest container-level isolation, no image builds |
 
-The Tart provider isolates at the hypervisor boundary — each job gets a fresh macOS VM cloned from the base image and deleted afterwards.
+The Tart provider isolates at the hypervisor boundary — each job gets a fresh VM cloned from the base image and deleted afterwards.

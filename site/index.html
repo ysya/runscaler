@@ -30,7 +30,7 @@
       <div class="hero-copy">
         <p class="eyebrow"><span class="eyebrow-dot"></span> SELF-HOSTED GITHUB ACTIONS</p>
         <h1>Runners ready <em>when jobs arrive.</em></h1>
-        <p class="hero-lede">One process on your host starts disposable Docker containers or macOS VMs for GitHub Actions, then removes them when the job is done.</p>
+        <p class="hero-lede">One process on your host starts disposable Docker containers or Tart VMs for GitHub Actions, then removes them when the job is done.</p>
         <div class="hero-actions">
           <a class="button button-primary" href="./configure/">Build your config <span aria-hidden="true">↗</span></a>
           <a class="button button-text" href="https://github.com/ysya/runscaler">Explore the source <span aria-hidden="true">→</span></a>
@@ -41,13 +41,13 @@
           <div><strong>1 binary</strong><span>on the host</span></div>
         </div>
       </div>
-      <div class="hero-visual" role="img" aria-label="A GitHub Actions job reaches the manager, which starts a disposable Docker runner or Tart macOS virtual machine and cleans it up after the job">
+      <div class="hero-visual" role="img" aria-label="A GitHub Actions job reaches the manager, which starts a disposable Docker runner or Tart virtual machine and cleans it up after the job">
         <div class="visual-topline"><span class="terminal-dots" aria-hidden="true"><i></i><i></i><i></i></span><span>runscaler / live flow</span><span class="signal"><i></i> ONLINE</span></div>
         <div class="queue-card"><span class="node-icon">01</span><div><small>GITHUB ACTIONS</small><strong>Job queued</strong></div><span class="pulse-dot"></span></div>
         <div class="flow-line"><span></span><i></i></div>
         <div class="manager-card"><span class="manager-badge">r.</span><div><small>YOUR HOST</small><strong>runscaler</strong><span>Receives the assignment, starts a runner</span></div></div>
         <div class="split-line" aria-hidden="true"><span></span><span></span></div>
-        <div class="provider-cards"><div><small>LINUX</small><strong>Docker</strong><span>Ephemeral container</span></div><div><small>MACOS</small><strong>Tart</strong><span>Ephemeral VM</span></div></div>
+        <div class="provider-cards"><div><small>LINUX</small><strong>Docker</strong><span>Ephemeral container</span></div><div><small>MACOS · LINUX</small><strong>Tart</strong><span>Ephemeral VM</span></div></div>
         <div class="visual-footer"><span class="footer-indicator"></span> job finished <span aria-hidden="true">→</span> runner removed</div>
       </div>
     </section>
@@ -56,7 +56,7 @@
       <div class="section-heading"><p class="eyebrow">THE IDEA</p><h2>Capacity follows the queue.</h2><p>Keep your own host and workflow. Runscaler handles the runner lifecycle between them.</p></div>
       <div class="principle-grid">
         <article class="principle"><span class="principle-number">01 / LISTEN</span><h3>Wait for real work</h3><p>Long-poll the GitHub scale-set API and start runners in response to assigned jobs.</p></article>
-        <article class="principle"><span class="principle-number">02 / RUN</span><h3>Choose the right host</h3><p>Use Docker containers on a Docker host or Tart virtual machines for macOS jobs.</p></article>
+        <article class="principle"><span class="principle-number">02 / RUN</span><h3>Choose the right host</h3><p>Use Docker containers on a Docker host or Tart virtual machines for macOS and Linux jobs.</p></article>
         <article class="principle"><span class="principle-number">03 / RECOVER</span><h3>Leave a clean slate</h3><p>Each runner handles one job. Runscaler removes it afterward and reconciles resources after a restart.</p></article>
       </div>
     </section>

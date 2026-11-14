@@ -108,40 +108,91 @@ func (r execCommandRunner) RunStreaming(ctx context.Context, name string, args .
 
 // warmVM represents a pre-booted VM ready to accept a runner.
 type warmVM struct {
-	name    string
-	cancel  context.CancelFunc // cancels the `tart run` goroutine
-	done    <-chan struct{}    // closed when `tart run` exits (VM died)
-	slotIdx int                // index into vmSlots for deterministic MAC assignment
-	release sync.Once          // host slot must be returned exactly once
+	name         string
+	cancel       context.CancelFunc // cancels the `tart run` goroutine
+	done         <-chan struct{}    // closed when `tart run` exits (VM died)
+	slot         tartSlot           // host permit and deterministic MAC assignment
+	release      sync.Once          // host slot must be returned exactly once
+	watchRelease sync.Once          // one waiter for eventual stop after failed cleanup
 }
 
-// TartHostCoordinator enforces the Apple host-wide VM limit and assigns MAC
-// slots uniquely across every Tart-backed scale set in this process.
+// tartSlot is held until its VM is known to have stopped.
+type tartSlot struct {
+	index int
+	macOS bool
+	id    uint64
+}
+
+// TartHostCoordinator limits macOS guests and gives every Tart VM a unique
+// MAC slot across all scale sets in this process.
 type TartHostCoordinator struct {
-	slots chan int
+	macOSPermits chan struct{}
+	mu           sync.Mutex
+	used         map[int]tartSlot
+	nextID       uint64
 }
 
-func NewTartHostCoordinator(limit int) *TartHostCoordinator {
-	if limit < 1 {
-		limit = 1
+func NewTartHostCoordinator(macOSLimit int) *TartHostCoordinator {
+	if macOSLimit < 1 {
+		macOSLimit = 1
 	}
-	c := &TartHostCoordinator{slots: make(chan int, limit)}
-	for i := range limit {
-		c.slots <- i
+	c := &TartHostCoordinator{
+		macOSPermits: make(chan struct{}, macOSLimit),
+		used:         make(map[int]tartSlot),
+	}
+	for range macOSLimit {
+		c.macOSPermits <- struct{}{}
 	}
 	return c
 }
 
-func (c *TartHostCoordinator) acquire(ctx context.Context) (int, error) {
-	select {
-	case idx := <-c.slots:
-		return idx, nil
-	case <-ctx.Done():
-		return 0, ctx.Err()
+func (c *TartHostCoordinator) acquire(ctx context.Context, guest TartGuest) (tartSlot, error) {
+	macOS := guest != TartGuestLinux
+	if macOS {
+		select {
+		case <-c.macOSPermits:
+		case <-ctx.Done():
+			return tartSlot{}, ctx.Err()
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		if macOS {
+			c.macOSPermits <- struct{}{}
+		}
+		return tartSlot{}, err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	index := 0
+	for {
+		if _, exists := c.used[index]; !exists {
+			break
+		}
+		index++
+	}
+	c.nextID++
+	slot := tartSlot{index: index, macOS: macOS, id: c.nextID}
+	c.used[index] = slot
+	return slot, nil
+}
+
+func (c *TartHostCoordinator) release(slot tartSlot) {
+	c.mu.Lock()
+	if current, exists := c.used[slot.index]; !exists || current != slot {
+		c.mu.Unlock()
+		return
+	}
+	delete(c.used, slot.index)
+	c.mu.Unlock()
+	if slot.macOS {
+		c.macOSPermits <- struct{}{}
 	}
 }
 
-func (c *TartHostCoordinator) release(idx int) { c.slots <- idx }
+func natMAC(index int) string {
+	n := uint64(index) + 1
+	return net.HardwareAddr{0x02, byte(n >> 32), byte(n >> 24), byte(n >> 16), byte(n >> 8), byte(n)}.String()
+}
 
 // TartProvider runs GitHub Actions runners as ephemeral Tart macOS VMs.
 //
@@ -165,7 +216,8 @@ type TartProvider struct {
 	cpu         int    // 0 = use image default
 	memory      int    // MB, 0 = use image default
 	poolSize    int
-	maxRunners  int
+	guest       TartGuest
+	vmSlots     chan struct{} // Linux VM bound, held until the VM is known stopped
 	logger      *slog.Logger
 	cmd         CommandRunner
 	coordinator *TartHostCoordinator
@@ -190,18 +242,16 @@ type TartProvider struct {
 	poolStop context.CancelFunc
 	poolWg   sync.WaitGroup
 
-	// vmSlots is a pool of slot indices limiting total concurrent VMs.
-	// Each slot has a deterministic MAC address to prevent DHCP lease exhaustion.
-	// Apple Silicon enforces a max of 2 concurrent macOS VMs per host.
-	activeVMs sync.Map // instanceID -> *warmVM, for exit watching and cleanup
+	// activeVMs tracks runner VMs for exit watching and cleanup.
+	activeVMs typedSyncMap[string, *warmVM]
 }
 
 // NewTartProviderWithCoordinator creates a TartProvider from scale set config.
 // coordinator is shared by every Tart scale set on the host so MAC slots and
 // the two-VM limit are host-wide; nil gets a private one.
-func NewTartProviderWithCoordinator(ss config.ScaleSetConfig, logger *slog.Logger, coordinator *TartHostCoordinator) *TartProvider {
+func NewTartProviderWithCoordinator(ss config.ScaleSetConfig, logger *slog.Logger, coordinator *TartHostCoordinator, guest TartGuest) *TartProvider {
 	if coordinator == nil {
-		coordinator = NewTartHostCoordinator(config.MaxTartVMsPerHost)
+		coordinator = NewTartHostCoordinator(config.MaxMacOSVMsPerHost)
 	}
 	p := &TartProvider{
 		baseImage:   ss.RunnerImage,
@@ -210,7 +260,7 @@ func NewTartProviderWithCoordinator(ss config.ScaleSetConfig, logger *slog.Logge
 		cpu:         ss.Tart.CPU,
 		memory:      ss.Tart.Memory,
 		poolSize:    ss.Tart.PoolSize,
-		maxRunners:  ss.MaxRunners,
+		guest:       guest,
 		logger:      logger,
 		cmd:         TartCommandRunner(ss.Tart.Home),
 		coordinator: coordinator,
@@ -219,6 +269,15 @@ func NewTartProviderWithCoordinator(ss config.ScaleSetConfig, logger *slog.Logge
 		dns:         ss.Tart.DNS,
 		netBridged:  ss.Tart.NetBridged,
 		githubHost:  registrationHost(ss.RegistrationURL),
+	}
+	if p.runnerDir == "" {
+		p.runnerDir = config.DefaultTartRunnerDir
+		if guest == TartGuestLinux {
+			p.runnerDir = config.DefaultTartLinuxRunnerDir
+		}
+	}
+	if guest == TartGuestLinux {
+		p.vmSlots = make(chan struct{}, max(1, ss.MaxRunners+ss.Tart.PoolSize))
 	}
 	return p
 }
@@ -336,13 +395,33 @@ func EnsureTartImage(ctx context.Context, runner CommandRunner, image string, lo
 // bootVM clones and boots a Tart VM, waits for Guest Agent readiness.
 // Returns a warmVM that is ready for runner injection via `tart exec`.
 func (p *TartProvider) bootVM(ctx context.Context, name string) (*warmVM, error) {
-	// 0. Acquire a VM slot (blocks if all slots are in use)
-	slotIdx, err := p.coordinator.acquire(ctx)
+	// 0. Reserve this scale set's VM bound, then the host permit and MAC.
+	if p.vmSlots != nil {
+		select {
+		case p.vmSlots <- struct{}{}:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	slot, err := p.coordinator.acquire(ctx, p.guest)
 	if err != nil {
+		if p.vmSlots != nil {
+			<-p.vmSlots
+		}
 		return nil, err
 	}
 
-	releaseSlot := func() { p.coordinator.release(slotIdx) }
+	releaseSlot := func() {
+		p.coordinator.release(slot)
+		if p.vmSlots != nil {
+			<-p.vmSlots
+		}
+	}
+	deleteClone := func() {
+		cleanCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+		defer cancel()
+		_, _ = p.cmd.Run(cleanCtx, "tart", "delete", name)
+	}
 
 	// 1. Clone base image (APFS copy-on-write, near-instant)
 	if _, err := p.cmd.Run(ctx, "tart", "clone", p.baseImage, name); err != nil {
@@ -371,9 +450,31 @@ func (p *TartProvider) bootVM(ctx context.Context, name string) (*warmVM, error)
 		)
 	}
 
+	// Check the same config that will receive the MAC, before the VM can run.
+	cfg, configErr := readTartVMConfig(p.home, name)
+	if configErr == nil {
+		actual, err := tartGuestFromConfig(cfg)
+		if err != nil || actual != p.guest {
+			deleteClone()
+			releaseSlot()
+			if err != nil {
+				return nil, err
+			}
+			return nil, fmt.Errorf("runner-image %q changed guest OS from %s to %s since startup; restart runner", p.baseImage, p.guest, actual)
+		}
+	} else if p.guest == TartGuestLinux {
+		deleteClone()
+		releaseSlot()
+		return nil, configErr
+	}
+
 	// 3. Set deterministic MAC address to prevent DHCP lease exhaustion.
 	//    Each slot always gets the same MAC → same DHCP lease → no IP waste.
-	if err := p.setVMMAC(ctx, name, slotIdx); err != nil {
+	macErr := configErr
+	if macErr == nil {
+		macErr = p.writeVMMAC(ctx, name, slot.index, cfg)
+	}
+	if err := macErr; err != nil {
 		if p.netBridged != "" {
 			cleanCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 			_, _ = p.cmd.Run(cleanCtx, "tart", "delete", name)
@@ -398,46 +499,35 @@ func (p *TartProvider) bootVM(ctx context.Context, name string) (*warmVM, error)
 		}
 	}()
 
+	vm := &warmVM{name: name, cancel: vmCancel, done: vmDone, slot: slot}
 	// 5. Wait for Guest Agent to be ready (tart exec <name> true)
 	if err := p.waitForExec(ctx, name); err != nil {
-		vmCancel()
-		_, _ = p.cmd.Run(context.WithoutCancel(ctx), "tart", "stop", name)
-		_, _ = p.cmd.Run(context.WithoutCancel(ctx), "tart", "delete", name)
-		releaseSlot()
+		p.destroyVM(vm)
 		return nil, fmt.Errorf("guest agent not ready on %s: %w", name, err)
 	}
 
-	return &warmVM{name: name, cancel: vmCancel, done: vmDone, slotIdx: slotIdx}, nil
+	return vm, nil
 }
 
 // setVMMAC writes a deterministic MAC address to the VM's config.json.
 // NAT keeps its original slot addresses. Bridged addresses incorporate the
 // host interface's hardware address so separate hosts do not share that pool.
 func (p *TartProvider) setVMMAC(ctx context.Context, name string, slotIdx int) error {
-	tartHome := p.home
-	if tartHome == "" {
-		tartHome = os.Getenv("TART_HOME")
+	cfg, err := readTartVMConfig(p.home, name)
+	if err != nil {
+		return err
 	}
-	if tartHome == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return fmt.Errorf("get home dir: %w", err)
-		}
-		tartHome = filepath.Join(home, ".tart")
+	return p.writeVMMAC(ctx, name, slotIdx, cfg)
+}
+
+func (p *TartProvider) writeVMMAC(ctx context.Context, name string, slotIdx int, cfg map[string]any) error {
+	tartHome, err := TartHomeDir(p.home)
+	if err != nil {
+		return err
 	}
 	configPath := filepath.Join(tartHome, "vms", name, "config.json")
 
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		return fmt.Errorf("read VM config: %w", err)
-	}
-
-	var cfg map[string]any
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return fmt.Errorf("parse VM config: %w", err)
-	}
-
-	mac := fmt.Sprintf("02:00:00:00:00:%02x", slotIdx+1)
+	mac := natMAC(slotIdx)
 	if p.netBridged != "" {
 		out, err := p.cmd.Run(ctx, "/sbin/ifconfig", p.netBridged)
 		if err != nil {
@@ -491,7 +581,23 @@ func vmExited(vm *warmVM) bool {
 }
 
 func (p *TartProvider) releaseVM(vm *warmVM) {
-	vm.release.Do(func() { p.coordinator.release(vm.slotIdx) })
+	vm.release.Do(func() {
+		p.coordinator.release(vm.slot)
+		if p.vmSlots != nil {
+			<-p.vmSlots
+		}
+	})
+}
+
+// releaseVMWhenExited keeps failed cleanup from retaining a stopped VM's
+// capacity while the controller is waiting to start another instance.
+func (p *TartProvider) releaseVMWhenExited(vm *warmVM) {
+	vm.watchRelease.Do(func() {
+		go func() {
+			<-vm.done
+			p.releaseVM(vm)
+		}()
+	})
 }
 
 // destroyVM stops and deletes a warm VM. The slot is released only after the
@@ -512,10 +618,7 @@ func (p *TartProvider) destroyVM(vm *warmVM) {
 		slog.Any("stop_error", stopErr),
 		slog.Any("delete_error", deleteErr),
 	)
-	go func() {
-		<-vm.done
-		p.releaseVM(vm)
-	}()
+	p.releaseVMWhenExited(vm)
 }
 
 // StartInstance starts a GitHub Actions runner in a Tart VM.
@@ -589,14 +692,16 @@ func (p *TartProvider) RemoveInstance(ctx context.Context, instanceID string) er
 	if tartInstanceAbsent(deleteErr) {
 		deleteErr = nil
 	}
-	value, tracked := p.activeVMs.Load(instanceID)
+	vm, tracked := p.activeVMs.Load(instanceID)
 	knownStopped := stopErr == nil || deleteErr == nil
 	if tracked {
-		knownStopped = knownStopped || vmExited(value.(*warmVM))
+		knownStopped = knownStopped || vmExited(vm)
+	}
+	if tracked && !knownStopped {
+		p.releaseVMWhenExited(vm)
 	}
 	if tracked && knownStopped {
-		if value, ok := p.activeVMs.LoadAndDelete(instanceID); ok {
-			vm := value.(*warmVM)
+		if vm, ok := p.activeVMs.LoadAndDelete(instanceID); ok {
 			vm.cancel()
 			p.releaseVM(vm)
 		}
@@ -624,11 +729,10 @@ func tartInstanceAbsent(err error) bool {
 }
 
 func (p *TartProvider) WaitInstance(ctx context.Context, instanceID string) error {
-	value, ok := p.activeVMs.Load(instanceID)
+	vm, ok := p.activeVMs.Load(instanceID)
 	if !ok {
 		return fmt.Errorf("unknown Tart VM %s", instanceID)
 	}
-	vm := value.(*warmVM)
 	select {
 	case <-vm.done:
 		return nil

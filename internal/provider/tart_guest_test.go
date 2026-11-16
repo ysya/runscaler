@@ -73,7 +73,7 @@ func TestDetectTartGuest(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r := &cloningRunner{home: t.TempDir(), config: tt.config}
-			got, err := DetectTartGuest(context.Background(), r, r.home, "example/image:latest")
+			got, err := DetectTartGuest(context.Background(), r, r.home, "example/image:latest", CloneFloor{})
 			if (err != nil) != tt.wantErr || (err == nil && got != tt.want) {
 				t.Fatalf("got %v, %v; want %v, error %v", got, err, tt.want, tt.wantErr)
 			}
@@ -93,7 +93,7 @@ func TestDetectTartGuest(t *testing.T) {
 
 func TestDetectTartGuest_CloneFailureNamesTheImage(t *testing.T) {
 	r := &cloningRunner{home: t.TempDir(), cloneErr: errors.New("no space left")}
-	_, err := DetectTartGuest(context.Background(), r, r.home, "example/image:latest")
+	_, err := DetectTartGuest(context.Background(), r, r.home, "example/image:latest", CloneFloor{})
 	if err == nil || !strings.Contains(err.Error(), "example/image:latest") {
 		t.Fatalf("error = %v, want it to name the image", err)
 	}
@@ -105,7 +105,7 @@ func TestDetectTartGuest_CloneFailureNamesTheImage(t *testing.T) {
 func TestDetectTartGuest_DeletesTheCloneAfterCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	r := &cloningRunner{home: t.TempDir(), config: `{"os":"linux"}`, onClone: cancel}
-	_, _ = DetectTartGuest(ctx, r, r.home, "example/image:latest")
+	_, _ = DetectTartGuest(ctx, r, r.home, "example/image:latest", CloneFloor{})
 	if len(r.calls) < 2 || callIndex(r.calls, "tart", "delete", r.calls[0].args[2]) < 0 || r.deleteCtxErr != nil {
 		t.Fatalf("delete must run with a live context after cancellation; calls: %v, ctx error: %v", r.calls, r.deleteCtxErr)
 	}
@@ -375,7 +375,7 @@ func TestDetectTartGuest_DeletesPartialCloneAfterFailure(t *testing.T) {
 			if cancelled {
 				r.onClone = cancel
 			}
-			_, err := DetectTartGuest(ctx, r, r.home, "example/image:latest")
+			_, err := DetectTartGuest(ctx, r, r.home, "example/image:latest", CloneFloor{})
 			if !errors.Is(err, cloneErr) {
 				t.Fatalf("original clone error lost: %v", err)
 			}

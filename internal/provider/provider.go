@@ -22,6 +22,12 @@ type InstanceProvider interface {
 	Shutdown(ctx context.Context)
 }
 
+// InstancePreflight optionally rejects provisioning before GitHub creates a
+// JIT registration. Providers must recheck allocation constraints when used.
+type InstancePreflight interface {
+	CheckStart(context.Context) error
+}
+
 // InstanceWatcher is optionally implemented by providers that can observe an
 // instance exiting independently of GitHub job messages. A nil return means
 // the instance stopped; a non-nil error means observation failed or the

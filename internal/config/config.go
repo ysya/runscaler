@@ -83,6 +83,13 @@ type ScaleSetConfig struct {
 	GitHubApp       *GitHubAppConfig `mapstructure:"github-app"`
 	Retry           *RetryConfig     `mapstructure:"retry"`
 
+	// SweepMode controls the sweep of leaked JIT runner registrations: off
+	// (default), log (report candidates only) or remove. See
+	// internal/regsweep. SweepInterval is the period between sweeps (0 =
+	// DefaultSweepInterval).
+	SweepMode     string        `mapstructure:"registration-sweep-mode"`
+	SweepInterval time.Duration `mapstructure:"registration-sweep-interval"`
+
 	// DisableUpdate stops GitHub from updating the runner binary inside the
 	// container or VM. Pointer: nil = inherit default (true), matching the
 	// image-based model — the runner is refreshed by rebuilding the image, and
@@ -410,6 +417,30 @@ type TartConfig struct {
 	// hand out a lease, leaving the guest on a 169.254.x.x address with no
 	// route out. Empty (default) keeps NAT.
 	NetBridged string `mapstructure:"net-bridged"`
+	// NetSoftnet boots each VM with `tart run --net-softnet`: Tart's Softnet
+	// isolation, which keeps the guest off the other VMs and the host's
+	// private networks while it still reaches the internet. By default
+	// Softnet still admits guest traffic to the host itself (its vmnet
+	// gateway, every listening port); block that with NetSoftnetBlock
+	// "out @host". Softnet must be on PATH and setuid root (see Tart's
+	// docs). It cannot be combined with NetBridged. false (default) keeps NAT.
+	NetSoftnet bool `mapstructure:"net-softnet"`
+	// NetSoftnetAllow and NetSoftnetBlock are Softnet rule lists passed
+	// verbatim as `tart run --net-softnet-allow=` / `--net-softnet-block=`
+	// (Softnet's --allow / --block: a CIDR, or "in|out [proto P] [TARGET]
+	// [port N[:M]]" where TARGET may be @host, the gateway of this boot).
+	// Example that closes the host but keeps its DNS forwarder:
+	// block "out @host", allow "out proto udp @host port 53,out proto tcp
+	// @host port 53". Either one requires NetSoftnet. Empty = Softnet's
+	// defaults.
+	NetSoftnetAllow string `mapstructure:"net-softnet-allow"`
+	NetSoftnetBlock string `mapstructure:"net-softnet-block"`
+	// CloneMinFreeGB refuses to clone a new VM while the filesystem that
+	// holds TART_HOME has fewer than this many GiB free. The refusal is a
+	// failed start (the job stays queued), and a free-space read that fails
+	// also refuses. Unlike [disk], which only reclaims and then starts the
+	// runner anyway, this is a hard floor. 0 (default) = no floor.
+	CloneMinFreeGB int `mapstructure:"clone-min-free-gb"`
 
 	// CacheCleanup enables periodic `tart prune` of the OCI/IPSW caches under
 	// TART_HOME. Pointer: nil = inherit default (true). Local VMs are never
@@ -593,6 +624,9 @@ func (ss *ScaleSetConfig) ValidationErrors() []error {
 	if ss.RunnerImage == "" {
 		add(fmt.Errorf("runner-image is required"))
 	}
+	for _, err := range ss.sweepErrors() {
+		add(err)
+	}
 
 	switch ss.Provider {
 	case DefaultProvider:
@@ -651,6 +685,27 @@ func (ss *ScaleSetConfig) ValidationErrors() []error {
 		}
 		if b := ss.Tart.NetBridged; b != "" && (strings.HasPrefix(b, "-") || strings.ContainsAny(b, " \t\n=")) {
 			add(fmt.Errorf("tart net-bridged %q is not a host interface name", b))
+		}
+		if ss.Tart.NetSoftnet && ss.Tart.NetBridged != "" {
+			add(fmt.Errorf("tart net-softnet and net-bridged cannot both be set"))
+		}
+		for _, opt := range [...]struct{ key, rules string }{
+			{"net-softnet-allow", ss.Tart.NetSoftnetAllow},
+			{"net-softnet-block", ss.Tart.NetSoftnetBlock},
+		} {
+			key, rules := opt.key, opt.rules
+			if rules == "" {
+				continue
+			}
+			if !ss.Tart.NetSoftnet {
+				add(fmt.Errorf("tart %s requires net-softnet = true", key))
+			}
+			if strings.HasPrefix(strings.TrimSpace(rules), "-") || strings.ContainsAny(rules, "\n\r=") {
+				add(fmt.Errorf("tart %s %q is not a Softnet rule list", key, rules))
+			}
+		}
+		if ss.Tart.CloneMinFreeGB < 0 {
+			add(fmt.Errorf("tart clone-min-free-gb must be >= 0"))
 		}
 	default:
 		add(fmt.Errorf("unsupported provider %q (must be %q or \"tart\")", ss.Provider, DefaultProvider))
@@ -925,4 +980,13 @@ func NewSystemInfo(scaleSetID int, version string) scaleset.SystemInfo {
 		Version:    version,
 		ScaleSetID: scaleSetID,
 	}
+}
+
+// CloneMinFreeBytes is CloneMinFreeGB in bytes (0 = no floor; a negative
+// value, refused by validation, also reads as no floor).
+func (t TartConfig) CloneMinFreeBytes() uint64 {
+	if t.CloneMinFreeGB <= 0 {
+		return 0
+	}
+	return uint64(t.CloneMinFreeGB) << 30
 }

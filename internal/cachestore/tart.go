@@ -21,6 +21,9 @@ type TartConfig struct {
 	// KeepImages are the runner images of the scale sets sharing Home; each
 	// prune first marks them used so an idle week cannot evict one.
 	KeepImages []string
+	// CloneFloor is the clone floor of the scale sets sharing Home; the
+	// mark-used clone of each prune passes it (provider.CloneTartVM).
+	CloneFloor provider.CloneFloor
 }
 
 type tartStore struct {
@@ -104,7 +107,7 @@ func (s *tartStore) Measure(ctx context.Context) (uint64, error) {
 func (s *tartStore) Reclaim(ctx context.Context, tier Tier) (uint64, error) {
 	switch tier {
 	case Tier2:
-		if err := pruneTartCache(ctx, s.runner, s.cfg.Home, s.cfg.MaxAge, s.cfg.BudgetGB, s.cfg.KeepImages, slog.Default()); err != nil {
+		if err := pruneTartCache(ctx, s.runner, s.cfg.Home, s.cfg.MaxAge, s.cfg.BudgetGB, s.cfg.KeepImages, s.cfg.CloneFloor, slog.Default()); err != nil {
 			return 0, fmt.Errorf("prune tart cache: %w", err)
 		}
 		// pruneTartCache reports no reclaimed-space total either — 0 here
@@ -141,7 +144,10 @@ func (s *tartStore) Budget() (uint64, string) { return 0, "" }
 // can apply: age (maxAge, via --older-than) reclaims layers left behind by
 // image updates, and an optional size cap (spaceBudgetGB, via
 // --space-budget) bounds the total. A no-op when both are off.
-func pruneTartCache(ctx context.Context, runner provider.CommandRunner, home string, maxAge time.Duration, spaceBudgetGB int, keepImages []string, logger *slog.Logger) error {
+//
+// Mark-used clones pass floor. A refused marker cannot block reclamation:
+// pruning caches remains best-effort and may require a later image re-pull.
+func pruneTartCache(ctx context.Context, runner provider.CommandRunner, home string, maxAge time.Duration, spaceBudgetGB int, keepImages []string, floor provider.CloneFloor, logger *slog.Logger) error {
 	args := []string{"prune", "--entries", "caches"}
 	attrs := []any{slog.String("home", home)}
 
@@ -166,7 +172,7 @@ func pruneTartCache(ctx context.Context, runner provider.CommandRunner, home str
 		return nil
 	}
 
-	markTartImagesUsed(ctx, runner, keepImages, logger)
+	markTartImagesUsed(ctx, runner, home, floor, keepImages, logger)
 
 	logger.Debug("Pruning Tart cache", attrs...)
 	if _, err := runner.Run(ctx, "tart", args...); err != nil {
@@ -180,7 +186,7 @@ func pruneTartCache(ctx context.Context, runner provider.CommandRunner, home str
 // each image still in the OCI cache is cloned into a throwaway VM that is
 // deleted right away. An image missing from the cache is skipped, since
 // cloning it would pull it. Best-effort: failures are logged.
-func markTartImagesUsed(ctx context.Context, runner provider.CommandRunner, images []string, logger *slog.Logger) {
+func markTartImagesUsed(ctx context.Context, runner provider.CommandRunner, home string, floor provider.CloneFloor, images []string, logger *slog.Logger) {
 	if len(images) == 0 {
 		return
 	}
@@ -200,7 +206,7 @@ func markTartImagesUsed(ctx context.Context, runner provider.CommandRunner, imag
 			continue
 		}
 		vm := provider.KeepVMName()
-		if _, err := runner.Run(ctx, "tart", "clone", image, vm); err != nil {
+		if err := provider.CloneTartVM(ctx, runner, home, floor, image, vm); err != nil {
 			logger.Warn("Failed to mark a runner image as used; this prune may evict it",
 				slog.String("image", image), slog.Any("error", err))
 			continue

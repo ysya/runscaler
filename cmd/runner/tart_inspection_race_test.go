@@ -116,7 +116,7 @@ func testCleanupCannotDeleteActiveTartInspection(t *testing.T, cleanup func(cont
 	defer unblock()
 	detected := make(chan error, 1)
 	go func() {
-		guest, err := provider.DetectTartGuest(ctx, runner, home, "fixture-image")
+		guest, err := provider.DetectTartGuest(ctx, runner, home, "fixture-image", provider.CloneFloor{})
 		if err == nil && guest != provider.TartGuestLinux {
 			err = fmt.Errorf("detected %s, want linux", guest)
 		}

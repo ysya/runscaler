@@ -19,6 +19,10 @@ function cleanPath(value) {
   return value.startsWith('/') && value !== '/' && !value.endsWith('/') && !value.split('/').slice(1).some(part => !part || part === '.' || part === '..');
 }
 
+function pathsOverlap(a, b) {
+  return a === b || a === '/' || b === '/' || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
+}
+
 function threshold(value) {
   if (value.endsWith('%')) {
     const number = value.slice(0, -1);
@@ -137,10 +141,10 @@ function validateLegacyCache(docker, index, lang) {
     longNames.add(entry.name);
     byName.set(entry.name, { path: entry.path, key: 'cache', line: entry.line });
   });
-  const paths = new Set();
+  const paths = new Map();
   for (const entry of byName.values()) {
     if (paths.has(entry.path)) invalid(entry.key, entry.line);
-    paths.add(entry.path);
+    paths.set(entry.path, entry.key);
   }
   return paths;
 }
@@ -160,7 +164,12 @@ function validateSet(scale, global, lang, index) {
   const set = scale.set ?? {};
   const provider = copy(set.provider) || 'docker';
   const auth = copy(set.auth) || 'pat';
+  const sweepMode = copy(set['registration-sweep-mode']) || 'off';
+  reject(!['off', 'log', 'remove'].includes(sweepMode), 'set', 'registration-sweep-mode', index, lang, 'Invalid registration sweep mode.', '註冊清理模式無效。');
+  const sweepInterval = copy(set['registration-sweep-interval']);
+  reject(sweepInterval && sweepInterval !== '0' && !(durationNs(sweepInterval) >= 60e9), 'set', 'registration-sweep-interval', index, lang, 'Registration sweep interval must be at least 1m.', '註冊清理間隔須至少為 1m。');
   reject(!validURL(copy(set.url), ['https:']) || new URL(set.url || 'https://github.com/').pathname === '/', 'set', 'url', index, lang, 'Enter an HTTPS GitHub organization or repository URL.', '請輸入 HTTPS GitHub 組織或儲存庫網址。');
+  reject(sweepMode !== 'off' && new URL(set.url).pathname.split('/').filter(Boolean).length !== 1, 'set', 'registration-sweep-mode', index, lang, 'Registration sweeping requires an organization URL.', '註冊清理需要組織網址。');
   reject(!copy(set.name), 'set', 'name', index, lang, 'Enter a scale-set name.', '請輸入規模集名稱。');
   reject(provider !== 'docker' && provider !== 'tart', 'set', 'provider', index, lang, 'Invalid provider.', '執行環境無效。');
   reject(auth !== 'pat' && auth !== 'app', 'set', 'auth', index, lang, 'Invalid authentication.', '驗證方式無效。');
@@ -190,20 +199,40 @@ function validateSet(scale, global, lang, index) {
   reject(copy(retry['cooldown-after']) && !(Number(retry['cooldown-after']) >= 1), 'retry', 'cooldown-after', index, lang, 'Cooldown failure count must be positive.', '進入冷卻前的失敗次數須為正數。');
   if (provider === 'docker') {
     const docker = scale.docker ?? {};
+    const daemonMode = copy(docker['daemon-mode']) || (copy(docker.dind) === 'false' ? 'none' : 'host');
     reject(copy(docker['ready-timeout']) && !(durationNs(copy(docker['ready-timeout'])) > 0), 'docker', 'ready-timeout', index, lang, 'Readiness timeout must be positive.', '就緒逾時須為正數。');
-    reject(copy(docker['workspace-root']) && copy(docker.dind) === 'false', 'docker', 'workspace-root', index, lang, 'Docker workspace root requires Docker socket access.', 'Docker 工作目錄需要開啟 Docker socket 存取。');
+    reject(copy(docker['dind-startup-timeout']) && !(durationNs(copy(docker['dind-startup-timeout'])) > 0), 'docker', 'dind-startup-timeout', index, lang, 'Private Docker startup timeout must be positive.', '私人 Docker daemon 啟動逾時須為正數。');
+    reject(copy(docker['workspace-root']) && daemonMode !== 'host', 'docker', 'workspace-root', index, lang, 'Docker workspace root requires host Docker socket access.', 'Docker 工作目錄需要使用主機 Docker socket。');
     reject(copy(docker['workspace-root']) && !cleanPath(copy(docker['workspace-root'])), 'docker', 'workspace-root', index, lang, 'Workspace root must be a clean absolute path other than /.', '工作目錄須為乾淨的絕對路徑，且不可為 /。');
     reject(copy(docker.platform) && !/^[^/]+\/[^/]+(?:\/[^/]+)?$/u.test(copy(docker.platform)), 'docker', 'platform', index, lang, 'Docker platform must be os/arch or os/arch/variant.', 'Docker 平台須為 os/arch 或 os/arch/variant。');
     reject(copy(docker['shared-volume-name']) && !volumeName.test(copy(docker['shared-volume-name'])), 'docker', 'shared-volume-name', index, lang, 'Invalid shared volume name.', '共用 volume 名稱無效。');
     reject(copy(docker['shared-volume']) && !cleanPath(copy(docker['shared-volume'])), 'docker', 'shared-volume', index, lang, 'Shared volume must be a clean absolute path other than /.', '共用 volume 須為乾淨的絕對路徑，且不可為 /。');
     const cachePaths = validateLegacyCache(docker, index, lang);
     reject(cachePaths.has(copy(docker['shared-volume'])), 'docker', 'shared-volume', index, lang, 'Shared volume conflicts with a legacy cache mount path.', '共用 volume 與舊版快取掛載路徑衝突。');
+    if (daemonMode === 'dind') {
+      const network = copy(docker.network);
+      reject(network === 'host' || network.startsWith('container:'), 'docker', 'network', index, lang, 'Private Docker requires a private network namespace.', '私人 Docker daemon 需要獨立的網路命名空間。');
+      reject(copy(docker.platform) && !copy(docker.platform).startsWith('linux/'), 'docker', 'platform', index, lang, 'Private Docker requires a Linux platform.', '私人 Docker daemon 需要 Linux 平台。');
+      const mounts = [...cachePaths];
+      if (copy(docker['shared-volume'])) mounts.unshift([copy(docker['shared-volume']), 'shared-volume']);
+      const reserved = ['/var/run', '/run', '/var/lib/docker', '/home/runner/_work', '/home/runner/externals'];
+      mounts.forEach(([path, key], mountIndex) => {
+        reject(reserved.some(target => pathsOverlap(path, target)), 'docker', key, index, lang, `Private Docker mount ${path} overlaps a reserved runner or daemon path.`, `${path} 與私人 Docker daemon 或 runner 的保留路徑重疊。`);
+        reject(mounts.slice(0, mountIndex).some(([other]) => pathsOverlap(path, other)), 'docker', key, index, lang, `Private Docker mount ${path} overlaps another shared or cache mount.`, `${path} 與另一個共用或快取掛載路徑重疊。`);
+      });
+    }
     reject(copy(docker['native-actions-cache']) === 'true' && copy(global['actions-cache']?.enabled) !== 'true', 'docker', 'native-actions-cache', index, lang, 'Enable the global native Actions cache receiver first.', '請先啟用全域內建 Actions 快取接收端。');
     reject(copy(docker['actions-cache-url']) && (!validURL(copy(docker['actions-cache-url']), ['http:', 'https:']) || !copy(docker['actions-cache-url']).endsWith('/')), 'docker', 'actions-cache-url', index, lang, 'Actions cache URL must end with / and contain no credentials, query, or fragment.', 'Actions 快取網址須以 / 結尾，且不可包含憑證、查詢參數或片段。');
     reject(copy(docker['native-actions-cache']) === 'true' && copy(docker['actions-cache-url']) && docker['actions-cache-url'] !== global['actions-cache']?.['advertise-url'], 'docker', 'actions-cache-url', index, lang, 'Native and explicit cache URLs must match.', '內建與明確指定的快取網址必須相同。');
   }
   if (provider === 'tart') {
     const tart = scale.tart ?? {};
+    reject(copy(tart['net-softnet']) === 'true' && copy(tart['net-bridged']), 'tart', 'net-softnet', index, lang, 'Softnet and bridged networking cannot both be enabled.', 'Softnet 與橋接網路不可同時啟用。');
+    for (const key of ['net-softnet-allow', 'net-softnet-block']) {
+      const rules = copy(tart[key]);
+      reject(rules && copy(tart['net-softnet']) !== 'true', 'tart', key, index, lang, 'Softnet rules require Softnet networking.', 'Softnet 規則需要啟用 Softnet 網路。');
+      reject(rules && (/^-/u.test(rules) || /[\r\n=]/u.test(rules)), 'tart', key, index, lang, 'Invalid Softnet rule list.', 'Softnet 規則清單無效。');
+    }
     reject(copy(tart['pool-size']) && Number(tart['pool-size']) > max, 'tart', 'pool-size', index, lang, 'Tart warm pool cannot exceed maximum runners.', 'Tart 預熱 VM 數量不可超過最多 runner 數量。');
     reject(copy(tart.mtu) && ![0, -1].includes(Number(tart.mtu)) && (Number(tart.mtu) < 1280 || Number(tart.mtu) > 1500), 'tart', 'mtu', index, lang, 'Tart MTU must be 0, -1, or 1280–1500.', 'Tart MTU 須為 0、-1 或 1280–1500。');
     reject(list(tart.dns).some(ip => !validIP(ip)), 'tart', 'dns', index, lang, 'Tart DNS entries must be IP addresses.', 'Tart DNS 項目須為 IP 位址。');

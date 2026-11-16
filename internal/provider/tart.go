@@ -189,6 +189,25 @@ func (c *TartHostCoordinator) release(slot tartSlot) {
 	}
 }
 
+// softnetReservedMAC is the address Softnet keeps for its own DHCP server;
+// a guest that asks for it is refused ("VM MAC address ... is reserved for
+// the DHCP server"), and natMAC(0) is exactly that address.
+const softnetReservedMAC = "02:00:00:00:00:01"
+
+// softnetMAC is the fixed per-slot address of a Softnet guest: locally
+// administered, unicast, stable per slot (Softnet's DHCP sees the same
+// clients), and never Softnet's reserved address.
+func softnetMAC(index int) string {
+	for salt := 0; ; salt++ {
+		digest := sha256.Sum256(fmt.Appendf(nil, "runscaler-tart/softnet/%d/%d", index, salt))
+		address := net.HardwareAddr(digest[:6])
+		address[0] = address[0]&0xfe | 0x02 // locally administered, unicast
+		if s := address.String(); s != softnetReservedMAC {
+			return s
+		}
+	}
+}
+
 func natMAC(index int) string {
 	n := uint64(index) + 1
 	return net.HardwareAddr{0x02, byte(n >> 32), byte(n >> 24), byte(n >> 16), byte(n >> 8), byte(n)}.String()
@@ -201,7 +220,8 @@ func natMAC(index int) string {
 //  2. tart set <name> --cpu/--memory      — configure VM resources (if specified)
 //  3. Set deterministic MAC address       — prevent DHCP lease exhaustion
 //  4. tart run <name> --no-graphics       — boot VM in background goroutine
-//     (--net-bridged=<interface> when configured)
+//     (--net-bridged=<interface> or --net-softnet when configured;
+//     the clone in step 1 is refused below clone-min-free-gb)
 //  5. tart exec <name> true               — poll until Guest Agent is ready
 //  6. tart exec <name> ... run.sh         — start runner with JIT config
 //  7. tart stop + tart delete on removal
@@ -223,13 +243,22 @@ type TartProvider struct {
 	coordinator *TartHostCoordinator
 	retryConfig config.RetryConfig
 
+	// cloneFloor refuses a clone below its free bytes on the filesystem of
+	// TART_HOME (zero value = no floor).
+	cloneFloor CloneFloor
+
 	// Guest network, applied before each runner starts (see TartConfig).
 	mtu        int      // 0 = auto, -1 = off, otherwise a fixed MTU
 	dns        []string // guest resolvers; empty = keep what Tart's NAT hands out
 	netBridged string   // host interface to bridge VMs to; empty = Tart's NAT
-	githubHost string   // the host whose route decides the auto MTU
-	mtuLogMu   sync.Mutex
-	lastMTULog string // last MTU and reason logged at Info; repeats go to Debug
+	netSoftnet bool     // boot with --net-softnet (Softnet isolation)
+	// Softnet rules passed verbatim to tart run --net-softnet-allow/-block
+	// (softnet --allow/--block); empty = Softnet's defaults.
+	netSoftnetAllow string
+	netSoftnetBlock string
+	githubHost      string // the host whose route decides the auto MTU
+	mtuLogMu        sync.Mutex
+	lastMTULog      string // last MTU and reason logged at Info; repeats go to Debug
 
 	// Runner start-up checks; zero means the default (see waitRunnerListening).
 	runnerPoll          time.Duration
@@ -254,21 +283,24 @@ func NewTartProviderWithCoordinator(ss config.ScaleSetConfig, logger *slog.Logge
 		coordinator = NewTartHostCoordinator(config.MaxMacOSVMsPerHost)
 	}
 	p := &TartProvider{
-		baseImage:   ss.RunnerImage,
-		runnerDir:   ss.Tart.RunnerDir,
-		home:        ss.Tart.Home,
-		cpu:         ss.Tart.CPU,
-		memory:      ss.Tart.Memory,
-		poolSize:    ss.Tart.PoolSize,
-		guest:       guest,
-		logger:      logger,
-		cmd:         TartCommandRunner(ss.Tart.Home),
-		coordinator: coordinator,
-		retryConfig: ss.EffectiveRetry(),
-		mtu:         ss.Tart.MTU,
-		dns:         ss.Tart.DNS,
-		netBridged:  ss.Tart.NetBridged,
-		githubHost:  registrationHost(ss.RegistrationURL),
+		baseImage:       ss.RunnerImage,
+		runnerDir:       ss.Tart.RunnerDir,
+		home:            ss.Tart.Home,
+		cpu:             ss.Tart.CPU,
+		memory:          ss.Tart.Memory,
+		poolSize:        ss.Tart.PoolSize,
+		guest:           guest,
+		logger:          logger,
+		cmd:             TartCommandRunner(ss.Tart.Home),
+		coordinator:     coordinator,
+		retryConfig:     ss.EffectiveRetry(),
+		mtu:             ss.Tart.MTU,
+		dns:             ss.Tart.DNS,
+		netBridged:      ss.Tart.NetBridged,
+		netSoftnet:      ss.Tart.NetSoftnet,
+		netSoftnetAllow: ss.Tart.NetSoftnetAllow,
+		netSoftnetBlock: ss.Tart.NetSoftnetBlock,
+		githubHost:      registrationHost(ss.RegistrationURL),
 	}
 	if p.runnerDir == "" {
 		p.runnerDir = config.DefaultTartRunnerDir
@@ -276,6 +308,7 @@ func NewTartProviderWithCoordinator(ss config.ScaleSetConfig, logger *slog.Logge
 			p.runnerDir = config.DefaultTartLinuxRunnerDir
 		}
 	}
+	p.cloneFloor = CloneFloor{MinFreeBytes: ss.Tart.CloneMinFreeBytes()}
 	if guest == TartGuestLinux {
 		p.vmSlots = make(chan struct{}, max(1, ss.MaxRunners+ss.Tart.PoolSize))
 	}
@@ -287,6 +320,15 @@ func (p *TartProvider) runArgs(name string) []string {
 	args := []string{"run", name, "--no-graphics"}
 	if p.netBridged != "" {
 		args = append(args, "--net-bridged="+p.netBridged)
+	}
+	if p.netSoftnet {
+		args = append(args, "--net-softnet")
+	}
+	if p.netSoftnetAllow != "" {
+		args = append(args, "--net-softnet-allow="+p.netSoftnetAllow)
+	}
+	if p.netSoftnetBlock != "" {
+		args = append(args, "--net-softnet-block="+p.netSoftnetBlock)
 	}
 	return args
 }
@@ -423,8 +465,9 @@ func (p *TartProvider) bootVM(ctx context.Context, name string) (*warmVM, error)
 		_, _ = p.cmd.Run(cleanCtx, "tart", "delete", name)
 	}
 
-	// 1. Clone base image (APFS copy-on-write, near-instant)
-	if _, err := p.cmd.Run(ctx, "tart", "clone", p.baseImage, name); err != nil {
+	// 1. Clone base image (APFS copy-on-write, near-instant), unless the
+	// disk is below the clone floor.
+	if err := CloneTartVM(ctx, p.cmd, p.home, p.cloneFloor, p.baseImage, name); err != nil {
 		releaseSlot()
 		return nil, fmt.Errorf("failed to clone VM: %w", err)
 	}
@@ -528,6 +571,9 @@ func (p *TartProvider) writeVMMAC(ctx context.Context, name string, slotIdx int,
 	configPath := filepath.Join(tartHome, "vms", name, "config.json")
 
 	mac := natMAC(slotIdx)
+	if p.netSoftnet {
+		mac = softnetMAC(slotIdx)
+	}
 	if p.netBridged != "" {
 		out, err := p.cmd.Run(ctx, "/sbin/ifconfig", p.netBridged)
 		if err != nil {
@@ -634,8 +680,17 @@ func (p *TartProvider) StartInstance(ctx context.Context, name string, jitConfig
 			var vm *warmVM
 			select {
 			case vm = <-p.pool:
-			case <-ctx.Done():
-				return "", ctx.Err()
+			default:
+				// Admission can race a warm VM exiting. Recheck before waiting
+				// for a replacement that low disk space would prevent cloning.
+				if err := p.cloneFloor.Check(p.home); err != nil {
+					return "", err
+				}
+				select {
+				case vm = <-p.pool:
+				case <-ctx.Done():
+					return "", ctx.Err()
+				}
 			}
 
 			// Check if the VM is still alive (tart run process hasn't exited)

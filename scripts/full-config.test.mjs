@@ -10,11 +10,97 @@ const baseSet = () => ({
   docker: { dind: 'true' }, tart: {}, retry: {},
 });
 const base = () => ({ global: { 'log-level': 'info', 'log-format': 'text', 'health-port': '8080', 'health-address': '127.0.0.1' }, actionsCache: {}, disk: {}, diagnostics: {}, scaleSets: [baseSet()] });
+
+test('schema defaults omit optional unreleased settings', () => {
+  const defaults = fields => Object.fromEntries(fields.filter(field => field.value !== undefined).map(field => [field.key, field.value]));
+  const state = base();
+  state.global = defaults(groups.global);
+  state.scaleSets[0].set = { ...defaults(groups.set), url: 'https://github.com/example-org', name: 'test' };
+  state.scaleSets[0].docker = defaults(groups.docker);
+  state.scaleSets[0].tart = defaults(groups.tart);
+  assert.doesNotMatch(generateFullConfig(state), /^(?:registration-sweep-mode|registration-sweep-interval|net-softnet|clone-min-free-gb|daemon-mode) =/mu);
+});
 const fieldError = (state, group, key, index = 0) => assert.throws(
   () => generateFullConfig(state),
   error => error.field?.group === group && error.field?.key === key && error.field?.index === index,
   `${group}.${key} should identify the invalid field`,
 );
+
+test('Tart Softnet rejects incompatible modes and dependent rules', () => {
+  const state = base();
+  state.scaleSets[0].set.provider = 'tart';
+  state.scaleSets[0].tart = { 'net-softnet': 'true', 'net-bridged': 'en0' };
+  fieldError(state, 'tart', 'net-softnet');
+  state.scaleSets[0].tart = { 'net-softnet-block': 'out @host' };
+  fieldError(state, 'tart', 'net-softnet-block');
+  state.scaleSets[0].tart = { 'net-softnet': 'true', 'net-softnet-allow': 'a=b' };
+  fieldError(state, 'tart', 'net-softnet-allow');
+  state.scaleSets[0].tart = { 'net-softnet': 'true', 'net-softnet-block': 'out @host' };
+  assert.match(generateFullConfig(state), /net-softnet-block = "out @host"/u);
+});
+
+test('registration sweep validates scope and minimum interval', () => {
+  const state = base();
+  state.scaleSets[0].set['registration-sweep-mode'] = 'remove';
+  state.scaleSets[0].set.url = 'https://github.com/example-org/repo';
+  fieldError(state, 'set', 'registration-sweep-mode');
+  state.scaleSets[0].set.url = 'https://github.com/example-org';
+  state.scaleSets[0].set['registration-sweep-interval'] = '1s';
+  fieldError(state, 'set', 'registration-sweep-interval');
+  state.scaleSets[0].set['registration-sweep-interval'] = '1m';
+  assert.match(generateFullConfig(state), /registration-sweep-mode = "remove"/u);
+});
+
+test('explicit private Docker daemon rejects host proxy workspace', () => {
+  const state = base();
+  state.scaleSets[0].docker['daemon-mode'] = 'dind';
+  state.scaleSets[0].docker['workspace-root'] = '/tmp/runner-proxies';
+  fieldError(state, 'docker', 'workspace-root');
+});
+
+for (const [name, patch, key] of [
+  ['zero startup timeout', { 'dind-startup-timeout': '0' }, 'dind-startup-timeout'],
+  ['negative startup timeout', { 'dind-startup-timeout': '-1s' }, 'dind-startup-timeout'],
+  ['host network', { network: 'host' }, 'network'],
+  ['another container network', { network: 'container:other' }, 'network'],
+  ['non-Linux platform', { platform: 'darwin/arm64' }, 'platform'],
+  ['reserved shared path', { 'shared-volume': '/run' }, 'shared-volume'],
+  ['reserved path ancestor', { 'shared-volume': '/var' }, 'shared-volume'],
+  ['reserved path descendant', { 'shared-volume': '/var/lib/docker/buildkit' }, 'shared-volume'],
+  ['runner home ancestor', { 'shared-volume': '/home/runner' }, 'shared-volume'],
+  ['reserved short cache', { 'cache-volumes': 'build:/home/runner/_work/cache' }, 'cache-volumes'],
+  ['reserved long cache', { cache: 'build | /home/runner/externals | 20GB' }, 'cache'],
+  ['shared and cache overlap', { 'shared-volume': '/shared', 'cache-volumes': 'build:/shared/nested' }, 'cache-volumes'],
+  ['cache paths overlap', { 'cache-volumes': 'one:/cache\ntwo:/cache/nested' }, 'cache-volumes'],
+  ['long and short cache overlap', { 'cache-volumes': 'one:/cache', cache: 'two | /cache/nested | 20GB' }, 'cache'],
+]) {
+  test(`private Docker daemon rejects ${name}`, () => {
+    const state = base();
+    state.scaleSets[0].docker = { 'daemon-mode': 'dind', ...patch };
+    fieldError(state, 'docker', key);
+  });
+}
+
+test('daemon startup timeout stays positive outside private mode', () => {
+  const state = base();
+  state.scaleSets[0].docker = { 'daemon-mode': 'host', 'dind-startup-timeout': '0s' };
+  fieldError(state, 'docker', 'dind-startup-timeout');
+});
+
+test('private Docker validation preserves overrides and path boundaries', () => {
+  const state = base();
+  state.scaleSets[0].docker = {
+    'daemon-mode': 'dind', platform: 'linux/arm64', network: 'private-builds',
+    'dind-startup-timeout': '2m', 'shared-volume': '/var/lib/docker-cache',
+    'cache-volumes': 'overridden:/run\nsibling:/run-cache',
+    cache: 'overridden | /cache | 20GB',
+  };
+  assert.doesNotThrow(() => generateFullConfig(state));
+  state.scaleSets[0].docker = { 'daemon-mode': 'host', dind: 'false', 'workspace-root': '/tmp/runner-proxies' };
+  assert.doesNotThrow(() => generateFullConfig(state));
+  state.scaleSets[0].docker = { 'daemon-mode': 'host', network: 'host', 'shared-volume': '/var/lib/docker' };
+  assert.doesNotThrow(() => generateFullConfig(state));
+});
 
 test('TOML quoting escapes strings and rejects control characters', () => {
   assert.equal(quoteToml('a"\\b'), '"a\\"\\\\b"');

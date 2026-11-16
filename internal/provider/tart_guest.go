@@ -28,7 +28,8 @@ func (g TartGuest) String() string {
 
 // DetectTartGuest reads the guest OS from a temporary clone of image.
 // OCI image references have no local config.json until Tart clones them.
-func DetectTartGuest(ctx context.Context, runner CommandRunner, home, image string) (TartGuest, error) {
+// The clone passes floor like every other clone (CloneTartVM).
+func DetectTartGuest(ctx context.Context, runner CommandRunner, home, image string, floor CloneFloor) (TartGuest, error) {
 	release, err := AcquireTartInspectionLock(ctx, home)
 	if err != nil {
 		return TartGuestMacOS, err
@@ -41,7 +42,7 @@ func DetectTartGuest(ctx context.Context, runner CommandRunner, home, image stri
 		_, _ = runner.Run(cleanupCtx, "tart", "delete", name)
 	}()
 	// Tart may publish the clone before a later prune or cancellation fails.
-	if _, err := runner.Run(ctx, "tart", "clone", image, name); err != nil {
+	if err := CloneTartVM(ctx, runner, home, floor, image, name); err != nil {
 		return TartGuestMacOS, fmt.Errorf("clone Tart image %q for guest detection: %w", image, err)
 	}
 	if err := ctx.Err(); err != nil {

@@ -62,7 +62,10 @@ function renderField(field, group, index, values) {
   let input;
   if (field.type === 'bool' || field.type === 'select') {
     input = element('select');
-    const options = field.type === 'bool' ? [['', t('Use default', '使用預設值')], ['true', t('On', '開啟')], ['false', t('Off', '關閉')]] : field.choices.map(choice => [choice, choice]);
+    const options = field.type === 'bool' ? [['', t('Use default', '使用預設值')], ['true', t('On', '開啟')], ['false', t('Off', '關閉')]] : [
+      ...(field.value === undefined ? [['', t('Use default', '使用預設值')]] : []),
+      ...field.choices.map(choice => [choice, choice]),
+    ];
     for (const [value, title] of options) {
       const option = element('option', '', title);
       option.value = value;

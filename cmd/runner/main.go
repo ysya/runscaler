@@ -35,6 +35,7 @@ import (
 	runnerlock "github.com/ysya/runscaler/internal/lock"
 	"github.com/ysya/runscaler/internal/metrics"
 	"github.com/ysya/runscaler/internal/provider"
+	"github.com/ysya/runscaler/internal/regsweep"
 	"github.com/ysya/runscaler/internal/versioncheck"
 )
 
@@ -77,6 +78,14 @@ func init() {
 	flags.Int("tart-memory", 0, "Memory in MB for each VM (0 = use image default)")
 	flags.Int("tart-pool-size", 0, "Number of pre-warmed VMs to keep ready (0 = disabled)")
 	flags.String("tart-net-bridged", "", "Host interface to bridge each VM to instead of Tart's NAT (e.g. en0)")
+	flags.Bool("tart-net-softnet", false, "Boot each VM with Tart's Softnet isolation (tart run --net-softnet)")
+	flags.String("tart-net-softnet-allow", "", "Softnet allow rules passed to tart run --net-softnet-allow (requires --tart-net-softnet)")
+	flags.String("tart-net-softnet-block", "", "Softnet block rules passed to tart run --net-softnet-block, e.g. \"out @host\" (requires --tart-net-softnet)")
+	flags.Int("tart-clone-min-free-gb", 0, "Refuse to clone a VM while TART_HOME's filesystem has fewer GiB free (0 = no floor)")
+
+	// Leaked-registration sweep
+	flags.String("registration-sweep-mode", config.DefaultSweepMode, "Sweep of leaked JIT runner registrations (off, log, remove); org scale sets only")
+	flags.Duration("registration-sweep-interval", config.DefaultSweepInterval, "Period between leaked-registration sweeps (at least 1m)")
 
 	// Global
 	flags.String("log-level", config.DefaultLogLevel, "Log level (debug, info, warn, error)")
@@ -104,6 +113,8 @@ func init() {
 	viper.BindPFlag("dry-run", flags.Lookup("dry-run"))
 	viper.BindPFlag("health-port", flags.Lookup("health-port"))
 	viper.BindPFlag("health-address", flags.Lookup("health-address"))
+	viper.BindPFlag("registration-sweep-mode", flags.Lookup("registration-sweep-mode"))
+	viper.BindPFlag("registration-sweep-interval", flags.Lookup("registration-sweep-interval"))
 
 	// Nested keys (flag name → nested viper key for provider sub-structs):
 	viper.BindPFlag("docker.socket", flags.Lookup("docker-socket"))
@@ -117,6 +128,10 @@ func init() {
 	viper.BindPFlag("tart.memory", flags.Lookup("tart-memory"))
 	viper.BindPFlag("tart.pool-size", flags.Lookup("tart-pool-size"))
 	viper.BindPFlag("tart.net-bridged", flags.Lookup("tart-net-bridged"))
+	viper.BindPFlag("tart.net-softnet", flags.Lookup("tart-net-softnet"))
+	viper.BindPFlag("tart.net-softnet-allow", flags.Lookup("tart-net-softnet-allow"))
+	viper.BindPFlag("tart.net-softnet-block", flags.Lookup("tart-net-softnet-block"))
+	viper.BindPFlag("tart.clone-min-free-gb", flags.Lookup("tart-clone-min-free-gb"))
 
 	// Register subcommands
 	cmd.AddCommand(validateCmd, statusCmd, doctorCmd, versionCmd, serviceCmd, cacheCmd, runCommand)
@@ -373,9 +388,30 @@ func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) e
 			return fmt.Errorf("tart binary not found in PATH: %w\n\n"+
 				"  Install Tart: brew install openai/tools/tart", err)
 		}
+		if err := checkTartSoftnetForRun(scaleSets, logger); err != nil {
+			return err
+		}
 		logger.Info("Tart provider enabled")
 
 	}
+	if !cfg.DryRun {
+		// The machine-wide lock is acquired by startManager before runManager is called,
+		// so resources created by runner but still present now belong to a dead
+		// previous process. Reconcile them before any new scale set can start.
+		// Dry runs skip this block because cleanup is destructive.
+		var tartHomes []string
+		var workspaceRoots []string
+		for _, ss := range scaleSets {
+			if ss.IsTart() {
+				tartHomes = append(tartHomes, ss.Tart.Home)
+			} else if ss.Docker.WorkspaceRoot != "" {
+				workspaceRoots = append(workspaceRoots, ss.Docker.WorkspaceRoot)
+			}
+		}
+		reconcileOrphans(ctx, dockerClients, tartHomes, logger, workspaceRoots...)
+
+	}
+
 	runtimes := newScaleSetRuntimes(scaleSets, runtimeBackends{dockerClients: dockerClients, dockerPulls: provider.NewDockerImagePullCoordinator(), tartHost: tartCoordinator})
 	pullOutput := io.Writer(os.Stdout)
 	if logFile != nil {
@@ -391,8 +427,9 @@ func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) e
 		return err
 	}
 
+	cloneFloors := tartCloneFloors(scaleSets)
 	detect := func(ctx context.Context, home, image string) (provider.TartGuest, error) {
-		return provider.DetectTartGuest(ctx, provider.TartCommandRunner(home), home, image)
+		return provider.DetectTartGuest(ctx, provider.TartCommandRunner(home), home, image, cloneFloors[home])
 	}
 	if err := detectTartGuests(ctx, runtimes, detect, logger); err != nil {
 		return err
@@ -407,21 +444,6 @@ func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) e
 		)
 		return nil
 	}
-
-	// The machine-wide lock is acquired by startManager before runManager is called,
-	// so resources created by runner but still present now belong to a dead
-	// previous process. Reconcile them before any new scale set can start.
-	// Dry-run returns above because it must not perform destructive cleanup.
-	var tartHomes []string
-	var workspaceRoots []string
-	for _, ss := range scaleSets {
-		if ss.IsTart() {
-			tartHomes = append(tartHomes, ss.Tart.Home)
-		} else if ss.Docker.WorkspaceRoot != "" {
-			workspaceRoots = append(workspaceRoots, ss.Docker.WorkspaceRoot)
-		}
-	}
-	reconcileOrphans(ctx, dockerClients, tartHomes, logger, workspaceRoots...)
 
 	// Keep the local Results receiver available until every scale set finishes
 	// draining. Its separate listener has no streaming write timeout.
@@ -642,8 +664,27 @@ func runScaleSetController(ctx context.Context, deps managerDeps, rt *scaleSetRu
 	}
 	controllerOpts = append(controllerOpts, controller.WithCapacityAllocator(rt.capacity))
 	controllerOpts = append(controllerOpts, controller.WithDiagnostics(deps.diagnostics, rt.config.ScaleSetName, rt.config.Provider, rt.config.Token), controller.WithRetry(rt.config.EffectiveRetry()))
-	s := controller.NewScaleSetController(scaleSet.ID, rt.config.MinRunners, rt.maxRunners, instanceProvider, scalesetClient, rt.logger, controllerOpts...)
+
+	// The sweeper exists before the controller so that the controller can
+	// notify it of start failures. It reads controller state only from its
+	// own goroutine, which starts after s is assigned.
+	var s *controller.ScaleSetController
+	sweeper, err := newRegistrationSweeper(rt.config, scalesetClient, scalesetClient, scaleSet.ID,
+		regsweep.LocalRunnersFunc(func(name string) bool { return s.HasRunner(name) }), rt.logger)
+	if err != nil {
+		return fmt.Errorf("registration sweep: %w", err)
+	}
+	if sweeper != nil {
+		controllerOpts = append(controllerOpts, controller.WithStartFailureNotifier(sweeper.Trigger))
+	}
+	s = controller.NewScaleSetController(scaleSet.ID, rt.config.MinRunners, rt.maxRunners, instanceProvider, scalesetClient, rt.logger, controllerOpts...)
 	defer s.Shutdown(context.WithoutCancel(ctx))
+	if sweeper != nil {
+		// Deferred after Shutdown, so it runs first: Shutdown removes
+		// instances without deregistering them, and no sweep may run
+		// against that emptied state.
+		defer startRegistrationSweep(ctx, sweeper)()
+	}
 
 	// The listener must keep delivering JobCompleted messages while Drain
 	// waits. Only cancel its context after Drain returns (or immediately when

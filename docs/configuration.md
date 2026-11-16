@@ -183,6 +183,10 @@ pool-size = 2            # pre-warm 2 VMs for instant job pickup (~2s vs ~30s co
 # mtu = 0                              # guest MTU: 0 = match a VPN tunnel (default), -1 = off, 1280–1500 = fixed
 # dns = ["1.1.1.1", "8.8.8.8"]         # guest resolvers ([] = keep the one Tart's NAT hands out)
 # net-bridged = "en0"                  # bridge VMs to this host interface instead of Tart's NAT
+# net-softnet = false                  # boot VMs with Tart's Softnet isolation (softnet setuid root on PATH)
+# net-softnet-block = ""               # Softnet block rules, e.g. "out @host" (Softnet admits the host gateway by default)
+# net-softnet-allow = ""               # Softnet allow rules, e.g. "out proto udp @host port 53,out proto tcp @host port 53"
+# clone-min-free-gb = 0                # refuse to clone a VM below this many GiB free on TART_HOME (0 = off)
 ```
 
 runscaler detects each Tart image's guest OS at startup; no guest setting is
@@ -350,6 +354,49 @@ gh api repos/<owner>/<repo>/actions/runners/deprecations/<version>   # runtime_d
 
 The org-level endpoint (`orgs/<org>/actions/runners/deprecations/<version>`)
 needs the `admin:org` scope.
+
+## Leaked runner registration sweep (opt-in)
+
+When a provider fails after a successful JIT response, runscaler retains the
+returned runner ID and directly deregisters it. Failed deregistration is retried
+independently of runner demand. GitHub's refusal because a runner holds a job is
+respected. This applies to both Docker and Tart, without enabling a sweep.
+
+A crash or lost JIT response can leave an unknown registration. The optional
+recovery sweep discovers these by listing an organization runner group:
+
+```toml
+registration-sweep-mode = "log"        # off (default), log or remove
+# registration-sweep-interval = "10m"  # default 10m, at least 1m
+```
+
+A sweep runs once at startup (after the orphan reconcile), then every
+`registration-sweep-interval`, and once after a failed start (at most once a minute). It
+never runs per reconcile pass. A runner is removed only when all of these
+hold: GitHub reports it offline and not busy; its name has the exact form
+runner gives its runners (`runner-` and 8 lowercase hex digits); this process
+has no instance or pending registration cleanup of that name, read after the list returned;
+and the scale set API reports that the runner belongs to this scale set.
+The runner ID and name returned by that lookup must exactly match the REST
+listing, and both IDs must be positive. Missing, invalid or mismatched identity
+is retained, logged as a warning and counted in the sweep's `errors` summary.
+One sweep removes at most 20 registrations and is bounded by a two-minute
+timeout. A removal GitHub refuses (for example, a job still holds the runner)
+is logged and left for the next sweep.
+
+- `log` writes one line per leaked registration (runner ID and name) and
+  removes nothing. Start with it, check the IDs, then switch to `remove`.
+- Every sweep logs one summary line: listed, candidates, removed, gone,
+  deferred and errors.
+- Organization scale sets only: the list uses
+  `GET /orgs/{org}/actions/runner-groups/{group_id}/runners`. A repository or
+  enterprise registration URL with `registration-sweep-mode` other than `off` fails
+  validation. The credentials above already grant the read it needs; a
+  GitHub App token for the sweep asks only for organization
+  **Self-hosted runners: Read**.
+- The sweep assumes exactly one runner process serves each scale set. A
+  second process serving the same scale set has instances this one cannot
+  see, and the sweep would remove their registrations while they boot.
 
 ## Host-local Actions cache (opt-in)
 
@@ -590,6 +637,12 @@ pool-size = 2
 | `--tart-runner-dir` | `[tart] runner-dir`  | `/Users/admin/actions-runner` (macOS), `/home/admin/actions-runner` (Linux) | Runner install directory inside Tart VM           |
 | `--tart-pool-size`  | `[tart] pool-size`   | `0`                                     | Number of pre-warmed VMs for instant job pickup   |
 | `--tart-net-bridged` | `[tart] net-bridged` | `""` (Tart's NAT)                      | Host interface to bridge each VM to               |
+| `--tart-net-softnet` | `[tart] net-softnet` | `false` (Tart's NAT) | Boot each VM with `tart run --net-softnet` (cannot be combined with net-bridged) |
+| `--tart-net-softnet-block` | `[tart] net-softnet-block` | `""` | Softnet rules passed verbatim to `tart run --net-softnet-block=` (requires net-softnet). Softnet admits guest traffic to the host gateway unless a rule such as `out @host` blocks it |
+| `--tart-net-softnet-allow` | `[tart] net-softnet-allow` | `""` | Softnet rules passed verbatim to `tart run --net-softnet-allow=` (requires net-softnet), e.g. the host's DNS: `out proto udp @host port 53,out proto tcp @host port 53` |
+| `--tart-clone-min-free-gb` | `[tart] clone-min-free-gb` | `0` (no floor) | Refuse every `tart clone` (runner VMs, startup guest inspection, the cache prune's mark-used clone) while the filesystem of TART_HOME (`[tart].home`, else `$TART_HOME`, else `~/.tart`) has fewer GiB free; an unreadable free space also refuses, and a refused mark-used clone is logged while cache pruning continues |
+| `--registration-sweep-mode`      | `registration-sweep-mode`         | `off`                                   | Leaked JIT registration sweep: `off`, `log` (report only) or `remove`; organization scale sets only (see [Leaked runner registration sweep](#leaked-runner-registration-sweep-opt-in)) |
+| `--registration-sweep-interval`  | `registration-sweep-interval`     | `10m`                                   | Period between leaked-registration sweeps (at least `1m`) |
 | `--log-level`       | `log-level`          | `info`                                  | Log level (debug/info/warn/error)                 |
 | `--log-format`      | `log-format`         | `text`                                  | Log format (text/json)                            |
 | `--dry-run`         | `dry-run`            | `false`                                 | Validate everything without starting listeners    |
@@ -608,3 +661,13 @@ reserved before FIFO surplus capacity is handed out. With `concurrent = 0`,
 the limit is the sum of effective `max-runners` values after macOS caps.
 
 Use the `provider` TOML key and `--provider` flag to select Docker or Tart.
+
+## Tart Softnet dependency checks
+
+`net-softnet` is opt-in and requires an executable `softnet` on PATH with setuid-root privileges or passwordless sudo. `validate` and `doctor` check the executable and report privilege guidance without changing host permissions. Failure to start Softnet does not fall back to NAT. Softnet admits the host gateway by default; use `net-softnet-block = "out @host"` to block it, adding explicit DNS allowances if needed.
+
+## Tart clone free-space floor
+
+Set `[tart] clone-min-free-gb` to refuse clones below the specified available GiB on the Tart home filesystem; 0 disables the floor. Runtime cold starts check before requesting JIT and every actual clone rechecks. Ready warm VMs can still be used without cloning. Normal startup reconciles owned orphan VMs before guest inspection; dry run never performs that cleanup. If inspection still cannot clone, startup fails closed. Runtime refusals use existing retry backoff.
+
+The floor never prevents cache reclamation. If it refuses an optional mark-used clone, cleanup logs that protection failed and continues pruning caches, which may require re-pulling a runner image later. Local base VMs and active runner VMs remain outside cache pruning.

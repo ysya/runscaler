@@ -430,6 +430,12 @@ pool-size = 2
 | `--tart-runner-dir` | `[tart] runner-dir` | `/Users/admin/actions-runner`（macOS）、`/home/admin/actions-runner`（Linux） | Tart VM 內的 runner 安裝目錄 |
 | `--tart-pool-size` | `[tart] pool-size` | `0` | 預先暖機、可立即接收工作的 VM 數量 |
 | `--tart-net-bridged` | `[tart] net-bridged` | `""`（Tart 的 NAT） | 每個 VM 要橋接至的主機介面 |
+| `--tart-net-softnet` | `[tart] net-softnet` | `false` | 啟用 Tart Softnet 網路隔離；不可與橋接同時使用 |
+| `--tart-net-softnet-block` | `[tart] net-softnet-block` | `""` | 原樣傳遞封鎖規則；如 `out @host` 可封鎖預設允許的主機閘道，需要啟用 Softnet |
+| `--tart-net-softnet-allow` | `[tart] net-softnet-allow` | `""` | 原樣傳遞允許規則；可允許主機 DNS，需要啟用 Softnet |
+| `--tart-clone-min-free-gb` | `[tart] clone-min-free-gb` | `0`（停用） | Tart 主目錄所在檔案系統的 clone 可用空間下限，單位為 GiB；不阻擋 cache 回收 |
+| `--registration-sweep-mode` | `registration-sweep-mode` | `off` | 組織層級的遺留 JIT 註冊補漏：`off`、僅記錄的 `log` 或刪除的 `remove` |
+| `--registration-sweep-interval` | `registration-sweep-interval` | `10m` | 註冊補漏掃描間隔，最短為 `1m` |
 | `--log-level` | `log-level` | `info` | 記錄層級（debug/info/warn/error） |
 | `--log-format` | `log-format` | `text` | 記錄格式（text/json） |
 | `--dry-run` | `dry-run` | `false` | 驗證所有項目，但不啟動接聽程序 |
@@ -441,3 +447,27 @@ pool-size = 2
 與 GitLab Runner 相同，`concurrent` 限制管理程序內的 runner 總數，`max-runners` 則是各規模集的個別上限。控制器會在 JIT／供應器啟動前預留全域容量。Tart 預熱 VM 不持有此容量租約，因此數量會加在 `concurrent` 之外。系統會先預留各組 `min-runners` 下限所需的容量，再以先進先出（FIFO）順序分配剩餘容量。`concurrent = 0` 會使用套用 macOS 限制後的有效 `max-runners` 總和。
 
 使用 `provider` TOML 設定鍵與 `--provider` 旗標選擇 Docker 或 Tart。
+
+## Tart Softnet 網路隔離
+
+在 `[tart]`（或 `[scaleset.tart]`）設定 `net-softnet = true` 可啟用 Tart 原生 Softnet。此選項預設關閉，且不能與 `net-bridged` 同時使用。`net-softnet-allow` 與 `net-softnet-block` 會原樣傳給 Tart，必須先啟用 Softnet。
+
+Softnet 預設仍允許 VM 存取主機閘道。若要封鎖，設定 `net-softnet-block = "out @host"`；如仍需主機 DNS，可設定 `net-softnet-allow = "out proto udp @host port 53,out proto tcp @host port 53"`。
+
+主機須安裝 Softnet，並設定 setuid-root 或 passwordless sudo。`validate` 與 `doctor` 會檢查執行檔並提示權限需求；不會自動變更主機權限。隔離啟動失敗時不會退回 NAT。
+
+## Tart clone 磁碟空間下限
+
+`[tart] clone-min-free-gb` 指定 Tart 主目錄所在檔案系統必須保留的可用 GiB；預設 0 表示停用。冷啟動會先檢查，再要求 GitHub 產生 JIT，實際 clone 前也會再次檢查。已就緒的預熱 VM 不需要 clone，仍可使用。
+
+一般啟動會先清理孤兒 VM，再檢查 guest OS；dry run 不執行此清理。清理後仍不足以建立檢查 clone 時會拒絕啟動。執行中的供應失敗沿用既有退避重試。
+
+磁碟下限不阻擋 cache 回收。若用來更新映像檔使用時間的暫存 clone 被拒絕，會記錄保護失敗並繼續清理 cache，因此之後可能需要重新拉取 runner 映像檔。Cache prune 不刪除本機 base VM 或執行中的 runner VM。
+
+## 遺留的 GitHub runner 註冊
+
+Docker 與 Tart 的 JIT 回應包含 runner ID 時，會在供應之前保存。供應失敗後會直接取消該註冊；API 暫時失敗或 GitHub 回報仍有工作時保留紀錄並退避重試，即使目前沒有 runner 需求也會繼續清理。關機會做最後一次有時限的清理。此行為不需要開啟 sweep。
+
+程序崩潰或 JIT 回應遺失時可能不知道 ID，這時可選擇啟用 `registration-sweep-mode = "log"` 觀察，確認後改為 `"remove"`。預設為 `"off"`，`registration-sweep-interval` 預設 `"10m"`，最短 `"1m"`。
+
+補漏掃描僅支援組織層級 scale set，且要求每個 scale set 僅由一個管理程序服務。只有離線、不忙碌、名稱符合 runscaler 格式、本機沒有管理，且 API 確認屬於該 scale set 的註冊才會刪除。REST 清單與 scale-set API 回傳的 runner ID、名稱都必須完全一致，且兩邊 ID 都須為正數；身分不符、無效或缺失時保留註冊、記錄警告並計入該輪的 `errors` 計數。每輪最多處理 20 筆刪除、100 筆歸屬查詢，總時限為兩分鐘。掃描會在啟動、指定間隔與啟動失敗後執行；失敗觸發會合併，至少相隔一分鐘。

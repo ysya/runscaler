@@ -86,6 +86,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	}
 
 	// Scaleset API connectivity check (if config is available)
+	softnetErr := checkTartSoftnet(scaleSets, cmd.OutOrStdout())
 	apiErr := doctorGitHubCheck(cmd.Context(), &cfg)
 
 	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
@@ -98,7 +99,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	for socket := range dockerSockets {
 		orphans, err := checkDocker(ctx, socket, sharedVolumes[socket], mode)
 		if err != nil {
-			return errors.Join(apiErr, err)
+			return errors.Join(softnetErr, apiErr, err)
 		}
 		totalOrphans += orphans
 	}
@@ -106,11 +107,11 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	// Tart checks
 	orphans, err := checkTart(ctx, mode, tartHomes)
 	if err != nil {
-		return errors.Join(apiErr, err)
+		return errors.Join(softnetErr, apiErr, err)
 	}
 	totalOrphans += orphans
 
-	return reportDoctorSummary(cmd.OutOrStdout(), totalOrphans, fix, apiErr)
+	return errors.Join(softnetErr, reportDoctorSummary(cmd.OutOrStdout(), totalOrphans, fix, apiErr))
 }
 
 // doctorGitHubCheck probes GitHub for every configured scale set or, when no

@@ -355,6 +355,46 @@ gh api repos/<owner>/<repo>/actions/runners/deprecations/<version>   # runtime_d
 The org-level endpoint (`orgs/<org>/actions/runners/deprecations/<version>`)
 needs the `admin:org` scope.
 
+## Leaked runner registration sweep (opt-in)
+
+When a provider fails after a successful JIT response, runscaler retains the
+returned runner ID and directly deregisters it. Failed deregistration is retried
+independently of runner demand. GitHub's refusal because a runner holds a job is
+respected. This applies to both Docker and Tart, without enabling a sweep.
+
+A crash or lost JIT response can leave an unknown registration. The optional
+recovery sweep discovers these by listing an organization runner group:
+
+```toml
+registration-sweep-mode = "log"        # off (default), log or remove
+# registration-sweep-interval = "10m"  # default 10m, at least 1m
+```
+
+A sweep runs once at startup (after the orphan reconcile), then every
+`registration-sweep-interval`, and once after a failed start (at most once a minute). It
+never runs per reconcile pass. A runner is removed only when all of these
+hold: GitHub reports it offline and not busy; its name has the exact form
+runner gives its runners (`runner-` and 8 lowercase hex digits); this process
+has no instance of that name in any phase, read after the list returned;
+and the scale set API reports that the runner belongs to this scale set.
+One sweep removes at most 20 registrations and is bounded by a two-minute
+timeout. A removal GitHub refuses (for example, a job still holds the runner)
+is logged and left for the next sweep.
+
+- `log` writes one line per leaked registration (runner ID and name) and
+  removes nothing. Start with it, check the IDs, then switch to `remove`.
+- Every sweep logs one summary line: listed, candidates, removed, gone,
+  deferred and errors.
+- Organization scale sets only: the list uses
+  `GET /orgs/{org}/actions/runner-groups/{group_id}/runners`. A repository or
+  enterprise registration URL with `registration-sweep-mode` other than `off` fails
+  validation. The credentials above already grant the read it needs; a
+  GitHub App token for the sweep asks only for organization
+  **Self-hosted runners: Read**.
+- The sweep assumes exactly one runner process serves each scale set. A
+  second process serving the same scale set has instances this one cannot
+  see, and the sweep would remove their registrations while they boot.
+
 ## Host-local Actions cache (opt-in)
 
 For the built-in Go receiver, set `[scaleset.docker] native-actions-cache = true`.
@@ -598,6 +638,8 @@ pool-size = 2
 | `--tart-net-softnet-block` | `[tart] net-softnet-block` | `""` | Softnet rules passed verbatim to `tart run --net-softnet-block=` (requires net-softnet). Softnet admits guest traffic to the host gateway unless a rule such as `out @host` blocks it |
 | `--tart-net-softnet-allow` | `[tart] net-softnet-allow` | `""` | Softnet rules passed verbatim to `tart run --net-softnet-allow=` (requires net-softnet), e.g. the host's DNS: `out proto udp @host port 53,out proto tcp @host port 53` |
 | `--tart-clone-min-free-gb` | `[tart] clone-min-free-gb` | `0` (no floor) | Refuse every `tart clone` (runner VMs, startup guest inspection, the cache prune's mark-used clone) while the filesystem of TART_HOME (`[tart].home`, else `$TART_HOME`, else `~/.tart`) has fewer GiB free; an unreadable free space also refuses, and a refused mark-used clone skips that prune |
+| `--registration-sweep-mode`      | `registration-sweep-mode`         | `off`                                   | Leaked JIT registration sweep: `off`, `log` (report only) or `remove`; organization scale sets only (see [Leaked runner registration sweep](#leaked-runner-registration-sweep-opt-in)) |
+| `--registration-sweep-interval`  | `registration-sweep-interval`     | `10m`                                   | Period between leaked-registration sweeps (at least `1m`) |
 | `--log-level`       | `log-level`          | `info`                                  | Log level (debug/info/warn/error)                 |
 | `--log-format`      | `log-format`         | `text`                                  | Log format (text/json)                            |
 | `--dry-run`         | `dry-run`            | `false`                                 | Validate everything without starting listeners    |

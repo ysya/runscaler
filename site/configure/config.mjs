@@ -160,7 +160,12 @@ function validateSet(scale, global, lang, index) {
   const set = scale.set ?? {};
   const provider = copy(set.provider) || 'docker';
   const auth = copy(set.auth) || 'pat';
+  const sweepMode = copy(set['registration-sweep-mode']) || 'off';
+  reject(!['off', 'log', 'remove'].includes(sweepMode), 'set', 'registration-sweep-mode', index, lang, 'Invalid registration sweep mode.', '註冊清理模式無效。');
+  const sweepInterval = copy(set['registration-sweep-interval']);
+  reject(sweepInterval && sweepInterval !== '0' && !(durationNs(sweepInterval) >= 60e9), 'set', 'registration-sweep-interval', index, lang, 'Registration sweep interval must be at least 1m.', '註冊清理間隔須至少為 1m。');
   reject(!validURL(copy(set.url), ['https:']) || new URL(set.url || 'https://github.com/').pathname === '/', 'set', 'url', index, lang, 'Enter an HTTPS GitHub organization or repository URL.', '請輸入 HTTPS GitHub 組織或儲存庫網址。');
+  reject(sweepMode !== 'off' && new URL(set.url).pathname.split('/').filter(Boolean).length !== 1, 'set', 'registration-sweep-mode', index, lang, 'Registration sweeping requires an organization URL.', '註冊清理需要組織網址。');
   reject(!copy(set.name), 'set', 'name', index, lang, 'Enter a scale-set name.', '請輸入規模集名稱。');
   reject(provider !== 'docker' && provider !== 'tart', 'set', 'provider', index, lang, 'Invalid provider.', '執行環境無效。');
   reject(auth !== 'pat' && auth !== 'app', 'set', 'auth', index, lang, 'Invalid authentication.', '驗證方式無效。');

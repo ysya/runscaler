@@ -82,6 +82,12 @@ type ScaleSetController struct {
 	retryTimer         *time.Timer
 	lastFailureAttempt uint64
 	failureGeneration  uint64
+	// startFailed is called after a start that failed has left local state
+	// (see WithStartFailureNotifier). Nil when nothing listens.
+	startFailed          func()
+	registrationMu       sync.Mutex
+	registrations        map[int]*pendingRegistration
+	registrationInFlight bool
 }
 
 // Option configures optional ScaleSetController behavior at construction time.
@@ -105,6 +111,15 @@ func WithCapacityAllocator(a *capacity.Allocator) Option {
 		if a != nil {
 			s.capacity = a
 		}
+	}
+}
+
+// WithStartFailureNotifier coalesces recovery sweeps after a failed JIT
+// request or provider start. Known IDs stay tracked for direct cleanup;
+// unknown IDs require recovery discovery. notify must not block.
+func WithStartFailureNotifier(notify func()) Option {
+	return func(s *ScaleSetController) {
+		s.startFailed = notify
 	}
 }
 
@@ -225,6 +240,11 @@ func (s *ScaleSetController) reconcileLoop() {
 func (s *ScaleSetController) reconcileOne() bool {
 	if s.draining.Load() || s.workCtx.Err() != nil {
 		return false
+	}
+	if id, ok := s.claimRegistration(); ok {
+		s.cleanupWG.Add(1)
+		go func() { defer s.cleanupWG.Done(); s.removeRegistration(s.workCtx, id) }()
+		return true
 	}
 	if name, instanceID, ok := s.instances.claimRemoval(time.Now()); ok {
 		s.cleanupWG.Add(1)
@@ -409,10 +429,23 @@ func (s *ScaleSetController) startInstanceWithLease(ctx context.Context, lease *
 	}
 	attempt := s.recordStartAttempt(started)
 	s.instances.setAttempt(name, attempt)
+	jitRunnerID := 0
+	requestedJIT := false
 	fail := func(reason string, err error) (string, error) {
 		s.recordStartFailureFor(ctx, reason, attempt)
+		if jitRunnerID > 0 {
+			s.queueRegistration(name, jitRunnerID)
+		}
 		s.instances.failProvision(name)
 		lease.Release()
+		if jitRunnerID > 0 {
+			s.signalReconcile()
+		}
+		// Provisioning has ended; known registrations remain owned by the
+		// direct cleanup queue, while a sweep may discover unknown IDs.
+		if requestedJIT && s.startFailed != nil {
+			s.startFailed()
+		}
 		return "", err
 	}
 
@@ -434,6 +467,7 @@ func (s *ScaleSetController) startInstanceWithLease(ctx context.Context, lease *
 		}
 	}
 
+	requestedJIT = true
 	jit, err := s.scalesetClient.GenerateJitRunnerConfig(
 		ctx,
 		&scaleset.RunnerScaleSetJitRunnerSetting{
@@ -445,16 +479,16 @@ func (s *ScaleSetController) startInstanceWithLease(ctx context.Context, lease *
 		return fail("jit_config_failed", fmt.Errorf("failed to generate JIT config: %w", err))
 	}
 
-	s.instances.setJIT(name, jit.EncodedJITConfig)
+	if jit.Runner != nil {
+		jitRunnerID = jit.Runner.ID
+	}
+	s.instances.setJIT(name, jit.EncodedJITConfig, jitRunnerID)
 	instanceID, err := s.provider.StartInstance(ctx, name, jit.EncodedJITConfig)
 	if err != nil {
 		return fail("provider_start_failed", err)
 	}
 
-	runnerID := 0
-	if jit.Runner != nil {
-		runnerID = jit.Runner.ID
-	}
+	runnerID := jitRunnerID
 	ready, needsReadiness := s.provider.(provider.InstanceReadiness)
 	readyCtx, cancelReady := context.WithCancel(s.workCtx)
 	var removeNow, tracked bool
@@ -649,6 +683,10 @@ func (s *ScaleSetController) Drain(ctx context.Context) error {
 		// Reconciliation has stopped, so drain owns cleanup, including retries
 		// left by a scale-down or startup cancelled by stopWork.
 		for ctx.Err() == nil {
+			if id, ok := s.claimRegistration(); ok {
+				s.removeRegistration(ctx, id)
+				continue
+			}
 			name, instanceID, ok := s.instances.claimRemoval(time.Now())
 			if !ok {
 				break
@@ -656,7 +694,7 @@ func (s *ScaleSetController) Drain(ctx context.Context) error {
 			s.removeClaimedInstance(ctx, name, instanceID)
 		}
 		_, _, busy, removing := s.instances.lifecycleCounts()
-		if busy == 0 && removing == 0 {
+		if busy == 0 && removing == 0 && s.registrationCount() == 0 {
 			s.logger.Info("Runner drain complete", slog.Duration("waited", time.Since(started)))
 			return nil
 		}
@@ -716,6 +754,7 @@ func (s *ScaleSetController) Shutdown(ctx context.Context) {
 	}
 
 	wg.Wait()
+	s.flushRegistrations(shutdownCtx)
 	s.provider.Shutdown(shutdownCtx)
 }
 
@@ -781,6 +820,15 @@ func jobRefFrom(m *scaleset.JobMessageBase) jobRef {
 		repo = m.OwnerName + "/" + repo
 	}
 	return jobRef{id: m.JobID, name: m.JobDisplayName, repo: repo, runID: m.WorkflowRunID}
+}
+
+// HasRunner reports whether the controller tracks a runner of this name in
+// any phase, provisioning included. It reads the state under its lock when
+// called. startInstanceWithLease reserves a name before it asks GitHub for
+// the JIT registration, so every registration this process creates is local
+// before it exists on GitHub.
+func (s *ScaleSetController) HasRunner(name string) bool {
+	return s.instances.hasName(name) || s.hasPendingRegistration(name)
 }
 
 // InstanceCounts returns the number of idle and busy runners.

@@ -29,6 +29,18 @@ test('Tart Softnet rejects incompatible modes and dependent rules', () => {
   assert.match(generateFullConfig(state), /net-softnet-block = "out @host"/u);
 });
 
+test('registration sweep validates scope and minimum interval', () => {
+  const state = base();
+  state.scaleSets[0].set['registration-sweep-mode'] = 'remove';
+  state.scaleSets[0].set.url = 'https://github.com/example-org/repo';
+  fieldError(state, 'set', 'registration-sweep-mode');
+  state.scaleSets[0].set.url = 'https://github.com/example-org';
+  state.scaleSets[0].set['registration-sweep-interval'] = '1s';
+  fieldError(state, 'set', 'registration-sweep-interval');
+  state.scaleSets[0].set['registration-sweep-interval'] = '1m';
+  assert.match(generateFullConfig(state), /registration-sweep-mode = "remove"/u);
+});
+
 test('TOML quoting escapes strings and rejects control characters', () => {
   assert.equal(quoteToml('a"\\b'), '"a\\"\\\\b"');
   assert.throws(() => quoteToml('x"\nmax-runners = 99'), /control characters/u);

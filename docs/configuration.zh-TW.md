@@ -457,3 +457,11 @@ Softnet 預設仍允許 VM 存取主機閘道。若要封鎖，設定 `net-softn
 一般啟動會先清理孤兒 VM，再檢查 guest OS；dry run 不執行此清理。清理後仍不足以建立檢查 clone 時會拒絕啟動。執行中的供應失敗沿用既有退避重試。
 
 磁碟下限不阻擋 cache 回收。若用來更新映像檔使用時間的暫存 clone 被拒絕，會記錄保護失敗並繼續清理 cache，因此之後可能需要重新拉取 runner 映像檔。Cache prune 不刪除本機 base VM 或執行中的 runner VM。
+
+## 遺留的 GitHub runner 註冊
+
+Docker 與 Tart 的 JIT 回應包含 runner ID 時，會在供應之前保存。供應失敗後會直接取消該註冊；API 暫時失敗或 GitHub 回報仍有工作時保留紀錄並退避重試，即使目前沒有 runner 需求也會繼續清理。關機會做最後一次有時限的清理。此行為不需要開啟 sweep。
+
+程序崩潰或 JIT 回應遺失時可能不知道 ID，這時可選擇啟用 `registration-sweep-mode = "log"` 觀察，確認後改為 `"remove"`。預設為 `"off"`，`registration-sweep-interval` 預設 `"10m"`，最短 `"1m"`。
+
+補漏掃描僅支援組織層級 scale set，且要求每個 scale set 僅由一個管理程序服務。只有離線、不忙碌、名稱符合 runscaler 格式、本機沒有管理，且 API 確認屬於該 scale set 的註冊才會刪除。每輪最多處理 20 筆刪除、100 筆歸屬查詢，總時限為兩分鐘。掃描會在啟動、指定間隔與啟動失敗後執行；失敗觸發會合併，至少相隔一分鐘。

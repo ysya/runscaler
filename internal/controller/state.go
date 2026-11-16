@@ -86,6 +86,14 @@ func (r *instanceState) reserve(name string, lease *capacity.Lease) bool {
 	return true
 }
 
+// hasName reports whether name is tracked in any phase.
+func (r *instanceState) hasName(name string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	_, ok := r.instances[name]
+	return ok
+}
+
 func (r *instanceState) failProvision(name string) {
 	r.mu.Lock()
 	if instance, ok := r.instances[name]; ok && instance.id == "" {
@@ -161,11 +169,12 @@ func (r *instanceState) setAttempt(name string, attempt startAttempt) {
 	}
 }
 
-func (r *instanceState) setJIT(name, jit string) {
+func (r *instanceState) setJIT(name, jit string, runnerID int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if i := r.instances[name]; i != nil {
 		i.jit = jit
+		i.runnerID = runnerID
 	}
 }
 func (r *instanceState) claimDiagnostics(name, id string) (string, string, bool) {

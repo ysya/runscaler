@@ -15,6 +15,15 @@ import (
 )
 
 func TestStartupCleansOrphansBeforeCloneFloor(t *testing.T) {
+	testStartupCloneFloorCleanup(t, false)
+}
+
+func TestDryRunDoesNotCleanOrphansBeforeCloneFloor(t *testing.T) {
+	testStartupCloneFloorCleanup(t, true)
+}
+
+func testStartupCloneFloorCleanup(t *testing.T, dryRun bool) {
+	t.Helper()
 	fixture := t.TempDir()
 	bin := filepath.Join(fixture, "bin")
 	home := filepath.Join(fixture, "tart-home")
@@ -42,6 +51,7 @@ esac
 		"url": "https://github.com/example-org", "name": "fixture", "provider": "tart",
 		"token": "review-fixture", "runner-image": "fixture-image", "max-runners": 1,
 		"log-file": "", "log-level": "error", "log-format": "text", "diagnostics.enabled": false,
+		"dry-run":   dryRun,
 		"tart.home": home, "tart.clone-min-free-gb": 1000000,
 	} {
 		v.Set(key, value)
@@ -60,7 +70,7 @@ esac
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(calls), "delete runner-deadbeef") {
-		t.Fatalf("startup refused the clone before reclaiming the previous process's VM; Tart calls: %q", calls)
+	if cleaned := strings.Contains(string(calls), "delete runner-deadbeef"); cleaned == dryRun {
+		t.Fatalf("orphan cleanup=%v, dry-run=%v; Tart calls: %q", cleaned, dryRun, calls)
 	}
 }

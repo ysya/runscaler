@@ -86,7 +86,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	}
 
 	// Scaleset API connectivity check (if config is available)
-	apiErr := doctorGitHubCheck(cmd.Context(), &cfg)
+	apiErr := errors.Join(checkTartSoftnet(scaleSets, cmd.OutOrStdout()), doctorGitHubCheck(cmd.Context(), &cfg))
 
 	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
 	defer cancel()

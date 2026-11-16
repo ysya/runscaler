@@ -77,6 +77,9 @@ func init() {
 	flags.Int("tart-memory", 0, "Memory in MB for each VM (0 = use image default)")
 	flags.Int("tart-pool-size", 0, "Number of pre-warmed VMs to keep ready (0 = disabled)")
 	flags.String("tart-net-bridged", "", "Host interface to bridge each VM to instead of Tart's NAT (e.g. en0)")
+	flags.Bool("tart-net-softnet", false, "Boot each VM with Tart's Softnet isolation (tart run --net-softnet)")
+	flags.String("tart-net-softnet-allow", "", "Softnet allow rules passed to tart run --net-softnet-allow (requires --tart-net-softnet)")
+	flags.String("tart-net-softnet-block", "", "Softnet block rules passed to tart run --net-softnet-block, e.g. \"out @host\" (requires --tart-net-softnet)")
 
 	// Global
 	flags.String("log-level", config.DefaultLogLevel, "Log level (debug, info, warn, error)")
@@ -117,6 +120,9 @@ func init() {
 	viper.BindPFlag("tart.memory", flags.Lookup("tart-memory"))
 	viper.BindPFlag("tart.pool-size", flags.Lookup("tart-pool-size"))
 	viper.BindPFlag("tart.net-bridged", flags.Lookup("tart-net-bridged"))
+	viper.BindPFlag("tart.net-softnet", flags.Lookup("tart-net-softnet"))
+	viper.BindPFlag("tart.net-softnet-allow", flags.Lookup("tart-net-softnet-allow"))
+	viper.BindPFlag("tart.net-softnet-block", flags.Lookup("tart-net-softnet-block"))
 
 	// Register subcommands
 	cmd.AddCommand(validateCmd, statusCmd, doctorCmd, versionCmd, serviceCmd, cacheCmd, runCommand)
@@ -372,6 +378,9 @@ func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) e
 		if _, err := exec.LookPath("tart"); err != nil {
 			return fmt.Errorf("tart binary not found in PATH: %w\n\n"+
 				"  Install Tart: brew install openai/tools/tart", err)
+		}
+		if err := checkTartSoftnet(scaleSets, os.Stdout); err != nil {
+			return err
 		}
 		logger.Info("Tart provider enabled")
 

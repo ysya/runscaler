@@ -204,6 +204,12 @@ function validateSet(scale, global, lang, index) {
   }
   if (provider === 'tart') {
     const tart = scale.tart ?? {};
+    reject(copy(tart['net-softnet']) === 'true' && copy(tart['net-bridged']), 'tart', 'net-softnet', index, lang, 'Softnet and bridged networking cannot both be enabled.', 'Softnet 與橋接網路不可同時啟用。');
+    for (const key of ['net-softnet-allow', 'net-softnet-block']) {
+      const rules = copy(tart[key]);
+      reject(rules && copy(tart['net-softnet']) !== 'true', 'tart', key, index, lang, 'Softnet rules require Softnet networking.', 'Softnet 規則需要啟用 Softnet 網路。');
+      reject(rules && (/^-/u.test(rules) || /[\r\n=]/u.test(rules)), 'tart', key, index, lang, 'Invalid Softnet rule list.', 'Softnet 規則清單無效。');
+    }
     reject(copy(tart['pool-size']) && Number(tart['pool-size']) > max, 'tart', 'pool-size', index, lang, 'Tart warm pool cannot exceed maximum runners.', 'Tart 預熱 VM 數量不可超過最多 runner 數量。');
     reject(copy(tart.mtu) && ![0, -1].includes(Number(tart.mtu)) && (Number(tart.mtu) < 1280 || Number(tart.mtu) > 1500), 'tart', 'mtu', index, lang, 'Tart MTU must be 0, -1, or 1280–1500.', 'Tart MTU 須為 0、-1 或 1280–1500。');
     reject(list(tart.dns).some(ip => !validIP(ip)), 'tart', 'dns', index, lang, 'Tart DNS entries must be IP addresses.', 'Tart DNS 項目須為 IP 位址。');

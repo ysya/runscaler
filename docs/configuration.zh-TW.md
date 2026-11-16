@@ -441,3 +441,11 @@ pool-size = 2
 與 GitLab Runner 相同，`concurrent` 限制管理程序內的 runner 總數，`max-runners` 則是各規模集的個別上限。控制器會在 JIT／供應器啟動前預留全域容量。Tart 預熱 VM 不持有此容量租約，因此數量會加在 `concurrent` 之外。系統會先預留各組 `min-runners` 下限所需的容量，再以先進先出（FIFO）順序分配剩餘容量。`concurrent = 0` 會使用套用 macOS 限制後的有效 `max-runners` 總和。
 
 使用 `provider` TOML 設定鍵與 `--provider` 旗標選擇 Docker 或 Tart。
+
+## Tart Softnet 網路隔離
+
+在 `[tart]`（或 `[scaleset.tart]`）設定 `net-softnet = true` 可啟用 Tart 原生 Softnet。此選項預設關閉，且不能與 `net-bridged` 同時使用。`net-softnet-allow` 與 `net-softnet-block` 會原樣傳給 Tart，必須先啟用 Softnet。
+
+Softnet 預設仍允許 VM 存取主機閘道。若要封鎖，設定 `net-softnet-block = "out @host"`；如仍需主機 DNS，可設定 `net-softnet-allow = "out proto udp @host port 53,out proto tcp @host port 53"`。
+
+主機須安裝 Softnet，並設定 setuid-root 或 passwordless sudo。`validate` 與 `doctor` 會檢查執行檔並提示權限需求；不會自動變更主機權限。隔離啟動失敗時不會退回 NAT。

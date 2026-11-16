@@ -16,6 +16,19 @@ const fieldError = (state, group, key, index = 0) => assert.throws(
   `${group}.${key} should identify the invalid field`,
 );
 
+test('Tart Softnet rejects incompatible modes and dependent rules', () => {
+  const state = base();
+  state.scaleSets[0].set.provider = 'tart';
+  state.scaleSets[0].tart = { 'net-softnet': 'true', 'net-bridged': 'en0' };
+  fieldError(state, 'tart', 'net-softnet');
+  state.scaleSets[0].tart = { 'net-softnet-block': 'out @host' };
+  fieldError(state, 'tart', 'net-softnet-block');
+  state.scaleSets[0].tart = { 'net-softnet': 'true', 'net-softnet-allow': 'a=b' };
+  fieldError(state, 'tart', 'net-softnet-allow');
+  state.scaleSets[0].tart = { 'net-softnet': 'true', 'net-softnet-block': 'out @host' };
+  assert.match(generateFullConfig(state), /net-softnet-block = "out @host"/u);
+});
+
 test('TOML quoting escapes strings and rejects control characters', () => {
   assert.equal(quoteToml('a"\\b'), '"a\\"\\\\b"');
   assert.throws(() => quoteToml('x"\nmax-runners = 99'), /control characters/u);

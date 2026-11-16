@@ -107,6 +107,10 @@ func runValidate(cmd *cobra.Command, args []string) error {
 	}
 
 	// Show shared volume status
+	if err := checkTartSoftnet(scaleSets, cmd.OutOrStdout()); err != nil {
+		return err
+	}
+
 	if needsDocker {
 		for _, ss := range scaleSets {
 			if !ss.IsTart() && ss.Docker.SharedVolume != "" {

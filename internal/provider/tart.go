@@ -189,6 +189,25 @@ func (c *TartHostCoordinator) release(slot tartSlot) {
 	}
 }
 
+// softnetReservedMAC is the address Softnet keeps for its own DHCP server;
+// a guest that asks for it is refused ("VM MAC address ... is reserved for
+// the DHCP server"), and natMAC(0) is exactly that address.
+const softnetReservedMAC = "02:00:00:00:00:01"
+
+// softnetMAC is the fixed per-slot address of a Softnet guest: locally
+// administered, unicast, stable per slot (Softnet's DHCP sees the same
+// clients), and never Softnet's reserved address.
+func softnetMAC(index int) string {
+	for salt := 0; ; salt++ {
+		digest := sha256.Sum256(fmt.Appendf(nil, "runscaler-tart/softnet/%d/%d", index, salt))
+		address := net.HardwareAddr(digest[:6])
+		address[0] = address[0]&0xfe | 0x02 // locally administered, unicast
+		if s := address.String(); s != softnetReservedMAC {
+			return s
+		}
+	}
+}
+
 func natMAC(index int) string {
 	n := uint64(index) + 1
 	return net.HardwareAddr{0x02, byte(n >> 32), byte(n >> 24), byte(n >> 16), byte(n >> 8), byte(n)}.String()
@@ -201,7 +220,7 @@ func natMAC(index int) string {
 //  2. tart set <name> --cpu/--memory      — configure VM resources (if specified)
 //  3. Set deterministic MAC address       — prevent DHCP lease exhaustion
 //  4. tart run <name> --no-graphics       — boot VM in background goroutine
-//     (--net-bridged=<interface> when configured)
+//     (--net-bridged=<interface> or --net-softnet when configured)
 //  5. tart exec <name> true               — poll until Guest Agent is ready
 //  6. tart exec <name> ... run.sh         — start runner with JIT config
 //  7. tart stop + tart delete on removal
@@ -227,9 +246,14 @@ type TartProvider struct {
 	mtu        int      // 0 = auto, -1 = off, otherwise a fixed MTU
 	dns        []string // guest resolvers; empty = keep what Tart's NAT hands out
 	netBridged string   // host interface to bridge VMs to; empty = Tart's NAT
-	githubHost string   // the host whose route decides the auto MTU
-	mtuLogMu   sync.Mutex
-	lastMTULog string // last MTU and reason logged at Info; repeats go to Debug
+	netSoftnet bool     // boot with --net-softnet (Softnet isolation)
+	// Softnet rules passed verbatim to tart run --net-softnet-allow/-block
+	// (softnet --allow/--block); empty = Softnet's defaults.
+	netSoftnetAllow string
+	netSoftnetBlock string
+	githubHost      string // the host whose route decides the auto MTU
+	mtuLogMu        sync.Mutex
+	lastMTULog      string // last MTU and reason logged at Info; repeats go to Debug
 
 	// Runner start-up checks; zero means the default (see waitRunnerListening).
 	runnerPoll          time.Duration
@@ -254,21 +278,24 @@ func NewTartProviderWithCoordinator(ss config.ScaleSetConfig, logger *slog.Logge
 		coordinator = NewTartHostCoordinator(config.MaxMacOSVMsPerHost)
 	}
 	p := &TartProvider{
-		baseImage:   ss.RunnerImage,
-		runnerDir:   ss.Tart.RunnerDir,
-		home:        ss.Tart.Home,
-		cpu:         ss.Tart.CPU,
-		memory:      ss.Tart.Memory,
-		poolSize:    ss.Tart.PoolSize,
-		guest:       guest,
-		logger:      logger,
-		cmd:         TartCommandRunner(ss.Tart.Home),
-		coordinator: coordinator,
-		retryConfig: ss.EffectiveRetry(),
-		mtu:         ss.Tart.MTU,
-		dns:         ss.Tart.DNS,
-		netBridged:  ss.Tart.NetBridged,
-		githubHost:  registrationHost(ss.RegistrationURL),
+		baseImage:       ss.RunnerImage,
+		runnerDir:       ss.Tart.RunnerDir,
+		home:            ss.Tart.Home,
+		cpu:             ss.Tart.CPU,
+		memory:          ss.Tart.Memory,
+		poolSize:        ss.Tart.PoolSize,
+		guest:           guest,
+		logger:          logger,
+		cmd:             TartCommandRunner(ss.Tart.Home),
+		coordinator:     coordinator,
+		retryConfig:     ss.EffectiveRetry(),
+		mtu:             ss.Tart.MTU,
+		dns:             ss.Tart.DNS,
+		netBridged:      ss.Tart.NetBridged,
+		netSoftnet:      ss.Tart.NetSoftnet,
+		netSoftnetAllow: ss.Tart.NetSoftnetAllow,
+		netSoftnetBlock: ss.Tart.NetSoftnetBlock,
+		githubHost:      registrationHost(ss.RegistrationURL),
 	}
 	if p.runnerDir == "" {
 		p.runnerDir = config.DefaultTartRunnerDir
@@ -287,6 +314,15 @@ func (p *TartProvider) runArgs(name string) []string {
 	args := []string{"run", name, "--no-graphics"}
 	if p.netBridged != "" {
 		args = append(args, "--net-bridged="+p.netBridged)
+	}
+	if p.netSoftnet {
+		args = append(args, "--net-softnet")
+	}
+	if p.netSoftnetAllow != "" {
+		args = append(args, "--net-softnet-allow="+p.netSoftnetAllow)
+	}
+	if p.netSoftnetBlock != "" {
+		args = append(args, "--net-softnet-block="+p.netSoftnetBlock)
 	}
 	return args
 }
@@ -528,6 +564,9 @@ func (p *TartProvider) writeVMMAC(ctx context.Context, name string, slotIdx int,
 	configPath := filepath.Join(tartHome, "vms", name, "config.json")
 
 	mac := natMAC(slotIdx)
+	if p.netSoftnet {
+		mac = softnetMAC(slotIdx)
+	}
 	if p.netBridged != "" {
 		out, err := p.cmd.Run(ctx, "/sbin/ifconfig", p.netBridged)
 		if err != nil {

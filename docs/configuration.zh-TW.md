@@ -470,4 +470,4 @@ Docker 與 Tart 的 JIT 回應包含 runner ID 時，會在供應之前保存。
 
 程序崩潰或 JIT 回應遺失時可能不知道 ID，這時可選擇啟用 `registration-sweep-mode = "log"` 觀察，確認後改為 `"remove"`。預設為 `"off"`，`registration-sweep-interval` 預設 `"10m"`，最短 `"1m"`。
 
-補漏掃描僅支援組織層級 scale set，且要求每個 scale set 僅由一個管理程序服務。只有離線、不忙碌、名稱符合 runscaler 格式、本機沒有管理，且 API 確認屬於該 scale set 的註冊才會刪除。REST 清單與 scale-set API 回傳的 runner ID、名稱都必須完全一致；身分不符或缺失時保留註冊並記錄錯誤。每輪最多處理 20 筆刪除、100 筆歸屬查詢，總時限為兩分鐘。掃描會在啟動、指定間隔與啟動失敗後執行；失敗觸發會合併，至少相隔一分鐘。
+補漏掃描僅支援組織層級 scale set，且要求每個 scale set 僅由一個管理程序服務。只有離線、不忙碌、名稱符合 runscaler 格式、本機沒有管理，且 API 確認屬於該 scale set 的註冊才會刪除。REST 清單與 scale-set API 回傳的 runner ID、名稱都必須完全一致，且兩邊 ID 都須為正數；身分不符、無效或缺失時保留註冊、記錄警告並計入該輪的 `errors` 計數。每輪最多處理 20 筆刪除、100 筆歸屬查詢，總時限為兩分鐘。掃描會在啟動、指定間隔與啟動失敗後執行；失敗觸發會合併，至少相隔一分鐘。

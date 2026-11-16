@@ -378,7 +378,8 @@ runner gives its runners (`runner-` and 8 lowercase hex digits); this process
 has no instance or pending registration cleanup of that name, read after the list returned;
 and the scale set API reports that the runner belongs to this scale set.
 The runner ID and name returned by that lookup must exactly match the REST
-listing; missing or mismatched identity is retained and logged as an error.
+listing, and both IDs must be positive. Missing, invalid or mismatched identity
+is retained, logged as a warning and counted in the sweep's `errors` summary.
 One sweep removes at most 20 registrations and is bounded by a two-minute
 timeout. A removal GitHub refuses (for example, a job still holds the runner)
 is logged and left for the next sweep.

@@ -287,9 +287,9 @@ func (s *Sweeper) Sweep(parent context.Context) Result {
 				slog.Int64("runnerID", r.ID), slog.String("name", r.Name), slog.Int("runnerScaleSetID", seen), slog.Int("scaleSetID", s.cfg.ScaleSetID))
 			continue
 		}
-		if int64(ref.ID) != r.ID || ref.Name != r.Name {
+		if r.ID <= 0 || ref.ID <= 0 || int64(ref.ID) != r.ID || ref.Name != r.Name {
 			res.Errors++
-			s.logger.Warn("Registration sweep keeps runner with mismatched identity",
+			s.logger.Warn("Registration sweep keeps runner with invalid or mismatched identity",
 				slog.Int64("runnerID", r.ID), slog.String("name", r.Name),
 				slog.Int("referenceID", ref.ID), slog.String("referenceName", ref.Name))
 			continue

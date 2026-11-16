@@ -220,7 +220,8 @@ func natMAC(index int) string {
 //  2. tart set <name> --cpu/--memory      — configure VM resources (if specified)
 //  3. Set deterministic MAC address       — prevent DHCP lease exhaustion
 //  4. tart run <name> --no-graphics       — boot VM in background goroutine
-//     (--net-bridged=<interface> or --net-softnet when configured)
+//     (--net-bridged=<interface> or --net-softnet when configured;
+//     the clone in step 1 is refused below clone-min-free-gb)
 //  5. tart exec <name> true               — poll until Guest Agent is ready
 //  6. tart exec <name> ... run.sh         — start runner with JIT config
 //  7. tart stop + tart delete on removal
@@ -241,6 +242,10 @@ type TartProvider struct {
 	cmd         CommandRunner
 	coordinator *TartHostCoordinator
 	retryConfig config.RetryConfig
+
+	// cloneFloor refuses a clone below its free bytes on the filesystem of
+	// TART_HOME (zero value = no floor).
+	cloneFloor CloneFloor
 
 	// Guest network, applied before each runner starts (see TartConfig).
 	mtu        int      // 0 = auto, -1 = off, otherwise a fixed MTU
@@ -303,6 +308,7 @@ func NewTartProviderWithCoordinator(ss config.ScaleSetConfig, logger *slog.Logge
 			p.runnerDir = config.DefaultTartLinuxRunnerDir
 		}
 	}
+	p.cloneFloor = CloneFloor{MinFreeBytes: ss.Tart.CloneMinFreeBytes()}
 	if guest == TartGuestLinux {
 		p.vmSlots = make(chan struct{}, max(1, ss.MaxRunners+ss.Tart.PoolSize))
 	}
@@ -459,8 +465,9 @@ func (p *TartProvider) bootVM(ctx context.Context, name string) (*warmVM, error)
 		_, _ = p.cmd.Run(cleanCtx, "tart", "delete", name)
 	}
 
-	// 1. Clone base image (APFS copy-on-write, near-instant)
-	if _, err := p.cmd.Run(ctx, "tart", "clone", p.baseImage, name); err != nil {
+	// 1. Clone base image (APFS copy-on-write, near-instant), unless the
+	// disk is below the clone floor.
+	if err := CloneTartVM(ctx, p.cmd, p.home, p.cloneFloor, p.baseImage, name); err != nil {
 		releaseSlot()
 		return nil, fmt.Errorf("failed to clone VM: %w", err)
 	}

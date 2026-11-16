@@ -449,3 +449,11 @@ pool-size = 2
 Softnet 預設仍允許 VM 存取主機閘道。若要封鎖，設定 `net-softnet-block = "out @host"`；如仍需主機 DNS，可設定 `net-softnet-allow = "out proto udp @host port 53,out proto tcp @host port 53"`。
 
 主機須安裝 Softnet，並設定 setuid-root 或 passwordless sudo。`validate` 與 `doctor` 會檢查執行檔並提示權限需求；不會自動變更主機權限。隔離啟動失敗時不會退回 NAT。
+
+## Tart clone 磁碟空間下限
+
+`[tart] clone-min-free-gb` 指定 Tart 主目錄所在檔案系統必須保留的可用 GiB；預設 0 表示停用。冷啟動會先檢查，再要求 GitHub 產生 JIT，實際 clone 前也會再次檢查。已就緒的預熱 VM 不需要 clone，仍可使用。
+
+一般啟動會先清理孤兒 VM，再檢查 guest OS；dry run 不執行此清理。清理後仍不足以建立檢查 clone 時會拒絕啟動。執行中的供應失敗沿用既有退避重試。
+
+磁碟下限不阻擋 cache 回收。若用來更新映像檔使用時間的暫存 clone 被拒絕，會記錄保護失敗並繼續清理 cache，因此之後可能需要重新拉取 runner 映像檔。Cache prune 不刪除本機 base VM 或執行中的 runner VM。

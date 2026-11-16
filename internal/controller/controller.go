@@ -428,6 +428,12 @@ func (s *ScaleSetController) startInstanceWithLease(ctx context.Context, lease *
 		}
 	}
 
+	if preflight, ok := s.provider.(provider.InstancePreflight); ok {
+		if err := preflight.CheckStart(ctx); err != nil {
+			return fail("provider_preflight_failed", err)
+		}
+	}
+
 	jit, err := s.scalesetClient.GenerateJitRunnerConfig(
 		ctx,
 		&scaleset.RunnerScaleSetJitRunnerSetting{

@@ -186,6 +186,7 @@ pool-size = 2            # pre-warm 2 VMs for instant job pickup (~2s vs ~30s co
 # net-softnet = false                  # boot VMs with Tart's Softnet isolation (softnet setuid root on PATH)
 # net-softnet-block = ""               # Softnet block rules, e.g. "out @host" (Softnet admits the host gateway by default)
 # net-softnet-allow = ""               # Softnet allow rules, e.g. "out proto udp @host port 53,out proto tcp @host port 53"
+# clone-min-free-gb = 0                # refuse to clone a VM below this many GiB free on TART_HOME (0 = off)
 ```
 
 runscaler detects each Tart image's guest OS at startup; no guest setting is
@@ -596,6 +597,7 @@ pool-size = 2
 | `--tart-net-softnet` | `[tart] net-softnet` | `false` (Tart's NAT) | Boot each VM with `tart run --net-softnet` (cannot be combined with net-bridged) |
 | `--tart-net-softnet-block` | `[tart] net-softnet-block` | `""` | Softnet rules passed verbatim to `tart run --net-softnet-block=` (requires net-softnet). Softnet admits guest traffic to the host gateway unless a rule such as `out @host` blocks it |
 | `--tart-net-softnet-allow` | `[tart] net-softnet-allow` | `""` | Softnet rules passed verbatim to `tart run --net-softnet-allow=` (requires net-softnet), e.g. the host's DNS: `out proto udp @host port 53,out proto tcp @host port 53` |
+| `--tart-clone-min-free-gb` | `[tart] clone-min-free-gb` | `0` (no floor) | Refuse every `tart clone` (runner VMs, startup guest inspection, the cache prune's mark-used clone) while the filesystem of TART_HOME (`[tart].home`, else `$TART_HOME`, else `~/.tart`) has fewer GiB free; an unreadable free space also refuses, and a refused mark-used clone skips that prune |
 | `--log-level`       | `log-level`          | `info`                                  | Log level (debug/info/warn/error)                 |
 | `--log-format`      | `log-format`         | `text`                                  | Log format (text/json)                            |
 | `--dry-run`         | `dry-run`            | `false`                                 | Validate everything without starting listeners    |
@@ -618,3 +620,9 @@ Use the `provider` TOML key and `--provider` flag to select Docker or Tart.
 ## Tart Softnet dependency checks
 
 `net-softnet` is opt-in and requires an executable `softnet` on PATH with setuid-root privileges or passwordless sudo. `validate` and `doctor` check the executable and report privilege guidance without changing host permissions. Failure to start Softnet does not fall back to NAT. Softnet admits the host gateway by default; use `net-softnet-block = "out @host"` to block it, adding explicit DNS allowances if needed.
+
+## Tart clone free-space floor
+
+Set `[tart] clone-min-free-gb` to refuse clones below the specified available GiB on the Tart home filesystem; 0 disables the floor. Runtime cold starts check before requesting JIT and every actual clone rechecks. Ready warm VMs can still be used without cloning. Normal startup reconciles owned orphan VMs before guest inspection; dry run never performs that cleanup. If inspection still cannot clone, startup fails closed. Runtime refusals use existing retry backoff.
+
+The floor never prevents cache reclamation. If it refuses an optional mark-used clone, cleanup logs that protection failed and continues pruning caches, which may require re-pulling a runner image later. Local base VMs and active runner VMs remain outside cache pruning.

@@ -129,3 +129,20 @@ func reportTartGuests(ctx context.Context, out io.Writer, runtimes []*scaleSetRu
 	}
 	return nil
 }
+
+// tartCloneFloors maps each [tart].home to the clone floor of the scale sets
+// that share it: the highest clone-min-free-gb among them. A clone outside a
+// provider (startup guest inspection, the cache prune's mark-used clone)
+// passes this floor, so no clone of runscaler bypasses it.
+func tartCloneFloors(scaleSets []config.ScaleSetConfig) map[string]provider.CloneFloor {
+	floors := make(map[string]provider.CloneFloor)
+	for _, ss := range scaleSets {
+		if !ss.IsTart() {
+			continue
+		}
+		if b := ss.Tart.CloneMinFreeBytes(); b > floors[ss.Tart.Home].MinFreeBytes {
+			floors[ss.Tart.Home] = provider.CloneFloor{MinFreeBytes: b}
+		}
+	}
+	return floors
+}

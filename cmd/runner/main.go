@@ -80,6 +80,7 @@ func init() {
 	flags.Bool("tart-net-softnet", false, "Boot each VM with Tart's Softnet isolation (tart run --net-softnet)")
 	flags.String("tart-net-softnet-allow", "", "Softnet allow rules passed to tart run --net-softnet-allow (requires --tart-net-softnet)")
 	flags.String("tart-net-softnet-block", "", "Softnet block rules passed to tart run --net-softnet-block, e.g. \"out @host\" (requires --tart-net-softnet)")
+	flags.Int("tart-clone-min-free-gb", 0, "Refuse to clone a VM while TART_HOME's filesystem has fewer GiB free (0 = no floor)")
 
 	// Global
 	flags.String("log-level", config.DefaultLogLevel, "Log level (debug, info, warn, error)")
@@ -123,6 +124,7 @@ func init() {
 	viper.BindPFlag("tart.net-softnet", flags.Lookup("tart-net-softnet"))
 	viper.BindPFlag("tart.net-softnet-allow", flags.Lookup("tart-net-softnet-allow"))
 	viper.BindPFlag("tart.net-softnet-block", flags.Lookup("tart-net-softnet-block"))
+	viper.BindPFlag("tart.clone-min-free-gb", flags.Lookup("tart-clone-min-free-gb"))
 
 	// Register subcommands
 	cmd.AddCommand(validateCmd, statusCmd, doctorCmd, versionCmd, serviceCmd, cacheCmd, runCommand)
@@ -385,6 +387,24 @@ func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) e
 		logger.Info("Tart provider enabled")
 
 	}
+	if !cfg.DryRun {
+		// The machine-wide lock is acquired by startManager before runManager is called,
+		// so resources created by runner but still present now belong to a dead
+		// previous process. Reconcile them before any new scale set can start.
+		// Dry-run returns above because it must not perform destructive cleanup.
+		var tartHomes []string
+		var workspaceRoots []string
+		for _, ss := range scaleSets {
+			if ss.IsTart() {
+				tartHomes = append(tartHomes, ss.Tart.Home)
+			} else if ss.Docker.WorkspaceRoot != "" {
+				workspaceRoots = append(workspaceRoots, ss.Docker.WorkspaceRoot)
+			}
+		}
+		reconcileOrphans(ctx, dockerClients, tartHomes, logger, workspaceRoots...)
+
+	}
+
 	runtimes := newScaleSetRuntimes(scaleSets, runtimeBackends{dockerClients: dockerClients, dockerPulls: provider.NewDockerImagePullCoordinator(), tartHost: tartCoordinator})
 	pullOutput := io.Writer(os.Stdout)
 	if logFile != nil {
@@ -400,8 +420,9 @@ func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) e
 		return err
 	}
 
+	cloneFloors := tartCloneFloors(scaleSets)
 	detect := func(ctx context.Context, home, image string) (provider.TartGuest, error) {
-		return provider.DetectTartGuest(ctx, provider.TartCommandRunner(home), home, image)
+		return provider.DetectTartGuest(ctx, provider.TartCommandRunner(home), home, image, cloneFloors[home])
 	}
 	if err := detectTartGuests(ctx, runtimes, detect, logger); err != nil {
 		return err
@@ -416,21 +437,6 @@ func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) e
 		)
 		return nil
 	}
-
-	// The machine-wide lock is acquired by startManager before runManager is called,
-	// so resources created by runner but still present now belong to a dead
-	// previous process. Reconcile them before any new scale set can start.
-	// Dry-run returns above because it must not perform destructive cleanup.
-	var tartHomes []string
-	var workspaceRoots []string
-	for _, ss := range scaleSets {
-		if ss.IsTart() {
-			tartHomes = append(tartHomes, ss.Tart.Home)
-		} else if ss.Docker.WorkspaceRoot != "" {
-			workspaceRoots = append(workspaceRoots, ss.Docker.WorkspaceRoot)
-		}
-	}
-	reconcileOrphans(ctx, dockerClients, tartHomes, logger, workspaceRoots...)
 
 	// Keep the local Results receiver available until every scale set finishes
 	// draining. Its separate listener has no streaming write timeout.

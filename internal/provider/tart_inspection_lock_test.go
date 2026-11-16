@@ -18,7 +18,7 @@ func TestTartInspectionLockFailureDoesNotStartClone(t *testing.T) {
 		t.Fatal(err)
 	}
 	runner := &cloningRunner{home: home}
-	if _, err := DetectTartGuest(context.Background(), runner, home, "fixture-image"); err == nil {
+	if _, err := DetectTartGuest(context.Background(), runner, home, "fixture-image", CloneFloor{}); err == nil {
 		t.Fatal("inspection ignored its lock failure")
 	}
 	if len(runner.calls) != 0 {
@@ -36,7 +36,7 @@ func TestTartInspectionLockWaitIsCancellableAndHomesAreIndependent(t *testing.T)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 	runner := &cloningRunner{home: home, config: `{"os":"linux"}`}
-	if _, err := DetectTartGuest(ctx, runner, home, "fixture-image"); !errors.Is(err, context.DeadlineExceeded) {
+	if _, err := DetectTartGuest(ctx, runner, home, "fixture-image", CloneFloor{}); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("blocked detection = %v, want deadline exceeded", err)
 	}
 	if len(runner.calls) != 0 {
@@ -63,7 +63,7 @@ func TestTartInspectionLockReleasedAfterDetectionFailure(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			home := t.TempDir()
 			tc.runner.home = home
-			if _, err := DetectTartGuest(context.Background(), &tc.runner, home, "fixture-image"); err == nil {
+			if _, err := DetectTartGuest(context.Background(), &tc.runner, home, "fixture-image", CloneFloor{}); err == nil {
 				t.Fatal("fixture detection should fail")
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -102,7 +102,7 @@ func TestTartInspectionLockHeldThroughCancelledCloneDeletion(t *testing.T) {
 	defer cancel()
 	home := t.TempDir()
 	runner := lockedDeletionRunner{cloningRunner: &cloningRunner{home: home, config: `{"os":"linux"}`, onClone: cancel}, t: t}
-	if _, err := DetectTartGuest(ctx, runner, home, "fixture-image"); !errors.Is(err, context.Canceled) {
+	if _, err := DetectTartGuest(ctx, runner, home, "fixture-image", CloneFloor{}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled detection = %v", err)
 	}
 	if runner.deleteCtxErr != nil {

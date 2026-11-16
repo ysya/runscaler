@@ -428,6 +428,12 @@ type TartConfig struct {
 	// defaults.
 	NetSoftnetAllow string `mapstructure:"net-softnet-allow"`
 	NetSoftnetBlock string `mapstructure:"net-softnet-block"`
+	// CloneMinFreeGB refuses to clone a new VM while the filesystem that
+	// holds TART_HOME has fewer than this many GiB free. The refusal is a
+	// failed start (the job stays queued), and a free-space read that fails
+	// also refuses. Unlike [disk], which only reclaims and then starts the
+	// runner anyway, this is a hard floor. 0 (default) = no floor.
+	CloneMinFreeGB int `mapstructure:"clone-min-free-gb"`
 
 	// CacheCleanup enables periodic `tart prune` of the OCI/IPSW caches under
 	// TART_HOME. Pointer: nil = inherit default (true). Local VMs are never
@@ -687,6 +693,9 @@ func (ss *ScaleSetConfig) ValidationErrors() []error {
 			if strings.HasPrefix(strings.TrimSpace(rules), "-") || strings.ContainsAny(rules, "\n\r=") {
 				add(fmt.Errorf("tart %s %q is not a Softnet rule list", key, rules))
 			}
+		}
+		if ss.Tart.CloneMinFreeGB < 0 {
+			add(fmt.Errorf("tart clone-min-free-gb must be >= 0"))
 		}
 	default:
 		add(fmt.Errorf("unsupported provider %q (must be %q or \"tart\")", ss.Provider, DefaultProvider))
@@ -961,4 +970,13 @@ func NewSystemInfo(scaleSetID int, version string) scaleset.SystemInfo {
 		Version:    version,
 		ScaleSetID: scaleSetID,
 	}
+}
+
+// CloneMinFreeBytes is CloneMinFreeGB in bytes (0 = no floor; a negative
+// value, refused by validation, also reads as no floor).
+func (t TartConfig) CloneMinFreeBytes() uint64 {
+	if t.CloneMinFreeGB <= 0 {
+		return 0
+	}
+	return uint64(t.CloneMinFreeGB) << 30
 }

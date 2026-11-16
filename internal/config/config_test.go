@@ -957,3 +957,17 @@ func TestTartNetSoftnetValidation(t *testing.T) {
 		}
 	}
 }
+
+func TestTartCloneFloorValidation(t *testing.T) {
+	ss := ScaleSetConfig{Provider: "tart", MaxRunners: 1, Tart: TartConfig{CloneMinFreeGB: -1}}
+	found := false
+	for _, err := range ss.ValidationErrors() {
+		found = found || strings.Contains(err.Error(), "clone-min-free-gb")
+	}
+	if !found {
+		t.Fatal("negative clone floor accepted")
+	}
+	if got := (TartConfig{CloneMinFreeGB: 170}).CloneMinFreeBytes(); got != 170<<30 {
+		t.Fatalf("floor bytes = %d", got)
+	}
+}

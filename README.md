@@ -1,4 +1,4 @@
-# runner
+# Runscaler
 
 [![Release](https://img.shields.io/github/v/release/ysya/runscaler)](https://github.com/ysya/runscaler/releases)
 [![Go Version](https://img.shields.io/github/go-mod/go-version/ysya/runscaler)](https://go.dev)
@@ -7,7 +7,7 @@
 
 [Website](https://runscaler.ysya.dev/) · [Config builder](https://runscaler.ysya.dev/configure/) | [English](README.md) | [繁體中文](README.zh-TW.md)
 
-Auto-scale GitHub Actions self-hosted runners as Docker containers or macOS and Linux VMs. Powered by [actions/scaleset](https://github.com/actions/scaleset).
+Runscaler auto-scales GitHub Actions self-hosted runners as Docker containers or macOS and Linux VMs. Powered by [actions/scaleset](https://github.com/actions/scaleset). The command-line executable is named `runner`.
 
 Runners are **ephemeral** — each container/VM handles exactly one job and is removed upon completion. No Kubernetes required.
 
@@ -18,8 +18,20 @@ formats. Patch releases aim to preserve compatibility. Read the
 [upgrade requirements](#upgrade-requirements) before upgrading, and back up
 configuration and data you need to keep.
 
+## When to choose Runscaler
+
+- You own a Docker host and want disposable runners that scale with GitHub Actions jobs, without operating Kubernetes.
+- You own an Apple Silicon Mac and want fresh macOS or arm64 Linux VMs through Tart.
+- You want one Go binary to manage scale sets on each host, with TOML configuration and CLI diagnostics.
+
+You manage the hosts, runner images, credentials, and capacity. Ephemeral runners
+do not remove the risks of Docker socket access or explicitly shared storage.
+Read the [selection guide](https://runscaler.ysya.dev/guide/) for prerequisites,
+an ARC and manually managed runner comparison, and limitations before choosing.
+
 ## Table of Contents
 
+- [When to choose Runscaler](#when-to-choose-runscaler)
 - [How It Works](#how-it-works)
 - [Features](#features)
 - [Quick Start](#quick-start)
@@ -63,7 +75,7 @@ See [Host-local Actions cache](docs/local-actions-cache.md) for both modes.
 ## Features
 
 - **Zero Kubernetes** — runs directly on any Docker host or Apple Silicon Mac
-- **Ephemeral runners** — each job gets a fresh container/VM, no state leakage
+- **Ephemeral runners** — each job gets a fresh container/VM; explicit shared storage and Docker access still affect isolation
 - **Auto-scaling** — scales from 0 to N based on job demand via long-poll (no cron, no polling delay)
 - **Per-job Docker-in-Docker** — optional private disposable daemons, with host socket sharing retained as the default
 - **macOS and Linux VMs via Tart** — native Apple Virtualization.framework with APFS Copy-on-Write cloning

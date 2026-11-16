@@ -1,0 +1,32 @@
+# Runscaler
+
+> Runscaler is an independent, MIT-licensed Go autoscaler for ephemeral GitHub Actions self-hosted runners on Docker hosts or Apple Silicon Macs with Tart. No Kubernetes is required. The command-line executable is named `runner`.
+
+Each container or VM handles one job and is removed afterward. One manager process manages scale sets on each host; it does not provision hosts or schedule across a cluster. Tart supports macOS and prepared arm64 Linux guests on Apple Silicon Macs. macOS guests share a host-wide limit of two running VMs.
+
+The Docker default shares the host socket and grants jobs root-equivalent daemon access. Optional per-job DinD separates Docker state but uses a privileged sidecar and shares the host kernel. Explicit shared volumes and caches retain data across jobs. Ephemeral lifecycle alone does not provide isolation from hostile workloads. See the security guide before deployment.
+
+Runscaler is pre-1.0. Minor releases may change or remove interfaces. Main-branch documentation describes current source; consult the release notes for the version you install. Host costs, GitHub terms, and third-party tool and image licenses are separate from Runscaler's MIT license.
+
+## Choosing a setup
+
+- [Selection guide](https://runscaler.ysya.dev/guide/): Docker and macOS use cases, prerequisites, comparison with ARC and manually managed runners, limitations, and FAQ.
+- [Traditional Chinese selection guide](https://runscaler.ysya.dev/guide/zh-TW.html): The same selection information in Traditional Chinese.
+- [README](https://raw.githubusercontent.com/ysya/runscaler/main/README.md): Quick start, workflow routing, commands, and upgrade requirements.
+- [Traditional Chinese README](https://raw.githubusercontent.com/ysya/runscaler/main/README.zh-TW.md): Translated quick start and documentation index.
+- [Config builder](https://runscaler.ysya.dev/configure/): Browser-local TOML generation; add credentials on the host.
+
+## Markdown documentation
+
+- [Configuration](https://raw.githubusercontent.com/ysya/runscaler/main/docs/configuration.md): Docker and Tart settings, multiple scale sets, GitHub App and PAT authentication.
+- [Deployment](https://raw.githubusercontent.com/ysya/runscaler/main/docs/deployment.md): Host prerequisites, runner images, Linux services, and macOS LaunchAgent setup.
+- [Security and isolation](https://raw.githubusercontent.com/ysya/runscaler/main/docs/security.md): Docker socket access, per-job DinD, shared resources, and VM boundaries.
+- [Commands](https://raw.githubusercontent.com/ysya/runscaler/main/docs/commands.md): Validation, status, diagnostics, updates, and service management.
+- [Host-local Actions cache](https://raw.githubusercontent.com/ysya/runscaler/main/docs/local-actions-cache.md): Opt-in receiver, supported runner images, rollout, and recovery.
+- [Caching](https://raw.githubusercontent.com/ysya/runscaler/main/docs/caching.md): Retention, disk pressure, and storage cleanup.
+
+## Project
+
+- [Source repository](https://github.com/ysya/runscaler): Source code, issues, and contribution history.
+- [Releases](https://github.com/ysya/runscaler/releases): Versioned changes and downloadable binaries.
+- [License](https://raw.githubusercontent.com/ysya/runscaler/main/LICENSE): MIT license for Runscaler.

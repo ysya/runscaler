@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Choose Runscaler for GitHub Actions runners without Kubernetes. Compare Docker, Apple Silicon macOS VMs, ARC, and manually managed runners, with prerequisites and limits.">
+  <meta name="theme-color" content="#0b171c">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'none'; base-uri 'none'; form-action 'none'">
+  <link rel="icon" type="image/svg+xml" href="../favicon.svg">
+  <link rel="stylesheet" href="../style.css">
+  <title>Choosing Runscaler — GitHub Actions runners without Kubernetes</title>
+  <link rel="canonical" href="https://runscaler.ysya.dev/guide/">
+  <link rel="alternate" hreflang="en" href="https://runscaler.ysya.dev/guide/">
+  <link rel="alternate" hreflang="zh-Hant" href="https://runscaler.ysya.dev/guide/zh-TW.html">
+  <link rel="alternate" hreflang="x-default" href="https://runscaler.ysya.dev/guide/">
+  <link rel="describedby" type="text/plain" href="/llms.txt">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Runscaler">
+  <meta property="og:title" content="Choosing Runscaler — GitHub Actions runners without Kubernetes">
+  <meta property="og:description" content="Choose Runscaler for GitHub Actions runners without Kubernetes. Compare Docker, Apple Silicon macOS VMs, ARC, and manually managed runners, with prerequisites and limits.">
+  <meta property="og:url" content="https://runscaler.ysya.dev/guide/">
+</head>
+<body data-lang="en">
+  <a class="skip-link" href="#main">Skip to content</a>
+  <header class="site-header">
+    <a class="brand" href="../" aria-label="Runscaler home"><span class="brand-mark" aria-hidden="true">r<span>.</span></span><span>runscaler</span></a>
+    <nav class="site-nav" aria-label="Main navigation"><a href="../">Home</a><a href="./" aria-current="page">Selection guide</a><a href="../configure/">Configure</a></nav>
+    <div class="header-actions"><a class="language-link" href="./zh-TW.html" lang="zh-Hant" hreflang="zh-Hant">繁體中文</a><a class="header-github" href="https://github.com/ysya/runscaler">GitHub ↗</a></div>
+  </header>
+  <main id="main" class="guide section-shell">
+    <article>
+      <header class="guide-intro">
+        <p class="eyebrow">SELECTION GUIDE</p>
+        <h1>GitHub Actions runners <em>without Kubernetes.</em></h1>
+        <p>Runscaler is a Go autoscaler for self-hosted GitHub Actions runners. One manager process on each host starts a disposable Docker container or Tart VM for a job, then removes it when the job completes. The CLI executable is named <code>runner</code>.</p>
+        <p>Choose it when you want to use your own Docker host or Apple Silicon Mac and manage runner capacity through a config file and CLI. You remain responsible for host provisioning, runner images, credentials, and updates.</p>
+      </header>
+      <nav class="guide-toc" aria-label="On this page"><a href="#docker">Docker runners</a><a href="#macos">macOS runners</a><a href="#compare">Compare options</a><a href="#faq">FAQ</a></nav>
+
+      <section id="docker">
+        <h2>Autoscaling Docker runners on your own host</h2>
+        <p>Use Docker when you have a Linux Docker host and want a fresh runner container for each trusted CI job. Runscaler long-polls GitHub's runner scale-set API, starts containers as jobs arrive, and can scale runner capacity to zero. No Kubernetes cluster or inbound webhook endpoint is required.</p>
+        <p>You need Docker API 1.49 or newer (Docker Engine 28.1+), a compatible runner image, GitHub App or PAT credentials, and enough host resources. Runscaler scales runners within the configured host capacity; it does not provision additional hosts.</p>
+        <ol>
+          <li><a href="../configure/">Build a Docker configuration</a> with your GitHub URL and scale-set name.</li>
+          <li>Follow the <a href="https://github.com/ysya/runscaler#linux-system-service">Linux quick start</a> to install <code>runner</code>, save the config, add credentials locally, and install the service.</li>
+          <li>Use your scale-set name in the workflow's <code>runs-on</code> field. For example, if you named it <code>my-runners</code>:</li>
+        </ol>
+        <pre><code>jobs:
+  build:
+    runs-on: my-runners
+    steps:
+      - run: echo "Running on a disposable runner"</code></pre>
+        <p>Review <a href="https://github.com/ysya/runscaler/blob/main/docs/security.md">Security &amp; Isolation</a>: the default Docker mode shares the host socket, granting jobs root-equivalent control over that daemon. Optional per-job DinD separates Docker state but uses a privileged sidecar and shares the host kernel. Run trusted code; do not expose these Docker runners to pull requests from public forks.</p>
+      </section>
+
+      <section id="macos">
+        <h2>Ephemeral macOS runners on Apple Silicon</h2>
+        <p>Use Tart for Xcode and other macOS workflows that need a fresh VM per job. Runscaler clones a prepared image, starts the VM, registers its GitHub runner, and removes the VM afterward. Optional warm pools prepare VMs ahead of work.</p>
+        <p>The host must be an Apple Silicon Mac with Tart installed. Select a compatible macOS/Xcode image and run the manager as a logged-in user through a LaunchAgent. macOS guests share a host-wide limit of two running VMs. Plan CPU, memory, and disk capacity for images, clones, and warm VMs.</p>
+        <p>Tart also supports prepared arm64 Linux guest images on the same Apple Silicon host. Linux guests do not consume the macOS VM permits; their capacity still depends on the host's resources. This does not provide a Tart backend on Linux hosts.</p>
+        <p>Start with the <a href="https://github.com/ysya/runscaler/blob/main/docs/deployment.md#tart-prerequisites-macos">Tart prerequisites</a>, then <a href="../configure/">choose Tart in the config builder</a> and follow the <a href="https://github.com/ysya/runscaler#macos-user-service">macOS quick start</a>. Pin and maintain your image and GitHub runner version.</p>
+      </section>
+
+      <section id="compare">
+        <h2>Runscaler, ARC, or manually managed runners?</h2>
+        <p>Choose based on the infrastructure you want to operate. These are different deployment approaches, not a performance ranking.</p>
+        <div class="comparison-scroll" role="region" aria-label="Runner deployment comparison" tabindex="0">
+          <table class="comparison-table">
+            <caption>Deployment and lifecycle responsibilities</caption>
+            <thead><tr><th scope="col">Consideration</th><th scope="col">Runscaler</th><th scope="col">Actions Runner Controller (ARC)</th><th scope="col">Manually managed GitHub runner</th></tr></thead>
+            <tbody>
+              <tr><th scope="row">Runs on</th><td>Your Docker host or Apple Silicon Mac with Tart</td><td>A Kubernetes cluster</td><td>A machine where you install the runner application</td></tr>
+              <tr><th scope="row">Runner lifecycle</th><td>Creates and removes a container or VM per job</td><td>Orchestrates and scales runner pods</td><td>You arrange startup, scaling, and cleanup</td></tr>
+              <tr><th scope="row">Operations</th><td>A Go binary and TOML on each host; CLI diagnostics</td><td>Kubernetes operator, Helm charts, and cluster resources</td><td>Runner application and your service or scripts</td></tr>
+              <tr><th scope="row">Good fit</th><td>Existing hosts; Docker or Tart; no Kubernetes requirement</td><td>Teams already operating Kubernetes</td><td>Fixed capacity or a custom lifecycle you maintain</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>GitHub describes <a href="https://docs.github.com/en/actions/concepts/runners/actions-runner-controller">ARC as a Kubernetes operator</a> and recommends it for organizations with Kubernetes infrastructure and expertise. The <a href="https://docs.github.com/en/actions/reference/runners/self-hosted-runners#autoscaling">self-hosted runner reference</a> also describes the standalone scale-set client used to build custom autoscalers. Runscaler uses the official <a href="https://github.com/actions/scaleset">Go scale-set client</a>; it is an independent project.</p>
+        <p>Consider another approach if you need managed CI with no host maintenance, automatic provisioning of cloud machines, centralized scheduling across hosts, or a managed multi-user web console. Runscaler manages the runners on each configured host. Hosts, images, and access policies remain yours to operate.</p>
+      </section>
+
+      <section id="faq">
+        <h2>Frequently asked questions</h2>
+        <h3>Does Runscaler require Kubernetes or a public webhook?</h3>
+        <p>No. It runs directly on your host and receives jobs through outbound HTTPS long-poll connections to GitHub's scale-set API. The host, runners, and VMs still need network access to GitHub and any services used by your jobs.</p>
+        <h3>Does a fresh runner mean every job is fully isolated?</h3>
+        <p>Each runner container or VM handles one job, but shared storage and Docker access affect isolation. Host socket mode grants jobs control of the host daemon. Per-job DinD separates daemon state, not the host kernel. Tart provides a VM boundary; network access, images, credentials, and explicit shared resources still need appropriate policies. See the <a href="https://github.com/ysya/runscaler/blob/main/docs/security.md">security guide</a>.</p>
+        <h3>Can one process manage multiple repositories or organizations?</h3>
+        <p>Yes. Configure multiple scale sets on the same host, including Docker and Tart where the host supports them. They share the manager's host capacity; this is not a cluster scheduler. See <a href="https://github.com/ysya/runscaler/blob/main/docs/configuration.md">Configuration</a>.</p>
+        <h3>What about caching and disk usage?</h3>
+        <p>Docker scale sets can opt into a host-local Actions cache receiver with supported runner images. Explicit shared volumes can retain files across jobs. Cache retention and disk cleanup require configuration; fresh runners do not imply that all host data is deleted. Read <a href="https://github.com/ysya/runscaler/blob/main/docs/local-actions-cache.md">Host-local Actions cache</a> and <a href="https://github.com/ysya/runscaler/blob/main/docs/caching.md">Caching</a>.</p>
+        <h3>Is Runscaler free, and how stable are upgrades?</h3>
+        <p>Runscaler is MIT-licensed. Host costs, GitHub terms, and the licenses of Tart and runner images are separate. The project is pre-1.0: minor releases may change or remove interfaces. Review <a href="https://github.com/ysya/runscaler/releases">release notes</a> and <a href="https://github.com/ysya/runscaler#upgrade-requirements">upgrade requirements</a> before upgrading.</p>
+      </section>
+      <div class="guide-next"><p>Ready to try it on your host?</p><a class="button button-primary" href="../configure/">Build your config ↗</a></div>
+    </article>
+  </main>
+  <footer class="site-footer"><div class="section-shell footer-inner"><a class="brand" href="../"><span class="brand-mark" aria-hidden="true">r<span>.</span></span><span>runscaler</span></a><p>Self-hosted runners, on your terms.</p><div><a href="https://github.com/ysya/runscaler">GitHub</a><a href="https://github.com/ysya/runscaler#documentation">Documentation</a><a href="https://github.com/ysya/runscaler/blob/main/LICENSE">MIT License</a></div></div></footer>
+</body>
+</html>

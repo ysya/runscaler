@@ -120,6 +120,17 @@ const (
 	DefaultRetryCooldownAfter = 5
 	DefaultRetryCooldown      = 5 * time.Minute
 
+	// DefaultSweepMode leaves the leaked-registration sweep off: it deletes
+	// runner registrations on GitHub, so an operator opts in, first with
+	// "log" to see what it would remove.
+	DefaultSweepMode = SweepModeOff
+	// DefaultSweepInterval is the period between leaked-registration sweeps.
+	// Each sweep lists the scale set's runner group, which costs GitHub API
+	// quota that the listener shares, so it is slow on purpose.
+	DefaultSweepInterval = 10 * time.Minute
+	// MinSweepInterval is the shortest sweep-interval accepted.
+	MinSweepInterval = time.Minute
+
 	// DefaultReadyTimeout bounds how long a new runner may take to report
 	// "Listening for Jobs" before its start counts as failed.
 	DefaultReadyTimeout = 5 * time.Minute

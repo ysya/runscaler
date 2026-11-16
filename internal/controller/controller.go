@@ -82,6 +82,9 @@ type ScaleSetController struct {
 	retryTimer         *time.Timer
 	lastFailureAttempt uint64
 	failureGeneration  uint64
+	// startFailed is called after a start that failed has left local state
+	// (see WithStartFailureNotifier). Nil when nothing listens.
+	startFailed func()
 }
 
 // Option configures optional ScaleSetController behavior at construction time.
@@ -105,6 +108,17 @@ func WithCapacityAllocator(a *capacity.Allocator) Option {
 		if a != nil {
 			s.capacity = a
 		}
+	}
+}
+
+// WithStartFailureNotifier calls notify after a runner start fails and the
+// runner has left local state. A start that fails after
+// GenerateJitRunnerConfig leaves a registration on GitHub that this
+// controller no longer tracks; the registration sweep (internal/regsweep)
+// removes it. notify must not block.
+func WithStartFailureNotifier(notify func()) Option {
+	return func(s *ScaleSetController) {
+		s.startFailed = notify
 	}
 }
 
@@ -413,6 +427,11 @@ func (s *ScaleSetController) startInstanceWithLease(ctx context.Context, lease *
 		s.recordStartFailureFor(ctx, reason, attempt)
 		s.instances.failProvision(name)
 		lease.Release()
+		// Notify only now: a sweep that read local state before
+		// failProvision would keep the leaked registration.
+		if s.startFailed != nil {
+			s.startFailed()
+		}
 		return "", err
 	}
 
@@ -775,6 +794,15 @@ func jobRefFrom(m *scaleset.JobMessageBase) jobRef {
 		repo = m.OwnerName + "/" + repo
 	}
 	return jobRef{id: m.JobID, name: m.JobDisplayName, repo: repo, runID: m.WorkflowRunID}
+}
+
+// HasRunner reports whether the controller tracks a runner of this name in
+// any phase, provisioning included. It reads the state under its lock when
+// called. startInstanceWithLease reserves a name before it asks GitHub for
+// the JIT registration, so every registration this process creates is local
+// before it exists on GitHub.
+func (s *ScaleSetController) HasRunner(name string) bool {
+	return s.instances.hasName(name)
 }
 
 // InstanceCounts returns the number of idle and busy runners.

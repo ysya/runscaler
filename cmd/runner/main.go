@@ -35,6 +35,7 @@ import (
 	runnerlock "github.com/ysya/runscaler/internal/lock"
 	"github.com/ysya/runscaler/internal/metrics"
 	"github.com/ysya/runscaler/internal/provider"
+	"github.com/ysya/runscaler/internal/regsweep"
 	"github.com/ysya/runscaler/internal/versioncheck"
 )
 
@@ -81,6 +82,10 @@ func init() {
 	flags.String("tart-net-softnet-block", "", "Softnet block rules passed to tart run --net-softnet-block, e.g. \"out @host\" (requires --tart-net-softnet)")
 	flags.Int("tart-clone-min-free-gb", 0, "Refuse to clone a VM while TART_HOME's filesystem has fewer GiB free (0 = no floor)")
 
+	// Leaked-registration sweep
+	flags.String("sweep-mode", config.DefaultSweepMode, "Sweep of leaked JIT runner registrations (off, log, remove); org scale sets only")
+	flags.Duration("sweep-interval", config.DefaultSweepInterval, "Period between leaked-registration sweeps (at least 1m)")
+
 	// Global
 	flags.String("log-level", config.DefaultLogLevel, "Log level (debug, info, warn, error)")
 	flags.String("log-format", config.DefaultLogFormat, "Log format (text, json)")
@@ -107,6 +112,8 @@ func init() {
 	viper.BindPFlag("dry-run", flags.Lookup("dry-run"))
 	viper.BindPFlag("health-port", flags.Lookup("health-port"))
 	viper.BindPFlag("health-address", flags.Lookup("health-address"))
+	viper.BindPFlag("sweep-mode", flags.Lookup("sweep-mode"))
+	viper.BindPFlag("sweep-interval", flags.Lookup("sweep-interval"))
 
 	// Nested keys (flag name → nested viper key for provider sub-structs):
 	viper.BindPFlag("docker.socket", flags.Lookup("docker-socket"))
@@ -650,8 +657,27 @@ func runScaleSetController(ctx context.Context, deps managerDeps, rt *scaleSetRu
 	}
 	controllerOpts = append(controllerOpts, controller.WithCapacityAllocator(rt.capacity))
 	controllerOpts = append(controllerOpts, controller.WithDiagnostics(deps.diagnostics, rt.config.ScaleSetName, rt.config.Provider, rt.config.Token), controller.WithRetry(rt.config.EffectiveRetry()))
-	s := controller.NewScaleSetController(scaleSet.ID, rt.config.MinRunners, rt.maxRunners, instanceProvider, scalesetClient, rt.logger, controllerOpts...)
+
+	// The sweeper exists before the controller so that the controller can
+	// notify it of start failures. It reads controller state only from its
+	// own goroutine, which starts after s is assigned.
+	var s *controller.ScaleSetController
+	sweeper, err := newRegistrationSweeper(rt.config, scalesetClient, scalesetClient, scaleSet.ID,
+		regsweep.LocalRunnersFunc(func(name string) bool { return s.HasRunner(name) }), rt.logger)
+	if err != nil {
+		return fmt.Errorf("registration sweep: %w", err)
+	}
+	if sweeper != nil {
+		controllerOpts = append(controllerOpts, controller.WithStartFailureNotifier(sweeper.Trigger))
+	}
+	s = controller.NewScaleSetController(scaleSet.ID, rt.config.MinRunners, rt.maxRunners, instanceProvider, scalesetClient, rt.logger, controllerOpts...)
 	defer s.Shutdown(context.WithoutCancel(ctx))
+	if sweeper != nil {
+		// Deferred after Shutdown, so it runs first: Shutdown removes
+		// instances without deregistering them, and no sweep may run
+		// against that emptied state.
+		defer startRegistrationSweep(ctx, sweeper)()
+	}
 
 	// The listener must keep delivering JobCompleted messages while Drain
 	// waits. Only cancel its context after Drain returns (or immediately when

@@ -58,6 +58,12 @@ max-runners = 10
 # min-runners = 0
 # labels = ["self-hosted", "linux"]
 
+# Leaked JIT runner registration sweep (organization scale sets only).
+# "log" reports leaked registrations, "remove" deletes them on GitHub. It
+# assumes one runner process per scale set. See docs/configuration.md.
+# sweep-mode = "off"
+# sweep-interval = "10m"
+
 # Startup retries (also used independently by each Tart warm-pool slot).
 # [retry]
 # initial = "5s"

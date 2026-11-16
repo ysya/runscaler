@@ -83,6 +83,13 @@ type ScaleSetConfig struct {
 	GitHubApp       *GitHubAppConfig `mapstructure:"github-app"`
 	Retry           *RetryConfig     `mapstructure:"retry"`
 
+	// SweepMode controls the sweep of leaked JIT runner registrations: off
+	// (default), log (report candidates only) or remove. See
+	// internal/regsweep. SweepInterval is the period between sweeps (0 =
+	// DefaultSweepInterval).
+	SweepMode     string        `mapstructure:"sweep-mode"`
+	SweepInterval time.Duration `mapstructure:"sweep-interval"`
+
 	// DisableUpdate stops GitHub from updating the runner binary inside the
 	// container or VM. Pointer: nil = inherit default (true), matching the
 	// image-based model — the runner is refreshed by rebuilding the image, and
@@ -610,6 +617,9 @@ func (ss *ScaleSetConfig) ValidationErrors() []error {
 	}
 	if ss.RunnerImage == "" {
 		add(fmt.Errorf("runner-image is required"))
+	}
+	for _, err := range ss.sweepErrors() {
+		add(err)
 	}
 
 	switch ss.Provider {

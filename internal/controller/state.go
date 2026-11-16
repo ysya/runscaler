@@ -86,6 +86,14 @@ func (r *instanceState) reserve(name string, lease *capacity.Lease) bool {
 	return true
 }
 
+// hasName reports whether name is tracked in any phase.
+func (r *instanceState) hasName(name string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	_, ok := r.instances[name]
+	return ok
+}
+
 func (r *instanceState) failProvision(name string) {
 	r.mu.Lock()
 	if instance, ok := r.instances[name]; ok && instance.id == "" {

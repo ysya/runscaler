@@ -388,7 +388,7 @@ func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) e
 			return fmt.Errorf("tart binary not found in PATH: %w\n\n"+
 				"  Install Tart: brew install openai/tools/tart", err)
 		}
-		if err := checkTartSoftnet(scaleSets, os.Stdout); err != nil {
+		if err := checkTartSoftnetForRun(scaleSets, logger); err != nil {
 			return err
 		}
 		logger.Info("Tart provider enabled")
@@ -398,7 +398,7 @@ func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) e
 		// The machine-wide lock is acquired by startManager before runManager is called,
 		// so resources created by runner but still present now belong to a dead
 		// previous process. Reconcile them before any new scale set can start.
-		// Dry-run returns above because it must not perform destructive cleanup.
+		// Dry runs skip this block because cleanup is destructive.
 		var tartHomes []string
 		var workspaceRoots []string
 		for _, ss := range scaleSets {

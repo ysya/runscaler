@@ -9,7 +9,29 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/synctest"
+	"time"
 )
+
+func TestTartDeadWarmVMDoesNotWaitBelowCloneFloor(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		p := newTestTartProvider(&mockCommandRunner{})
+		p.cloneFloor = CloneFloor{MinFreeBytes: 1, FreeBytes: func(string) (uint64, error) { return 0, nil }}
+		p.pool = make(chan *warmVM, 1)
+		done := make(chan struct{})
+		close(done)
+		p.pool <- &warmVM{name: "runner-warm-deadbeef", done: done, cancel: func() {}}
+		if err := p.CheckStart(context.Background()); err != nil {
+			t.Fatalf("fixture did not pass initial warm admission: %v", err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_, err := p.StartInstance(ctx, "runner-deadbeef", "fixture")
+		if !errors.Is(err, ErrBelowCloneFloor) {
+			t.Fatalf("dead warm VM blocked until timeout instead of floor refusal: %v", err)
+		}
+	})
+}
 
 func TestTartPreflightKeepsReadyWarmVMUsableBelowFloor(t *testing.T) {
 	p := newTestTartProvider(&mockCommandRunner{})

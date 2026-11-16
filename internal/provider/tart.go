@@ -680,8 +680,17 @@ func (p *TartProvider) StartInstance(ctx context.Context, name string, jitConfig
 			var vm *warmVM
 			select {
 			case vm = <-p.pool:
-			case <-ctx.Done():
-				return "", ctx.Err()
+			default:
+				// Admission can race a warm VM exiting. Recheck before waiting
+				// for a replacement that low disk space would prevent cloning.
+				if err := p.cloneFloor.Check(p.home); err != nil {
+					return "", err
+				}
+				select {
+				case vm = <-p.pool:
+				case <-ctx.Done():
+					return "", ctx.Err()
+				}
 			}
 
 			// Check if the VM is still alive (tart run process hasn't exited)

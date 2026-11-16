@@ -216,5 +216,4 @@ func markTartImagesUsed(ctx context.Context, runner provider.CommandRunner, home
 				slog.String("vm", vm), slog.Any("error", err))
 		}
 	}
-	return
 }

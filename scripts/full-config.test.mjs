@@ -10,6 +10,16 @@ const baseSet = () => ({
   docker: { dind: 'true' }, tart: {}, retry: {},
 });
 const base = () => ({ global: { 'log-level': 'info', 'log-format': 'text', 'health-port': '8080', 'health-address': '127.0.0.1' }, actionsCache: {}, disk: {}, diagnostics: {}, scaleSets: [baseSet()] });
+
+test('schema defaults omit optional unreleased settings', () => {
+  const defaults = fields => Object.fromEntries(fields.filter(field => field.value !== undefined).map(field => [field.key, field.value]));
+  const state = base();
+  state.global = defaults(groups.global);
+  state.scaleSets[0].set = { ...defaults(groups.set), url: 'https://github.com/example-org', name: 'test' };
+  state.scaleSets[0].docker = defaults(groups.docker);
+  state.scaleSets[0].tart = defaults(groups.tart);
+  assert.doesNotMatch(generateFullConfig(state), /^(?:registration-sweep-mode|registration-sweep-interval|net-softnet|clone-min-free-gb|daemon-mode) =/mu);
+});
 const fieldError = (state, group, key, index = 0) => assert.throws(
   () => generateFullConfig(state),
   error => error.field?.group === group && error.field?.key === key && error.field?.index === index,
@@ -39,6 +49,13 @@ test('registration sweep validates scope and minimum interval', () => {
   fieldError(state, 'set', 'registration-sweep-interval');
   state.scaleSets[0].set['registration-sweep-interval'] = '1m';
   assert.match(generateFullConfig(state), /registration-sweep-mode = "remove"/u);
+});
+
+test('explicit private Docker daemon rejects host proxy workspace', () => {
+  const state = base();
+  state.scaleSets[0].docker['daemon-mode'] = 'dind';
+  state.scaleSets[0].docker['workspace-root'] = '/tmp/runner-proxies';
+  fieldError(state, 'docker', 'workspace-root');
 });
 
 test('TOML quoting escapes strings and rejects control characters', () => {

@@ -120,3 +120,29 @@ func TestShutdownCleansRegistrationFromCancelledProvisioning(t *testing.T) {
 		t.Fatalf("cancelled provisioning leaked its registration: %v", ids)
 	}
 }
+
+func TestDrainDoesNotWaitForFailedStartRegistrations(t *testing.T) {
+	for _, apiErr := range []error{errors.New("GitHub unavailable"), scaleset.JobStillRunningError} {
+		t.Run(apiErr.Error(), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				p, api := &failedStartProvider{}, &mockScaleset{removeErr: map[int]error{1: apiErr}}
+				s := NewScaleSetController(1, 0, 1, p, api, slog.New(slog.DiscardHandler))
+				defer s.Shutdown(context.Background())
+				_, _ = s.startInstance(context.Background())
+				synctest.Wait()
+				if !s.HasRunner(p.lastName) {
+					t.Fatal("fixture did not retain failed registration")
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				defer cancel()
+				started := time.Now()
+				if err := s.Drain(ctx); err != nil {
+					t.Fatalf("registration-only cleanup blocked drain: %v", err)
+				}
+				if time.Since(started) >= time.Second {
+					t.Fatal("registration-only drain waited despite no local jobs")
+				}
+			})
+		})
+	}
+}

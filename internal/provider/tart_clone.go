@@ -11,12 +11,13 @@ import (
 var ErrBelowCloneFloor = errors.New("clone floor")
 
 // CheckStart avoids registering a cold runner when cloning cannot proceed.
-// A ready warm VM needs no clone; a race consuming it is covered by bootVM.
+// A ready warm VM needs no clone; StartInstance rechecks before waiting for
+// a replacement if that VM exits or is consumed.
 func (p *TartProvider) CheckStart(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if p.pool != nil && len(p.pool) > 0 {
+	if len(p.pool) > 0 {
 		return nil
 	}
 	return p.cloneFloor.Check(p.home)

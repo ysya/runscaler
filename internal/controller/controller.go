@@ -672,7 +672,7 @@ func (s *ScaleSetController) Drain(ctx context.Context) error {
 	s.instances.idleForRemoval()
 
 	_, busy := s.instances.counts()
-	s.logger.Info("Draining runners", slog.Int("busy", busy))
+	s.logger.Info("Draining runners", slog.Int("busy", busy), slog.Int("pendingRegistrations", s.registrationCount()))
 
 	poll := time.NewTicker(time.Second)
 	defer poll.Stop()
@@ -683,10 +683,6 @@ func (s *ScaleSetController) Drain(ctx context.Context) error {
 		// Reconciliation has stopped, so drain owns cleanup, including retries
 		// left by a scale-down or startup cancelled by stopWork.
 		for ctx.Err() == nil {
-			if id, ok := s.claimRegistration(); ok {
-				s.removeRegistration(ctx, id)
-				continue
-			}
 			name, instanceID, ok := s.instances.claimRemoval(time.Now())
 			if !ok {
 				break
@@ -694,14 +690,17 @@ func (s *ScaleSetController) Drain(ctx context.Context) error {
 			s.removeClaimedInstance(ctx, name, instanceID)
 		}
 		_, _, busy, removing := s.instances.lifecycleCounts()
-		if busy == 0 && removing == 0 && s.registrationCount() == 0 {
-			s.logger.Info("Runner drain complete", slog.Duration("waited", time.Since(started)))
+		if busy == 0 && removing == 0 {
+			// Registration-only failures cannot keep jobs alive locally. Leave
+			// them for Shutdown's bounded final pass and optional crash recovery.
+			s.logger.Info("Runner drain complete", slog.Duration("waited", time.Since(started)), slog.Int("pendingRegistrations", s.registrationCount()))
 			return nil
 		}
 
 		select {
 		case <-ctx.Done():
 			s.logger.Warn("Runner drain ended before all jobs completed",
+				slog.Int("pendingRegistrations", s.registrationCount()),
 				slog.Int("busy", busy),
 				slog.Int("removing", removing),
 				slog.Duration("waited", time.Since(started)),
@@ -710,6 +709,7 @@ func (s *ScaleSetController) Drain(ctx context.Context) error {
 		case <-poll.C:
 		case <-progress.C:
 			s.logger.Info("Waiting for runner drain",
+				slog.Int("pendingRegistrations", s.registrationCount()),
 				slog.Int("busy", busy),
 				slog.Int("removing", removing),
 				slog.Duration("waited", time.Since(started)))

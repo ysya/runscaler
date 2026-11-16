@@ -29,7 +29,7 @@ export const setFields = [
   field('labels', 'lines', 'Additional labels (one per line)', '其他標籤（每行一個）'),
   field('runner-group', 'text', 'Runner group', 'Runner 群組', { placeholder: 'default' }),
   field('runner-image', 'text', 'Runner image *', 'Runner 映像檔 *', { value: 'ghcr.io/actions/actions-runner:latest' }),
-  field('registration-sweep-mode', 'select', 'Leaked registration sweep', '清理遺留的 runner 註冊', { value: 'off', choices: ['off', 'log', 'remove'], helpEn: 'Organization scale sets only. Start with log; remove deletes registrations on GitHub. Assumes one runner process per scale set.', helpZh: '僅適用於組織規模集。請先用 log；remove 會刪除 GitHub 上的註冊。假設每個規模集只有一個 runner 程序。' }),
+  field('registration-sweep-mode', 'select', 'Leaked registration sweep', '清理遺留的 runner 註冊', { choices: ['off', 'log', 'remove'], helpEn: 'Organization scale sets only. Start with log; remove deletes registrations on GitHub. Assumes one runner process per scale set.', helpZh: '僅適用於組織規模集。請先用 log；remove 會刪除 GitHub 上的註冊。假設每個規模集只有一個 runner 程序。' }),
   field('registration-sweep-interval', 'duration', 'Registration sweep interval', '註冊清理間隔', { placeholder: '10m' }),
   field('disable-update', 'bool', 'Disable runner auto-update', '停用 runner 自動更新', { helpEn: 'Default: enabled. Rebuild the image to update the runner.', helpZh: '預設為啟用；請透過重建映像檔更新 runner。' }),
 ];

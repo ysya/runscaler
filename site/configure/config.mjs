@@ -195,8 +195,9 @@ function validateSet(scale, global, lang, index) {
   reject(copy(retry['cooldown-after']) && !(Number(retry['cooldown-after']) >= 1), 'retry', 'cooldown-after', index, lang, 'Cooldown failure count must be positive.', '進入冷卻前的失敗次數須為正數。');
   if (provider === 'docker') {
     const docker = scale.docker ?? {};
+    const daemonMode = copy(docker['daemon-mode']) || (copy(docker.dind) === 'false' ? 'none' : 'host');
     reject(copy(docker['ready-timeout']) && !(durationNs(copy(docker['ready-timeout'])) > 0), 'docker', 'ready-timeout', index, lang, 'Readiness timeout must be positive.', '就緒逾時須為正數。');
-    reject(copy(docker['workspace-root']) && copy(docker.dind) === 'false', 'docker', 'workspace-root', index, lang, 'Docker workspace root requires Docker socket access.', 'Docker 工作目錄需要開啟 Docker socket 存取。');
+    reject(copy(docker['workspace-root']) && daemonMode !== 'host', 'docker', 'workspace-root', index, lang, 'Docker workspace root requires host Docker socket access.', 'Docker 工作目錄需要使用主機 Docker socket。');
     reject(copy(docker['workspace-root']) && !cleanPath(copy(docker['workspace-root'])), 'docker', 'workspace-root', index, lang, 'Workspace root must be a clean absolute path other than /.', '工作目錄須為乾淨的絕對路徑，且不可為 /。');
     reject(copy(docker.platform) && !/^[^/]+\/[^/]+(?:\/[^/]+)?$/u.test(copy(docker.platform)), 'docker', 'platform', index, lang, 'Docker platform must be os/arch or os/arch/variant.', 'Docker 平台須為 os/arch 或 os/arch/variant。');
     reject(copy(docker['shared-volume-name']) && !volumeName.test(copy(docker['shared-volume-name'])), 'docker', 'shared-volume-name', index, lang, 'Invalid shared volume name.', '共用 volume 名稱無效。');

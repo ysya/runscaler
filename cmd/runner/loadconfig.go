@@ -73,6 +73,7 @@ func loadConfigAtPath(cmd *cobra.Command, configPath string) (config.Config, err
 	// Only explicitly passed App flags select App mode. Binding their zero
 	// defaults would manufacture an empty App config for existing PAT users.
 	bindGitHubAppFlags(viper.GetViper(), cmd.Flags())
+	bindDockerDaemonFlags(viper.GetViper(), cmd.Flags())
 	if configFile := configPath; configFile != "" {
 		viper.SetConfigFile(configFile)
 		if err := viper.ReadInConfig(); err != nil {

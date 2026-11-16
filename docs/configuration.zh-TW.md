@@ -66,6 +66,39 @@ shared-volume = "/shared"
 # build-cache-budget = 0                # cap daemon build cache to N GB (0 = no cap)
 ```
 
+## Docker daemon 模式
+
+`daemon-mode` 接受 `host`、`dind` 或 `none`：
+
+| 模式 | runner 內的 Docker 存取方式 |
+| --- | --- |
+| `host` | 共用外層 daemon 的 socket 與各工作的 Docker 資源 |
+| `dind` | 每個 runner 都取得獨立、用完即丟的 Docker daemon 與儲存空間 |
+| `none` | 不提供 Docker daemon socket |
+
+省略 `daemon-mode` 或明確設為空字串時，會使用舊版 `dind` 布林值：`true`（預設值）代表 `host`，`false` 代表 `none`。明確指定的非空模式優先於布林值，即使繼承了 `dind = false` 也一樣。新的 Docker 選項與其他設定相同，會由各 runner 規模集繼承；在個別規模集中設定 `daemon-mode = ""`，即可恢復使用舊版布林值決定模式。
+
+若要啟用每個工作獨立的 DinD，請在既有的 Docker 設定表中設定：
+
+```toml
+[docker]
+daemon-mode = "dind"
+# dind-image = "docker:29-dind"
+# dind-startup-timeout = "120s" # must be positive
+# dind-memory = 0              # MB, 0 = unlimited
+# dind-cpu = 0                 # cores, 0 = unlimited
+# dind-pids-limit = 0          # 0 = unlimited
+# platform = "linux/amd64"     # applies to both runner and daemon images
+```
+
+`docker.socket` 一律選擇用於建立資源的外層 daemon；DinD 模式不會把它的 socket 掛載至工作使用的任何容器。daemon 映像檔預設為 `docker:29-dind`，啟動時會在各設定的外層 daemon 準備 runner 與 daemon 映像檔。DinD 支援 Linux 映像檔與標準的 `/home/runner` 安裝配置；`platform` 必須同時受到兩個映像檔支援。daemon 的限制與 runner 的 `memory`、`cpu`、`pids-limit` 分開套用，規劃容量時須包含兩個容器及 daemon 內執行的工作負載。
+
+每個 runner 都會取得新的 daemon，包括 `min-runners` 保留的閒置預備執行個體。啟動流程會在 `dind-startup-timeout` 內等待 `docker info` 確認就緒，再啟動 runner；daemon 故障時，也會停止其 runner。工作完成或取消後，會移除該 daemon、內部容器、映像檔、網路、daemon 建立的具名磁碟區、建置快取與執行個體的暫存儲存空間，不會把 daemon 重複用於下一個工作。啟動或清理中斷時，帶有歸屬標籤的殘留資源可由啟動時清理或 `runner doctor --fix` 回收。
+
+runner 使用私人 Unix socket，並與 daemon 共用網路命名空間，因此內部服務發布的連接埠可透過 runner 的 localhost 存取。工作目錄與 runner externals 會以相同路徑掛載至兩個容器。明確設定的 `shared-volume` 與快取磁碟區也會鏡像掛載至相同路徑，保留原本的持久保存與保留政策；其中的檔案仍會跨工作共用。其他內部 bind mount 的來源路徑則指向 daemon 容器的檔案系統。DinD 模式下，共用／快取路徑不得互相重疊，也不得等於、包含或位於 `/var/run`、`/run`、`/var/lib/docker`、`/home/runner/_work`、`/home/runner/externals` 之下。
+
+`workspace-root` 僅適用於主機 socket 模式，不能與 `dind` 或 `none` 搭配。DinD 已共用私人工作目錄，不需要主機 socket 代理。`network` 可選擇具名網路，但不能使用 `host` 或 `container:<id>`。
+
 在使用主機 Docker socket 的 Linux 主機上，container action 的 workspace bind
 原本會由主機解析，無法讀到 runner 容器內的檔案。若要支援這類 action，先建立由管理程式
 使用者擁有、權限為 `0700` 的 `workspace-root` 目錄，再於適用的 `[docker]` 或
@@ -384,6 +417,12 @@ pool-size = 2
 | `--runner-image` | `runner-image` | `ghcr.io/actions/actions-runner:latest` | runner 映像檔（Docker 映像檔或 Tart VM 映像檔） |
 | `--docker-socket` | `[docker] socket` | `/var/run/docker.sock` | Docker socket 路徑（Docker 供應器） |
 | `--dind` | `[docker] dind` | `true` | 將 Docker socket 掛載至 runner（Docker 供應器） |
+| `--docker-daemon-mode` | `[docker] daemon-mode` | `""`（使用舊版設定） | `host`、`dind` 或 `none`；非空模式優先於 `--dind` |
+| `--dind-image` | `[docker] dind-image` | `docker:29-dind` | 各私人 daemon 使用的映像檔 |
+| `--dind-startup-timeout` | `[docker] dind-startup-timeout` | `120s` | 各 daemon 啟動逾時，必須大於零 |
+| `--dind-memory` | `[docker] dind-memory` | `0`（無限制） | 各 daemon 的記憶體 MB 上限，與 runner 分開計算 |
+| `--dind-cpu` | `[docker] dind-cpu` | `0`（無限制） | 各 daemon 的 CPU 核心數，與 runner 分開計算 |
+| `--dind-pids-limit` | `[docker] dind-pids-limit` | `0`（無限制） | 各 daemon 的程序與執行緒上限 |
 | — | `[docker] workspace-root` | 未設定 | Linux 主機上的私人目錄，供各 runner 建立 Docker socket 代理 |
 | `--shared-volume` | `[docker] shared-volume` | | Docker 共用磁碟區路徑（Docker 供應器） |
 | `--tart-cpu` | `[tart] cpu` | `0`（映像檔預設值） | 每個 VM 的 CPU 核心數（Tart 供應器） |

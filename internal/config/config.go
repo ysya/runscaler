@@ -105,16 +105,22 @@ type ScaleSetConfig struct {
 
 // DockerConfig holds Docker-specific provider settings.
 type DockerConfig struct {
-	Readiness     *bool          `mapstructure:"readiness"`
-	ReadyTimeout  *time.Duration `mapstructure:"ready-timeout"`
-	Socket        string         `mapstructure:"socket"`
-	DinD          *bool          `mapstructure:"dind"`           // pointer: nil = inherit default (true)
-	WorkspaceRoot string         `mapstructure:"workspace-root"` // private host directory for per-runner Docker socket proxies
-	SharedVolume  string         `mapstructure:"shared-volume"`
-	Memory        int            `mapstructure:"memory"`     // Memory limit in MB (0 = unlimited)
-	CPU           int            `mapstructure:"cpu"`        // CPU cores (0 = unlimited)
-	PidsLimit     int64          `mapstructure:"pids-limit"` // Max pids (processes + threads) per container (0 = unlimited)
-	Platform      string         `mapstructure:"platform"`   // e.g. "linux/amd64" to force architecture
+	Readiness          *bool          `mapstructure:"readiness"`
+	ReadyTimeout       *time.Duration `mapstructure:"ready-timeout"`
+	Socket             string         `mapstructure:"socket"`
+	DinD               *bool          `mapstructure:"dind"` // pointer: nil = inherit default (true)
+	DaemonMode         string         `mapstructure:"daemon-mode"`
+	DinDImage          string         `mapstructure:"dind-image"`
+	DinDStartupTimeout *time.Duration `mapstructure:"dind-startup-timeout"`
+	DinDMemory         int            `mapstructure:"dind-memory"`
+	DinDCPU            int            `mapstructure:"dind-cpu"`
+	DinDPidsLimit      int64          `mapstructure:"dind-pids-limit"`
+	WorkspaceRoot      string         `mapstructure:"workspace-root"` // private host directory for per-runner Docker socket proxies
+	SharedVolume       string         `mapstructure:"shared-volume"`
+	Memory             int            `mapstructure:"memory"`     // Memory limit in MB (0 = unlimited)
+	CPU                int            `mapstructure:"cpu"`        // CPU cores (0 = unlimited)
+	PidsLimit          int64          `mapstructure:"pids-limit"` // Max pids (processes + threads) per container (0 = unlimited)
+	Platform           string         `mapstructure:"platform"`   // e.g. "linux/amd64" to force architecture
 
 	// ActionsCacheURL selects an explicit cache receiver. NativeActionsCache
 	// fills an empty value from the manager's advertised URL.
@@ -464,7 +470,7 @@ func (ss *ScaleSetConfig) applyDefaults() {
 	}
 }
 
-// IsDinD returns whether Docker-in-Docker is enabled for this scale set.
+// IsDinD resolves the legacy host-socket-sharing boolean; use DockerDaemonMode for effective access.
 func (ss *ScaleSetConfig) IsDinD() bool {
 	if ss.Docker.DinD != nil {
 		return *ss.Docker.DinD
@@ -594,8 +600,8 @@ func (ss *ScaleSetConfig) ValidationErrors() []error {
 			add(err)
 		}
 		if root := ss.Docker.WorkspaceRoot; root != "" {
-			if !ss.IsDinD() {
-				add(fmt.Errorf("docker.workspace-root requires docker.dind=true"))
+			if ss.DockerDaemonMode() != "host" {
+				add(fmt.Errorf("docker.workspace-root requires docker.dind=true or daemon-mode=host; it is unavailable with dind/none modes"))
 			}
 			if !filepath.IsAbs(root) || filepath.Clean(root) != root || root == "/" {
 				add(fmt.Errorf("docker.workspace-root must be a clean absolute host path other than /"))
@@ -609,6 +615,9 @@ func (ss *ScaleSetConfig) ValidationErrors() []error {
 		}
 		mounts, err := ss.Docker.ParseCacheVolumes()
 		if err != nil {
+			add(err)
+		}
+		if err := ss.validateDockerDaemon(mounts); err != nil {
 			add(err)
 		}
 		if ss.Docker.Memory < 0 || ss.Docker.CPU < 0 || ss.Docker.PidsLimit < 0 || ss.Docker.BuildCacheBudgetGB < 0 {

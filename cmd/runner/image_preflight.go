@@ -59,14 +59,22 @@ func prepareRunnerImages(ctx context.Context, scaleSets []config.ScaleSetConfig,
 		if ss.IsTart() {
 			continue
 		}
-		key := dockerImage{ss.Docker.Socket, ss.RunnerImage, ss.Docker.Platform}
-		if dockerDone[key] {
-			continue
+		images := []string{ss.RunnerImage}
+		if ss.DockerDaemonMode() == "dind" {
+			images = append(images, ss.Docker.EffectiveDinDImage())
 		}
-		if err := pullDocker(ctx, ss); err != nil {
-			return err
+		for _, image := range images {
+			key := dockerImage{ss.Docker.Socket, image, ss.Docker.Platform}
+			if dockerDone[key] {
+				continue
+			}
+			target := ss
+			target.RunnerImage = image
+			if err := pullDocker(ctx, target); err != nil {
+				return err
+			}
+			dockerDone[key] = true
 		}
-		dockerDone[key] = true
 	}
 	type tartImage struct{ home, image string }
 	tartDone := make(map[tartImage]bool)

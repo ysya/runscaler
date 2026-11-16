@@ -84,6 +84,15 @@ max-runners = 10
 # ready-timeout = "5m"                 # marker + 5s alive, or GitHub work evidence
 socket = "/var/run/docker.sock"
 dind = true
+# Legacy dind=true shares the host socket; an explicit mode takes precedence.
+# daemon-mode = "dind"       # host | dind (private per-job daemon) | none
+# dind-image = "docker:29-dind"
+# dind-startup-timeout = "120s" # positive; bounds initialization and readiness
+# dind-memory = 0            # MB for each daemon; separate from runner limits
+# dind-cpu = 0               # daemon CPU cores; 0 = unlimited
+# dind-pids-limit = 0        # daemon processes/threads; 0 = unlimited
+# DinD uses Linux images and the standard /home/runner layout. It cannot use
+# workspace-root, host/container network namespaces, or overlapping cache mounts.
 # native-actions-cache = false # use the manager's [actions-cache] receiver when true
 # actions-cache-url = "" # explicit external receiver; matching the native URL is deprecated
 # shared-volume = "/shared"

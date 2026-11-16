@@ -58,6 +58,13 @@ func RemoveRunnerContainer(ctx context.Context, client RunnerCleanupAPI, instanc
 			break
 		}
 	}
+	group, err := dinDGroupForRunner(ctx, client, instanceID, result.Items)
+	if err != nil {
+		return err
+	}
+	if group != "" {
+		return RemoveDinDInstance(ctx, client, group, logger)
+	}
 	// Inventory labeled volumes before deleting children, while all of the
 	// ownership evidence is still available. Buildx state volumes need no
 	// extra label when an owned builder mounts its exact <builder>_state name.

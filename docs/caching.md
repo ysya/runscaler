@@ -107,3 +107,11 @@ tart-cache          /Volumes/…  142 GB   58%
 ```
 
 Add `--json` for scripting. Measuring can be expensive — some stores walk a volume via a short-lived helper container — so it is never on a hot path. For a cheap view that is safe to poll instead, `/healthz`'s `disk` section reports each filesystem's free percentage from a plain `statfs`, never a real measurement.
+
+**Per-job Docker cache.** In `daemon-mode = "dind"`, all inner image layers,
+BuildKit state, and daemon-created volumes belong to one runner and are removed
+with it. Warm idle runners have independent caches too; they are never reused
+for a later job. Outer-daemon prune settings and disk accounting still operate
+on the outer daemon; there is no inner-daemon prune loop or shared Docker cache.
+Explicit shared/cache filesystem volumes remain persistent and are mounted at
+matching paths in the runner and sidecar, so nested bind mounts can use them.

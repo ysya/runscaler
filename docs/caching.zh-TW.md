@@ -119,3 +119,5 @@ tart-cache          /Volumes/…  142 GB   58%
 ```
 
 加上 `--json` 即可供指令碼使用。測量可能耗費較多資源，部分儲存區會透過短暫執行的輔助容器遍歷磁碟區，因此絕不會在頻繁執行的關鍵路徑上進行。若需要可安全輪詢的低成本資訊，`/healthz` 的 `disk` 區段會以單純的 `statfs` 回報各檔案系統的可用空間百分比，絕不會實際測量儲存區大小。
+
+**每個工作獨立的 Docker 快取。** 使用 `daemon-mode = "dind"` 時，內部映像層、BuildKit 狀態與 daemon 建立的磁碟區都屬於單一 runner，會隨它一起移除。預備中的閒置 runner 也各自擁有快取，不會重複用於下一個工作。外層 daemon 的 prune 設定與磁碟用量計算仍只處理外層 daemon；系統不會增加內部 daemon 的 prune 排程或共用 Docker 快取。明確設定的共用／快取檔案系統磁碟區仍會持久保存，並以相同路徑掛載至 runner 與 sidecar，供內部 bind mount 使用。

@@ -65,7 +65,7 @@ See [Host-local Actions cache](docs/local-actions-cache.md) for both modes.
 - **Zero Kubernetes** — runs directly on any Docker host or Apple Silicon Mac
 - **Ephemeral runners** — each job gets a fresh container/VM, no state leakage
 - **Auto-scaling** — scales from 0 to N based on job demand via long-poll (no cron, no polling delay)
-- **Docker-in-Docker** — optional DinD support for workflows that build containers
+- **Per-job Docker-in-Docker** — optional private disposable daemons, with host socket sharing retained as the default
 - **macOS and Linux VMs via Tart** — native Apple Virtualization.framework with APFS Copy-on-Write cloning
 - **Tart networking** — shared NAT by default, with optional host-interface bridging
 - **VM warm pool** — pre-boot Tart VMs for instant job pickup (~2s vs ~30s cold boot)

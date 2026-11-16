@@ -46,6 +46,8 @@ type DockerProvider struct {
 	runnerImage           string
 	dockerSocket          string
 	dind                  bool
+	daemonMode            string
+	dindConfig            config.DockerConfig
 	workspaceRoot         string
 	workspaceMu           sync.Mutex
 	workspaces            map[string]*runnerWorkspace
@@ -80,7 +82,9 @@ func NewDockerProviderWithCoordinator(ss config.ScaleSetConfig, client DockerAPI
 		runnerImage:      ss.RunnerImage,
 		actionsCacheURL:  ss.Docker.ActionsCacheURL,
 		dockerSocket:     ss.Docker.Socket,
-		dind:             ss.IsDinD(),
+		dind:             ss.DockerDaemonMode() == "host",
+		daemonMode:       ss.DockerDaemonMode(),
+		dindConfig:       ss.Docker,
 		workspaceRoot:    ss.Docker.WorkspaceRoot,
 		sharedVolume:     ss.Docker.SharedVolume,
 		sharedVolumeName: ss.SharedVolumeName(),
@@ -119,6 +123,9 @@ func parsePlatform(s string) *ocispec.Platform {
 
 // StartInstance creates and starts a new ephemeral Docker container runner.
 func (p *DockerProvider) StartInstance(ctx context.Context, name string, jitConfig string) (string, error) {
+	if p.daemonMode == "dind" {
+		return p.startDinDInstance(ctx, name, jitConfig)
+	}
 	if err := p.ensureRunnerImage(ctx); err != nil {
 		return "", err
 	}
@@ -237,57 +244,63 @@ func (p *DockerProvider) StartInstance(ctx context.Context, name string, jitConf
 // a runner. The controller normally pulls images during startup, but the
 // daemon cache may be pruned while the controller remains running.
 func (p *DockerProvider) ensureRunnerImage(ctx context.Context) error {
-	if err := p.inspectRunnerImage(ctx); err == nil {
+	return p.ensureDockerImage(ctx, p.runnerImage)
+}
+
+func (p *DockerProvider) ensureDockerImage(ctx context.Context, image string) error {
+	if err := p.inspectDockerImage(ctx, image); err == nil {
 		return nil
 	} else if !cerrdefs.IsNotFound(err) {
-		return fmt.Errorf("inspect runner image %s: %w", p.runnerImage, err)
+		return fmt.Errorf("inspect runner image %s: %w", image, err)
 	}
 
 	coordinator := p.imageCoordinator
 	if coordinator == nil {
 		coordinator = &p.localImageCoordinator
 	}
-	return coordinator.ensure(ctx, p.imagePullKey(), func() error {
+	key := p.imagePullKey()
+	key.image = image
+	return coordinator.ensure(ctx, key, func() error {
 		// Another scale set may have completed its pull after the first
 		// inspection, before this call claimed the coordinator slot.
-		if err := p.inspectRunnerImage(ctx); err == nil {
+		if err := p.inspectDockerImage(ctx, image); err == nil {
 			return nil
 		} else if !cerrdefs.IsNotFound(err) {
-			return fmt.Errorf("inspect runner image %s: %w", p.runnerImage, err)
+			return fmt.Errorf("inspect runner image %s: %w", image, err)
 		}
-		return p.pullRunnerImage(ctx)
+		return p.pullDockerImage(ctx, image)
 	})
 }
 
-func (p *DockerProvider) pullRunnerImage(ctx context.Context) error {
-	p.logger.Info("Runner image is missing locally, pulling it", slog.String("image", p.runnerImage))
+func (p *DockerProvider) pullDockerImage(ctx context.Context, image string) error {
+	p.logger.Info("Runner image is missing locally, pulling it", slog.String("image", image))
 	pullCtx, cancel := context.WithTimeout(ctx, 30*time.Minute)
 	defer cancel()
 	options := dockerclient.ImagePullOptions{}
 	if p.platform != nil {
 		options.Platforms = []ocispec.Platform{*p.platform}
 	}
-	response, err := p.dockerClient.ImagePull(pullCtx, p.runnerImage, options)
+	response, err := p.dockerClient.ImagePull(pullCtx, image, options)
 	if err != nil {
-		return fmt.Errorf("failed to pull runner image %s: %w", p.runnerImage, err)
+		return fmt.Errorf("failed to pull runner image %s: %w", image, err)
 	}
 	defer response.Close()
 	if err := response.Wait(pullCtx); err != nil {
-		return fmt.Errorf("failed to pull runner image %s: %w", p.runnerImage, err)
+		return fmt.Errorf("failed to pull runner image %s: %w", image, err)
 	}
-	if err := p.inspectRunnerImage(ctx); err != nil {
-		return fmt.Errorf("runner image %s is still unavailable after pull: %w", p.runnerImage, err)
+	if err := p.inspectDockerImage(ctx, image); err != nil {
+		return fmt.Errorf("runner image %s is still unavailable after pull: %w", image, err)
 	}
-	p.logger.Info("Runner image pulled successfully", slog.String("image", p.runnerImage))
+	p.logger.Info("Runner image pulled successfully", slog.String("image", image))
 	return nil
 }
 
-func (p *DockerProvider) inspectRunnerImage(ctx context.Context) error {
+func (p *DockerProvider) inspectDockerImage(ctx context.Context, image string) error {
 	if p.platform != nil {
-		_, err := p.dockerClient.ImageInspect(ctx, p.runnerImage, dockerclient.ImageInspectWithPlatform(p.platform))
+		_, err := p.dockerClient.ImageInspect(ctx, image, dockerclient.ImageInspectWithPlatform(p.platform))
 		return err
 	}
-	_, err := p.dockerClient.ImageInspect(ctx, p.runnerImage)
+	_, err := p.dockerClient.ImageInspect(ctx, image)
 	return err
 }
 
@@ -320,23 +333,46 @@ func (p *DockerProvider) RemoveInstance(ctx context.Context, instanceID string) 
 // WaitInstance returns when a runner container is no longer running. The controller uses
 // this to evict containers that crash before GitHub can send JobCompleted.
 func (p *DockerProvider) WaitInstance(ctx context.Context, instanceID string) error {
-	wait := p.dockerClient.ContainerWait(ctx, instanceID, dockerclient.ContainerWaitOptions{Condition: container.WaitConditionNotRunning})
+	if p.daemonMode == "dind" {
+		return p.waitDinDInstance(ctx, instanceID)
+	}
+	return p.waitContainer(ctx, instanceID)
+}
+
+func (p *DockerProvider) waitContainer(ctx context.Context, instanceID string) error {
+	_, err := waitContainerResult(ctx, p.dockerClient, instanceID)
+	if cerrdefs.IsNotFound(err) {
+		return nil // externally removed is equivalent to stopped
+	}
+	if err != nil {
+		return fmt.Errorf("wait for runner container: %w", err)
+	}
+	return nil
+}
+
+func waitContainerResult(ctx context.Context, client DockerAPI, id string) (container.WaitResponse, error) {
+	if err := ctx.Err(); err != nil {
+		return container.WaitResponse{}, err
+	}
+	wait := client.ContainerWait(ctx, id, dockerclient.ContainerWaitOptions{Condition: container.WaitConditionNotRunning})
+	// Moby reports cancellation on Error, but a decoded Result is sent on an
+	// unbuffered channel. Always receive its terminal event: returning directly
+	// on ctx.Done could leave the SDK sender blocked forever. The HTTP request
+	// already carries ctx, so cancellation still interrupts the network wait.
 	select {
 	case err := <-wait.Error:
-		if err != nil {
-			if cerrdefs.IsNotFound(err) {
-				return nil // externally removed is equivalent to stopped
-			}
-			return fmt.Errorf("wait for runner container: %w", err)
+		if ctx.Err() != nil {
+			return container.WaitResponse{}, ctx.Err()
 		}
-		return nil
+		return container.WaitResponse{}, err
 	case status := <-wait.Result:
-		if status.Error != nil {
-			return fmt.Errorf("wait for runner container: %s", status.Error.Message)
+		if ctx.Err() != nil {
+			return container.WaitResponse{}, ctx.Err()
 		}
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
+		if status.Error != nil {
+			return status, fmt.Errorf("container wait: %s", status.Error.Message)
+		}
+		return status, nil
 	}
 }
 

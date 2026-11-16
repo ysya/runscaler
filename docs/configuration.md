@@ -67,6 +67,63 @@ shared-volume = "/shared"
 # build-cache-budget = 0                # cap daemon build cache to N GB (0 = no cap)
 ```
 
+## Docker daemon modes
+
+`daemon-mode` accepts `host`, `dind`, or `none`:
+
+| Mode | Docker access inside the runner |
+| --- | --- |
+| `host` | Share the outer daemon's socket and Docker resources across jobs |
+| `dind` | Give each runner its own disposable Docker daemon and storage |
+| `none` | Do not provide a Docker daemon socket |
+
+An omitted or explicitly empty `daemon-mode` uses the legacy `dind` boolean:
+`true` (the default) means `host`; `false` means `none`. An explicit nonempty
+mode wins over that boolean, including an inherited `dind = false`. Scale-set
+entries inherit the new options in the same way as other Docker settings;
+`daemon-mode = ""` in an entry restores the legacy boolean fallback.
+
+To opt in to real per-job DinD, set these options in your existing Docker table:
+
+```toml
+[docker]
+daemon-mode = "dind"
+# dind-image = "docker:29-dind"
+# dind-startup-timeout = "120s" # must be positive
+# dind-memory = 0              # MB, 0 = unlimited
+# dind-cpu = 0                 # cores, 0 = unlimited
+# dind-pids-limit = 0          # 0 = unlimited
+# platform = "linux/amd64"     # applies to both runner and daemon images
+```
+
+`docker.socket` always selects the outer daemon used for provisioning. In DinD
+mode its socket is never mounted into either job container. The default daemon
+image is `docker:29-dind`; the runner and daemon images are prepared on each
+configured outer daemon. DinD supports Linux images and the standard
+`/home/runner` runner layout. Choose a `platform` supported by both images.
+The daemon limits apply separately from runner `memory`, `cpu`, and `pids-limit`;
+allow capacity for both containers and the daemon's nested workloads.
+
+Every runner, including an idle `min-runners` instance, owns a fresh daemon.
+Startup waits for `docker info` readiness within `dind-startup-timeout` before
+starting the runner. A daemon failure stops its runner. Completion or
+cancellation removes the daemon, its nested containers, images, networks,
+daemon-created named volumes, and build cache together with the instance's temporary storage. No
+daemon is reused for a later job. Interrupted startup or removal leaves labeled
+resources discoverable by startup reconciliation and `runner doctor --fix`.
+
+The runner uses a private Unix socket and shares the daemon's network namespace,
+so published inner service ports are reachable through runner localhost. The
+workspace and runner externals are mounted at the same paths in both containers.
+Explicit `shared-volume` and cache-volume mounts are mirrored at matching paths
+and retain their existing persistence and retention policies. These files remain
+shared across jobs. Other nested bind-mount source paths refer to the daemon
+container's filesystem. In DinD mode, shared/cache paths must not overlap one
+another or equal, contain, or sit below `/var/run`, `/run`, `/var/lib/docker`,
+`/home/runner/_work`, or `/home/runner/externals`.
+
+`workspace-root` is only for host-socket mode and cannot be combined with `dind` or `none`. DinD already shares a private per-job workspace without a host socket proxy. Its `network` may select a named network, but cannot use `host` or `container:<id>`.
+
 On a Linux host using the Docker socket, a container action's workspace bind
 otherwise resolves on the host instead of inside its runner container. To
 support those actions, create `workspace-root` as a `0700` directory owned by
@@ -520,6 +577,12 @@ pool-size = 2
 | `--runner-image`    | `runner-image`       | `ghcr.io/actions/actions-runner:latest` | Runner image (Docker image or Tart VM image)      |
 | `--docker-socket`   | `[docker] socket`    | `/var/run/docker.sock`                  | Docker socket path (Docker provider)               |
 | `--dind`            | `[docker] dind`      | `true`                                  | Mount Docker socket into runners (Docker provider) |
+| `--docker-daemon-mode` | `[docker] daemon-mode` | `""` (legacy fallback) | `host`, `dind`, or `none`; nonempty mode overrides `--dind` |
+| `--dind-image` | `[docker] dind-image` | `docker:29-dind` | Image for each private daemon |
+| `--dind-startup-timeout` | `[docker] dind-startup-timeout` | `120s` | Positive per-job daemon startup timeout |
+| `--dind-memory` | `[docker] dind-memory` | `0` (unlimited) | Memory in MB per daemon, separate from runner memory |
+| `--dind-cpu` | `[docker] dind-cpu` | `0` (unlimited) | CPU cores per daemon, separate from runner CPU |
+| `--dind-pids-limit` | `[docker] dind-pids-limit` | `0` (unlimited) | Processes and threads per daemon |
 | —                   | `[docker] workspace-root` | unset                              | Private Linux host directory for per-runner Docker socket proxies |
 | `--shared-volume`   | `[docker] shared-volume` |                                     | Shared Docker volume path (Docker provider)        |
 | `--tart-cpu`        | `[tart] cpu`         | `0` (image default)                     | CPU cores per VM (Tart provider)                   |

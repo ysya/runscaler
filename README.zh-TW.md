@@ -70,7 +70,7 @@ Go cache-v2 接收器。具備快取能力的 runner 與 BuildKit 容器透過
 - **不需 Kubernetes** — 可直接在任何 Docker 主機或 Apple Silicon Mac 上執行
 - **短生命週期 runner** — 每個工作都使用全新的容器／VM，不會殘留前一個工作的狀態
 - **自動擴縮** — 透過長輪詢依工作需求在 0 到 N 個 runner 之間擴縮（不需 cron，也沒有定期輪詢的延遲）
-- **Docker-in-Docker** — 可選用 DinD，支援需要建置容器的工作流程
+- **每個工作獨立的 Docker-in-Docker** — 可選用私人、用完即丟的 daemon，預設仍維持共用主機 socket
 - **透過 Tart 執行 macOS 與 Linux VM** — 使用原生 Apple Virtualization.framework，搭配 APFS 寫入時複製（Copy-on-Write）複製機制
 - **Tart 網路** — 預設使用共用 NAT，也可選擇橋接至主機網路介面
 - **VM 預熱集區** — 預先啟動 Tart VM，即時接手工作（約 2 秒，冷啟動則約需 30 秒）

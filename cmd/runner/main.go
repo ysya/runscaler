@@ -64,7 +64,8 @@ func init() {
 
 	// Docker provider
 	flags.String("docker-socket", config.DefaultDockerSocket, "Path to Docker socket")
-	flags.Bool("dind", config.DefaultDinD, "Mount Docker socket into runner containers (Docker-in-Docker)")
+	flags.Bool("dind", config.DefaultDinD, "Share the host Docker socket with runners (legacy default; see --docker-daemon-mode)")
+	registerDockerDaemonFlags(flags)
 	flags.String("shared-volume", "", "Shared Docker volume mounted into all runners (container path, e.g. /shared)")
 	flags.Int("docker-memory", 0, "Memory limit in MB for each Docker runner container (0 = unlimited)")
 	flags.Int("docker-cpu", 0, "CPU cores for each Docker runner container (0 = unlimited)")
@@ -655,7 +656,7 @@ func runScaleSetController(ctx context.Context, deps managerDeps, rt *scaleSetRu
 	if rt.config.Docker.SharedVolume != "" {
 		rt.logger.Info("Shared volume enabled",
 			slog.String("path", rt.config.Docker.SharedVolume),
-			slog.Bool("dind", rt.config.IsDinD()),
+			slog.String("docker_daemon_mode", rt.config.DockerDaemonMode()),
 		)
 	}
 

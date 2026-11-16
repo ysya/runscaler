@@ -50,6 +50,15 @@ jobs:
           docker pull alpine:3.21
           go test -race ./internal/provider -run '^TestDockerWorkspaceBindIntegration$' -count=1 -v
 
+      - name: Verify private per-job Docker daemons on Linux
+        if: matrix.os == 'ubuntu-latest'
+        env:
+          RUNSCALER_DIND_INTEGRATION: "1"
+        run: |
+          docker pull docker:29-dind
+          docker pull ghcr.io/actions/actions-runner:latest
+          go test -race ./internal/provider -run '^TestDinDDockerIntegration$' -count=1 -v -timeout=12m
+
       - name: Run vet
         run: go vet ./...
 

@@ -11,19 +11,14 @@ import (
 	"github.com/ysya/runscaler/internal/provider"
 )
 
-// containerAPI is the slice of the Docker client that orphan reconciliation
-// needs for discovery: listing containers.
-type containerAPI interface {
-	ContainerList(ctx context.Context, options dockerclient.ContainerListOptions) (dockerclient.ContainerListResult, error)
-}
-
 // OrphanContainer is a container runner created that no live process is
 // tracking — left behind when a previous run was killed without a chance to
 // clean up (SIGKILL, OOM, power loss, panic).
 type OrphanContainer struct {
-	ID     string
-	Name   string
-	Status string
+	ID           string
+	Name         string
+	Status       string
+	DinDInstance string
 }
 
 // findOrphanContainers lists containers this tool created, as recognised by
@@ -35,14 +30,26 @@ type OrphanContainer struct {
 // single runner per host — without it, this would claim containers another
 // live runner is actively using. If that guarantee is ever relaxed, this
 // function and its callers must be revisited.
-func findOrphanContainers(ctx context.Context, client containerAPI) ([]OrphanContainer, error) {
+func findOrphanContainers(ctx context.Context, client provider.RunnerCleanupAPI) ([]OrphanContainer, error) {
 	result, err := client.ContainerList(ctx, dockerclient.ContainerListOptions{All: true})
 	if err != nil {
 		return nil, err
 	}
 
+	groups, err := provider.FindDinDOrphans(ctx, client)
+	if err != nil {
+		return nil, err
+	}
+	dindGroups := make(map[string]bool, len(groups))
+	for _, group := range groups {
+		dindGroups[group] = true
+	}
+
 	var orphans []OrphanContainer
 	for _, c := range result.Items {
+		if c.Labels["runscaler.dind-managed"] == "true" && dindGroups[c.Labels["runscaler.dind-instance"]] {
+			continue
+		}
 		if !provider.OwnsContainer(c.Labels, c.Names) {
 			continue
 		}
@@ -51,6 +58,9 @@ func findOrphanContainers(ctx context.Context, client containerAPI) ([]OrphanCon
 			Name:   containerDisplayName(c),
 			Status: string(c.State),
 		})
+	}
+	for _, group := range groups {
+		orphans = append(orphans, OrphanContainer{ID: "dind:" + group, Name: "DinD " + group, Status: "resource group", DinDInstance: group})
 	}
 	return orphans, nil
 }
@@ -76,7 +86,13 @@ func containerDisplayName(c container.Summary) string {
 // start would be worse still.
 func removeOrphanContainers(ctx context.Context, client provider.RunnerCleanupAPI, orphans []OrphanContainer, logger *slog.Logger) (removed int) {
 	for _, o := range orphans {
-		if err := provider.RemoveRunnerContainer(ctx, client, o.ID, logger); err != nil {
+		var err error
+		if o.DinDInstance != "" {
+			err = provider.RemoveDinDInstance(ctx, client, o.DinDInstance, logger)
+		} else {
+			err = provider.RemoveRunnerContainer(ctx, client, o.ID, logger)
+		}
+		if err != nil {
 			logger.Warn("Failed to remove orphaned container",
 				slog.String("container", o.Name),
 				slog.String("id", o.ID),

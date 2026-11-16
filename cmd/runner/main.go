@@ -76,6 +76,10 @@ func init() {
 	flags.Int("tart-memory", 0, "Memory in MB for each VM (0 = use image default)")
 	flags.Int("tart-pool-size", 0, "Number of pre-warmed VMs to keep ready (0 = disabled)")
 	flags.String("tart-net-bridged", "", "Host interface to bridge each VM to instead of Tart's NAT (e.g. en0)")
+	flags.Bool("tart-net-softnet", false, "Boot each VM with Tart's Softnet isolation (tart run --net-softnet)")
+	flags.String("tart-net-softnet-allow", "", "Softnet allow rules passed to tart run --net-softnet-allow (requires --tart-net-softnet)")
+	flags.String("tart-net-softnet-block", "", "Softnet block rules passed to tart run --net-softnet-block, e.g. \"out @host\" (requires --tart-net-softnet)")
+	flags.Int("tart-clone-min-free-gb", 0, "Refuse to clone a VM while TART_HOME's filesystem has fewer GiB free (0 = no floor)")
 
 	// Global
 	flags.String("log-level", config.DefaultLogLevel, "Log level (debug, info, warn, error)")
@@ -116,6 +120,10 @@ func init() {
 	viper.BindPFlag("tart.memory", flags.Lookup("tart-memory"))
 	viper.BindPFlag("tart.pool-size", flags.Lookup("tart-pool-size"))
 	viper.BindPFlag("tart.net-bridged", flags.Lookup("tart-net-bridged"))
+	viper.BindPFlag("tart.net-softnet", flags.Lookup("tart-net-softnet"))
+	viper.BindPFlag("tart.net-softnet-allow", flags.Lookup("tart-net-softnet-allow"))
+	viper.BindPFlag("tart.net-softnet-block", flags.Lookup("tart-net-softnet-block"))
+	viper.BindPFlag("tart.clone-min-free-gb", flags.Lookup("tart-clone-min-free-gb"))
 
 	// Register subcommands
 	cmd.AddCommand(validateCmd, statusCmd, doctorCmd, versionCmd, serviceCmd, cacheCmd, runCommand)
@@ -390,8 +398,9 @@ func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) e
 		return err
 	}
 
+	cloneFloors := tartCloneFloors(scaleSets)
 	detect := func(ctx context.Context, home, image string) (provider.TartGuest, error) {
-		return provider.DetectTartGuest(ctx, provider.TartCommandRunner(home), home, image)
+		return provider.DetectTartGuest(ctx, provider.TartCommandRunner(home), home, image, cloneFloors[home])
 	}
 	if err := detectTartGuests(ctx, runtimes, detect, logger); err != nil {
 		return err

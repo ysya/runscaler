@@ -133,8 +133,9 @@ func runValidate(cmd *cobra.Command, args []string) error {
 	present := func(ctx context.Context, home, image string) (bool, error) {
 		return provider.TartImagePresent(ctx, provider.TartCommandRunner(home), image)
 	}
+	cloneFloors := tartCloneFloors(scaleSets)
 	detect := func(ctx context.Context, home, image string) (provider.TartGuest, error) {
-		return provider.DetectTartGuest(ctx, provider.TartCommandRunner(home), home, image)
+		return provider.DetectTartGuest(ctx, provider.TartCommandRunner(home), home, image, cloneFloors[home])
 	}
 	if err := reportTartGuests(commandContext(cmd), cmd.OutOrStdout(), runtimes, present, detect, logger); err != nil {
 		return err

@@ -917,3 +917,57 @@ func TestActionsCacheURLValidation(t *testing.T) {
 		})
 	}
 }
+
+func TestTartNetSoftnetAndCloneFloorValidation(t *testing.T) {
+	base := func() ScaleSetConfig {
+		return ScaleSetConfig{Provider: "tart", MaxRunners: 1}
+	}
+	has := func(problems []error, sub string) bool {
+		for _, p := range problems {
+			if strings.Contains(p.Error(), sub) {
+				return true
+			}
+		}
+		return false
+	}
+	ss := base()
+	ss.Tart.NetSoftnet = true
+	ss.Tart.NetBridged = "en0"
+	if !has(ss.ValidationErrors(), "net-softnet and net-bridged") {
+		t.Error("net-softnet with net-bridged was accepted")
+	}
+	ss = base()
+	ss.Tart.CloneMinFreeGB = -1
+	if !has(ss.ValidationErrors(), "clone-min-free-gb") {
+		t.Error("negative clone-min-free-gb was accepted")
+	}
+	ss = base()
+	ss.Tart.NetSoftnet = true
+	ss.Tart.CloneMinFreeGB = 170
+	ss.Tart.NetSoftnetBlock = "out @host"
+	ss.Tart.NetSoftnetAllow = "out proto udp @host port 53,out proto tcp @host port 53"
+	if has(ss.ValidationErrors(), "net-softnet") || has(ss.ValidationErrors(), "clone-min-free-gb") {
+		t.Errorf("valid softnet and floor settings refused: %v", ss.ValidationErrors())
+	}
+	ss = base()
+	ss.Tart.NetSoftnetBlock = "out @host"
+	if !has(ss.ValidationErrors(), "net-softnet-block requires net-softnet") {
+		t.Error("net-softnet-block without net-softnet was accepted")
+	}
+	for _, bad := range []string{"--net-host", "out @host\n--x", "a=b"} {
+		ss = base()
+		ss.Tart.NetSoftnet = true
+		ss.Tart.NetSoftnetAllow = bad
+		if !has(ss.ValidationErrors(), "is not a Softnet rule list") {
+			t.Errorf("net-softnet-allow %q was accepted", bad)
+		}
+	}
+}
+
+func TestTartCloneMinFreeBytes(t *testing.T) {
+	for gb, want := range map[int]uint64{0: 0, -5: 0, 170: 170 << 30} {
+		if got := (TartConfig{CloneMinFreeGB: gb}).CloneMinFreeBytes(); got != want {
+			t.Errorf("CloneMinFreeBytes(%d) = %d, want %d", gb, got, want)
+		}
+	}
+}

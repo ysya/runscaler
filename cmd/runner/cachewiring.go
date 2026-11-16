@@ -411,6 +411,7 @@ func tartCacheStoreFor(home string, sets []config.ScaleSetConfig, logger *slog.L
 		MaxAge:     chosen.maxAge,
 		BudgetGB:   chosen.budgetGB,
 		KeepImages: keep,
+		CloneFloor: tartCloneFloors(sets)[home],
 	})
 	return tartCacheSweepTarget{
 		store: store, home: home, maxAge: chosen.maxAge, spaceBudgetGB: chosen.budgetGB,

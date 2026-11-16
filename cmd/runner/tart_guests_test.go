@@ -200,3 +200,19 @@ func TestReportTartGuests(t *testing.T) {
 		t.Fatalf("error = %v, output %q", err, out.String())
 	}
 }
+
+func TestTartCloneFloorsTakesHighestPerHome(t *testing.T) {
+	sets := []config.ScaleSetConfig{
+		{Provider: "tart", Tart: config.TartConfig{Home: "/a", CloneMinFreeGB: 10}},
+		{Provider: "tart", Tart: config.TartConfig{Home: "/a", CloneMinFreeGB: 170}},
+		{Provider: "tart", Tart: config.TartConfig{Home: "/b"}},
+		{Provider: "docker"},
+	}
+	floors := tartCloneFloors(sets)
+	if got := floors["/a"].MinFreeBytes; got != 170<<30 {
+		t.Errorf("floor of /a = %d, want %d", got, uint64(170)<<30)
+	}
+	if got := floors["/b"].MinFreeBytes; got != 0 {
+		t.Errorf("floor of /b = %d, want 0", got)
+	}
+}

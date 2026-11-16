@@ -126,6 +126,10 @@ pool-size = 2            # pre-warm 2 VMs for instant job pickup (~2s vs ~30s co
 # mtu = 0                              # guest MTU: 0 = match a VPN tunnel (default), -1 = off, 1280–1500 = fixed
 # dns = ["1.1.1.1", "8.8.8.8"]         # guest resolvers ([] = keep the one Tart's NAT hands out)
 # net-bridged = "en0"                  # bridge VMs to this host interface instead of Tart's NAT
+# net-softnet = false                  # boot VMs with Tart's Softnet isolation (softnet setuid root on PATH)
+# net-softnet-block = ""               # Softnet block rules, e.g. "out @host" (Softnet admits the host gateway by default)
+# net-softnet-allow = ""               # Softnet allow rules, e.g. "out proto udp @host port 53,out proto tcp @host port 53"
+# clone-min-free-gb = 0                # refuse to clone a VM below this many GiB free on TART_HOME (0 = off)
 ```
 
 runscaler detects each Tart image's guest OS at startup; no guest setting is
@@ -527,6 +531,10 @@ pool-size = 2
 | `--tart-runner-dir` | `[tart] runner-dir`  | `/Users/admin/actions-runner` (macOS), `/home/admin/actions-runner` (Linux) | Runner install directory inside Tart VM           |
 | `--tart-pool-size`  | `[tart] pool-size`   | `0`                                     | Number of pre-warmed VMs for instant job pickup   |
 | `--tart-net-bridged` | `[tart] net-bridged` | `""` (Tart's NAT)                      | Host interface to bridge each VM to               |
+| `--tart-net-softnet` | `[tart] net-softnet` | `false` (Tart's NAT) | Boot each VM with `tart run --net-softnet` (cannot be combined with net-bridged) |
+| `--tart-net-softnet-block` | `[tart] net-softnet-block` | `""` | Softnet rules passed verbatim to `tart run --net-softnet-block=` (requires net-softnet). Softnet admits guest traffic to the host gateway unless a rule such as `out @host` blocks it |
+| `--tart-net-softnet-allow` | `[tart] net-softnet-allow` | `""` | Softnet rules passed verbatim to `tart run --net-softnet-allow=` (requires net-softnet), e.g. the host's DNS: `out proto udp @host port 53,out proto tcp @host port 53` |
+| `--tart-clone-min-free-gb` | `[tart] clone-min-free-gb` | `0` (no floor) | Refuse every `tart clone` (runner VMs, startup guest inspection, the cache prune's mark-used clone) while the filesystem of TART_HOME (`[tart].home`, else `$TART_HOME`, else `~/.tart`) has fewer GiB free; an unreadable free space also refuses, and a refused mark-used clone skips that prune |
 | `--log-level`       | `log-level`          | `info`                                  | Log level (debug/info/warn/error)                 |
 | `--log-format`      | `log-format`         | `text`                                  | Log format (text/json)                            |
 | `--dry-run`         | `dry-run`            | `false`                                 | Validate everything without starting listeners    |

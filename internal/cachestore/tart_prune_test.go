@@ -76,7 +76,7 @@ func TestTartStore_Tier2PrunesThroughInjectedRunner(t *testing.T) {
 
 func TestPruneTartCache_DisabledWhenNoCriteria(t *testing.T) {
 	r := &scriptedRunner{}
-	if err := pruneTartCache(context.Background(), r, "/some/home", 0, 0, []string{"ghcr.io/cirruslabs/macos-golden-gate-xcode:27"}, discard); err != nil {
+	if err := pruneTartCache(context.Background(), r, "/some/home", 0, 0, []string{"ghcr.io/cirruslabs/macos-golden-gate-xcode:27"}, provider.CloneFloor{}, discard); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(r.calls) != 0 {
@@ -89,7 +89,7 @@ func TestPruneTartCache_MarksKeptImageUsedBeforePruning(t *testing.T) {
 		"tart list --format json --source oci": {out: ociCacheListing},
 	}}
 	keep := []string{"ghcr.io/cirruslabs/macos-golden-gate-xcode:27"}
-	if err := pruneTartCache(context.Background(), r, "/some/home", 7*24*time.Hour, 150, keep, discard); err != nil {
+	if err := pruneTartCache(context.Background(), r, "/some/home", 7*24*time.Hour, 150, keep, provider.CloneFloor{}, discard); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	clone, del, prune := -1, -1, -1
@@ -127,7 +127,7 @@ func TestPruneTartCache_DoesNotCloneImageMissingFromCache(t *testing.T) {
 		"tart list --format json --source oci": {out: ociCacheListing},
 	}}
 	// Cloning an image that is not cached would pull it — 80+ GB.
-	if err := pruneTartCache(context.Background(), r, "/some/home", 7*24*time.Hour, 0, []string{"ghcr.io/cirruslabs/macos-tahoe-xcode:26.5"}, discard); err != nil {
+	if err := pruneTartCache(context.Background(), r, "/some/home", 7*24*time.Hour, 0, []string{"ghcr.io/cirruslabs/macos-tahoe-xcode:26.5"}, provider.CloneFloor{}, discard); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if n := r.count("tart clone"); n != 0 {
@@ -143,7 +143,7 @@ func TestPruneTartCache_PrunesEvenWhenMarkingFails(t *testing.T) {
 		"tart list --format json --source oci": {out: ociCacheListing},
 		"tart clone":                           {err: errors.New("no space left on device")},
 	}}
-	if err := pruneTartCache(context.Background(), r, "/some/home", 7*24*time.Hour, 0, []string{"ghcr.io/cirruslabs/macos-golden-gate-xcode:27"}, discard); err != nil {
+	if err := pruneTartCache(context.Background(), r, "/some/home", 7*24*time.Hour, 0, []string{"ghcr.io/cirruslabs/macos-golden-gate-xcode:27"}, provider.CloneFloor{}, discard); err != nil {
 		t.Fatalf("unexpected error: %v; marking is best-effort", err)
 	}
 	if n := r.count("tart prune"); n != 1 {
@@ -166,7 +166,7 @@ func TestPruneTartCache_Arguments(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			r := &scriptedRunner{}
-			if err := pruneTartCache(context.Background(), r, "/some/home", tt.maxAge, tt.budget, nil, discard); err != nil {
+			if err := pruneTartCache(context.Background(), r, "/some/home", tt.maxAge, tt.budget, nil, provider.CloneFloor{}, discard); err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
 			if len(r.calls) != 1 || r.calls[0] != tt.want {
@@ -178,8 +178,27 @@ func TestPruneTartCache_Arguments(t *testing.T) {
 
 func TestPruneTartCache_PropagatesError(t *testing.T) {
 	r := &scriptedRunner{results: map[string]scriptedResult{"tart prune": {err: errors.New("disk full")}}}
-	err := pruneTartCache(context.Background(), r, "/some/home", 7*24*time.Hour, 0, nil, discard)
+	err := pruneTartCache(context.Background(), r, "/some/home", 7*24*time.Hour, 0, nil, provider.CloneFloor{}, discard)
 	if err == nil || !strings.Contains(err.Error(), "disk full") {
 		t.Fatalf("error = %v, want the prune failure wrapped", err)
+	}
+}
+
+// Below the clone floor the mark-used clone is refused, and the prune does
+// not run without it (it could evict the runner image).
+func TestPruneTartCache_BelowCloneFloorSkipsMarkAndPrune(t *testing.T) {
+	r := &scriptedRunner{results: map[string]scriptedResult{
+		"tart list --format json --source oci": {out: ociCacheListing},
+	}}
+	keep := []string{"ghcr.io/cirruslabs/macos-golden-gate-xcode:27"}
+	floor := provider.CloneFloor{MinFreeBytes: 1 << 30, FreeBytes: func(string) (uint64, error) { return 0, nil }}
+	err := pruneTartCache(context.Background(), r, "/some/home", 7*24*time.Hour, 150, keep, floor, discard)
+	if !errors.Is(err, provider.ErrBelowCloneFloor) {
+		t.Fatalf("pruneTartCache() = %v, want a floor refusal", err)
+	}
+	for _, call := range r.calls {
+		if strings.HasPrefix(call, "tart clone ") || strings.HasPrefix(call, "tart prune ") {
+			t.Errorf("call %q ran below the clone floor", call)
+		}
 	}
 }

@@ -151,7 +151,7 @@ func (f *fakeScaleSet) ours(ids ...int64) *fakeScaleSet {
 		f.refs = map[int]*scaleset.RunnerReference{}
 	}
 	for _, id := range ids {
-		f.refs[int(id)] = &scaleset.RunnerReference{ID: int(id), RunnerScaleSetID: testScaleSetID}
+		f.refs[int(id)] = &scaleset.RunnerReference{ID: int(id), Name: leaked(id).Name, RunnerScaleSetID: testScaleSetID}
 	}
 	return f
 }
@@ -273,6 +273,32 @@ func TestSweepKeepsRunnerOfAnotherScaleSet(t *testing.T) {
 	assertRemoved(t, e, 1)
 	if !strings.Contains(e.logs.String(), "runnerScaleSetID=12") {
 		t.Fatalf("the kept runner's scale set is not logged:\n%s", e.logs)
+	}
+}
+
+func TestSweepKeepsRunnerWithMismatchedIdentity(t *testing.T) {
+	for _, mode := range []Mode{ModeRemove, ModeLog} {
+		for _, tc := range []struct {
+			name    string
+			id      int
+			refName string
+		}{
+			{"different name", 1, "runner-deadbeef"},
+			{"missing name", 1, ""},
+			{"different ID", 2, "runner-a0000001"},
+			{"missing ID", 0, "runner-a0000001"},
+		} {
+			t.Run(string(mode)+"/"+tc.name, func(t *testing.T) {
+				e := newEnv(t, mode, []Runner{leaked(1)})
+				e.api.ours(1)
+				e.api.refs[1].ID = tc.id
+				e.api.refs[1].Name = tc.refName
+				res := e.sweeper.Sweep(context.Background())
+				if res.Candidates != 0 || res.Errors != 1 || len(e.api.removedIDs()) != 0 {
+					t.Fatalf("mismatched identity treated as a confirmed leak: %+v, removed %v", res, e.api.removedIDs())
+				}
+			})
+		}
 	}
 }
 

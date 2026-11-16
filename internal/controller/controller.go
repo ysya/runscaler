@@ -82,8 +82,8 @@ type ScaleSetController struct {
 	retryTimer         *time.Timer
 	lastFailureAttempt uint64
 	failureGeneration  uint64
-	// startFailed is called after a start that failed has left local state
-	// (see WithStartFailureNotifier). Nil when nothing listens.
+	// startFailed notifies recovery after a JIT request or provider start
+	// fails. Known registrations remain owned until direct cleanup finishes.
 	startFailed          func()
 	registrationMu       sync.Mutex
 	registrations        map[int]*pendingRegistration
@@ -823,9 +823,9 @@ func jobRefFrom(m *scaleset.JobMessageBase) jobRef {
 }
 
 // HasRunner reports whether the controller tracks a runner of this name in
-// any phase, provisioning included. It reads the state under its lock when
-// called. startInstanceWithLease reserves a name before it asks GitHub for
-// the JIT registration, so every registration this process creates is local
+// any phase, including pending registration-only cleanup. Both state stores
+// are read under their locks. startInstanceWithLease reserves a name before
+// it asks GitHub for the JIT registration, so each new registration is local
 // before it exists on GitHub.
 func (s *ScaleSetController) HasRunner(name string) bool {
 	return s.instances.hasName(name) || s.hasPendingRegistration(name)

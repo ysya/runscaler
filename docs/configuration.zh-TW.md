@@ -430,6 +430,12 @@ pool-size = 2
 | `--tart-runner-dir` | `[tart] runner-dir` | `/Users/admin/actions-runner`（macOS）、`/home/admin/actions-runner`（Linux） | Tart VM 內的 runner 安裝目錄 |
 | `--tart-pool-size` | `[tart] pool-size` | `0` | 預先暖機、可立即接收工作的 VM 數量 |
 | `--tart-net-bridged` | `[tart] net-bridged` | `""`（Tart 的 NAT） | 每個 VM 要橋接至的主機介面 |
+| `--tart-net-softnet` | `[tart] net-softnet` | `false` | 啟用 Tart Softnet 網路隔離；不可與橋接同時使用 |
+| `--tart-net-softnet-block` | `[tart] net-softnet-block` | `""` | 原樣傳遞封鎖規則；如 `out @host` 可封鎖預設允許的主機閘道，需要啟用 Softnet |
+| `--tart-net-softnet-allow` | `[tart] net-softnet-allow` | `""` | 原樣傳遞允許規則；可允許主機 DNS，需要啟用 Softnet |
+| `--tart-clone-min-free-gb` | `[tart] clone-min-free-gb` | `0`（停用） | Tart 主目錄所在檔案系統的 clone 可用空間下限，單位為 GiB；不阻擋 cache 回收 |
+| `--registration-sweep-mode` | `registration-sweep-mode` | `off` | 組織層級的遺留 JIT 註冊補漏：`off`、僅記錄的 `log` 或刪除的 `remove` |
+| `--registration-sweep-interval` | `registration-sweep-interval` | `10m` | 註冊補漏掃描間隔，最短為 `1m` |
 | `--log-level` | `log-level` | `info` | 記錄層級（debug/info/warn/error） |
 | `--log-format` | `log-format` | `text` | 記錄格式（text/json） |
 | `--dry-run` | `dry-run` | `false` | 驗證所有項目，但不啟動接聽程序 |
@@ -464,4 +470,4 @@ Docker 與 Tart 的 JIT 回應包含 runner ID 時，會在供應之前保存。
 
 程序崩潰或 JIT 回應遺失時可能不知道 ID，這時可選擇啟用 `registration-sweep-mode = "log"` 觀察，確認後改為 `"remove"`。預設為 `"off"`，`registration-sweep-interval` 預設 `"10m"`，最短 `"1m"`。
 
-補漏掃描僅支援組織層級 scale set，且要求每個 scale set 僅由一個管理程序服務。只有離線、不忙碌、名稱符合 runscaler 格式、本機沒有管理，且 API 確認屬於該 scale set 的註冊才會刪除。每輪最多處理 20 筆刪除、100 筆歸屬查詢，總時限為兩分鐘。掃描會在啟動、指定間隔與啟動失敗後執行；失敗觸發會合併，至少相隔一分鐘。
+補漏掃描僅支援組織層級 scale set，且要求每個 scale set 僅由一個管理程序服務。只有離線、不忙碌、名稱符合 runscaler 格式、本機沒有管理，且 API 確認屬於該 scale set 的註冊才會刪除。REST 清單與 scale-set API 回傳的 runner ID、名稱都必須完全一致；身分不符或缺失時保留註冊並記錄錯誤。每輪最多處理 20 筆刪除、100 筆歸屬查詢，總時限為兩分鐘。掃描會在啟動、指定間隔與啟動失敗後執行；失敗觸發會合併，至少相隔一分鐘。

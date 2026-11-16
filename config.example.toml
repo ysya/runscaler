@@ -154,6 +154,10 @@ dind = true
 # mtu = 0                                 # guest MTU: 0 = match the host's route to GitHub when it is a VPN tunnel, -1 = off, 1280-1500 = fixed
 # dns = ["1.1.1.1", "8.8.8.8"]            # guest resolvers; [] = keep the one Tart's NAT proxies through the host
 # net-bridged = "en0"                     # bridge VMs to this host interface instead of Tart's NAT; "" = NAT
+# net-softnet = false                     # opt-in isolation; cannot be combined with net-bridged
+# net-softnet-block = ""                   # e.g. "out @host" to block the host gateway (allowed by default)
+# net-softnet-allow = ""                   # e.g. "out proto udp @host port 53,out proto tcp @host port 53" for host DNS
+# clone-min-free-gb = 0                    # available GiB required before cloning; 0 disables; cache reclamation still runs
 
 # --- Multiple scale sets mode ---
 # Use [[scaleset]] entries to manage multiple orgs/repos from one process.

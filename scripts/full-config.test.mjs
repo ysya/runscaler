@@ -58,6 +58,50 @@ test('explicit private Docker daemon rejects host proxy workspace', () => {
   fieldError(state, 'docker', 'workspace-root');
 });
 
+for (const [name, patch, key] of [
+  ['zero startup timeout', { 'dind-startup-timeout': '0' }, 'dind-startup-timeout'],
+  ['negative startup timeout', { 'dind-startup-timeout': '-1s' }, 'dind-startup-timeout'],
+  ['host network', { network: 'host' }, 'network'],
+  ['another container network', { network: 'container:other' }, 'network'],
+  ['non-Linux platform', { platform: 'darwin/arm64' }, 'platform'],
+  ['reserved shared path', { 'shared-volume': '/run' }, 'shared-volume'],
+  ['reserved path ancestor', { 'shared-volume': '/var' }, 'shared-volume'],
+  ['reserved path descendant', { 'shared-volume': '/var/lib/docker/buildkit' }, 'shared-volume'],
+  ['runner home ancestor', { 'shared-volume': '/home/runner' }, 'shared-volume'],
+  ['reserved short cache', { 'cache-volumes': 'build:/home/runner/_work/cache' }, 'cache-volumes'],
+  ['reserved long cache', { cache: 'build | /home/runner/externals | 20GB' }, 'cache'],
+  ['shared and cache overlap', { 'shared-volume': '/shared', 'cache-volumes': 'build:/shared/nested' }, 'cache-volumes'],
+  ['cache paths overlap', { 'cache-volumes': 'one:/cache\ntwo:/cache/nested' }, 'cache-volumes'],
+  ['long and short cache overlap', { 'cache-volumes': 'one:/cache', cache: 'two | /cache/nested | 20GB' }, 'cache'],
+]) {
+  test(`private Docker daemon rejects ${name}`, () => {
+    const state = base();
+    state.scaleSets[0].docker = { 'daemon-mode': 'dind', ...patch };
+    fieldError(state, 'docker', key);
+  });
+}
+
+test('daemon startup timeout stays positive outside private mode', () => {
+  const state = base();
+  state.scaleSets[0].docker = { 'daemon-mode': 'host', 'dind-startup-timeout': '0s' };
+  fieldError(state, 'docker', 'dind-startup-timeout');
+});
+
+test('private Docker validation preserves overrides and path boundaries', () => {
+  const state = base();
+  state.scaleSets[0].docker = {
+    'daemon-mode': 'dind', platform: 'linux/arm64', network: 'private-builds',
+    'dind-startup-timeout': '2m', 'shared-volume': '/var/lib/docker-cache',
+    'cache-volumes': 'overridden:/run\nsibling:/run-cache',
+    cache: 'overridden | /cache | 20GB',
+  };
+  assert.doesNotThrow(() => generateFullConfig(state));
+  state.scaleSets[0].docker = { 'daemon-mode': 'host', dind: 'false', 'workspace-root': '/tmp/runner-proxies' };
+  assert.doesNotThrow(() => generateFullConfig(state));
+  state.scaleSets[0].docker = { 'daemon-mode': 'host', network: 'host', 'shared-volume': '/var/lib/docker' };
+  assert.doesNotThrow(() => generateFullConfig(state));
+});
+
 test('TOML quoting escapes strings and rejects control characters', () => {
   assert.equal(quoteToml('a"\\b'), '"a\\"\\\\b"');
   assert.throws(() => quoteToml('x"\nmax-runners = 99'), /control characters/u);

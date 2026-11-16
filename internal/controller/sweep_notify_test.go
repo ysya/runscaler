@@ -11,7 +11,7 @@ import (
 )
 
 // notifyRecorder counts start-failure notices and records, for each one,
-// whether the failed runner was still local when the notice came.
+// whether the failed runner still had instance state when the notice came.
 type notifyRecorder struct {
 	mu         sync.Mutex
 	s          *ScaleSetController
@@ -56,8 +56,8 @@ func (p *namingFailProvider) lastName() string {
 }
 
 // A start that fails after the JIT registration sends one notice, and only
-// after the runner has left local state.
-func TestStartFailureNotifiesAfterRunnerLeavesLocalState(t *testing.T) {
+// after its instance state is gone. Registration-only cleanup may still be owned.
+func TestStartFailureNotifiesAfterRunnerLeavesInstanceState(t *testing.T) {
 	p := &namingFailProvider{}
 	rec := &notifyRecorder{name: p.lastName}
 	s := NewScaleSetController(1, 0, 1, p, &mockScaleset{}, slog.New(slog.DiscardHandler), WithStartFailureNotifier(rec.notify))
@@ -72,7 +72,7 @@ func TestStartFailureNotifiesAfterRunnerLeavesLocalState(t *testing.T) {
 		t.Fatalf("notices = %d, want 1", rec.count())
 	}
 	if rec.stillLocal[0] {
-		t.Fatal("notice came while the failed runner was still local")
+		t.Fatal("notice came while the failed runner still had instance state")
 	}
 }
 

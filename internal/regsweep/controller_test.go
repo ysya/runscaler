@@ -52,27 +52,22 @@ func (j *jitScaleSet) GenerateJitRunnerConfig(_ context.Context, setting *scales
 }
 
 // A registration whose runner the controller is still provisioning (a VM
-// booting) is kept; once the start fails and the controller drops the runner,
-// the sweep that the failure triggers removes the leaked registration.
+// booting) is kept; after the start fails, the controller directly cleans the
+// known registration and a subsequent sweep does not remove it twice.
 func TestSweepWithControllerKeepsProvisioningRunnerAndAcceptsDirectCleanup(t *testing.T) {
 	prov := &bootingProvider{started: make(chan string, 1), release: make(chan struct{})}
 	api := &jitScaleSet{}
 	gh := &fakeGitHub{t: t}
 	e := newEnvWith(t, ModeRemove, gh, api)
 
-	// Each notice reports whether the failed runner was still local then.
-	notices := make(chan bool, 8)
-	var ctl *controller.ScaleSetController
-	ctlReady := make(chan struct{})
-	ctl = controller.NewScaleSetController(testScaleSetID, 0, 1, prov, api, slog.New(slog.DiscardHandler),
+	notices := make(chan struct{}, 8)
+	ctl := controller.NewScaleSetController(testScaleSetID, 0, 1, prov, api, slog.New(slog.DiscardHandler),
 		controller.WithStartFailureNotifier(func() {
-			<-ctlReady
 			select {
-			case notices <- ctl.HasRunner(lastName(api)):
+			case notices <- struct{}{}:
 			default:
 			}
 		}))
-	close(ctlReady)
 	defer ctl.Shutdown(context.Background())
 	e.sweeper.local = ctl
 
@@ -98,13 +93,11 @@ func TestSweepWithControllerKeepsProvisioningRunnerAndAcceptsDirectCleanup(t *te
 	}
 
 	close(prov.release) // the boot fails
-	var stillLocal bool
 	select {
-	case stillLocal = <-notices:
+	case <-notices:
 	case <-time.After(5 * time.Second):
 		t.Fatal("start failure sent no notice")
 	}
-	_ = stillLocal // Failed registrations can remain locally owned pending direct cleanup.
 	deadline := time.Now().Add(5 * time.Second)
 	for len(api.removedIDs()) == 0 && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
@@ -116,13 +109,4 @@ func TestSweepWithControllerKeepsProvisioningRunnerAndAcceptsDirectCleanup(t *te
 	if res.Removed != 0 {
 		t.Fatalf("sweep after direct cleanup = %+v, want no duplicate removal", res)
 	}
-}
-
-func lastName(j *jitScaleSet) string {
-	j.mu.Lock()
-	defer j.mu.Unlock()
-	if ref := j.refs[j.next]; ref != nil {
-		return ref.Name
-	}
-	return ""
 }

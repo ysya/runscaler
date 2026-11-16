@@ -375,8 +375,10 @@ A sweep runs once at startup (after the orphan reconcile), then every
 never runs per reconcile pass. A runner is removed only when all of these
 hold: GitHub reports it offline and not busy; its name has the exact form
 runner gives its runners (`runner-` and 8 lowercase hex digits); this process
-has no instance of that name in any phase, read after the list returned;
+has no instance or pending registration cleanup of that name, read after the list returned;
 and the scale set API reports that the runner belongs to this scale set.
+The runner ID and name returned by that lookup must exactly match the REST
+listing; missing or mismatched identity is retained and logged as an error.
 One sweep removes at most 20 registrations and is bounded by a two-minute
 timeout. A removal GitHub refuses (for example, a job still holds the runner)
 is logged and left for the next sweep.

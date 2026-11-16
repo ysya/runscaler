@@ -10,9 +10,9 @@
 //
 //   - GitHub reports it offline and not busy;
 //   - its name has the exact form runner names get (provider.NewRunnerName);
-//   - the controller has no local instance of that name in any phase, read
-//     after the list returned;
-//   - the scale set API reports that the runner belongs to this scale set.
+//   - the controller owns neither an instance nor pending cleanup of that
+//     name, read after the list returned;
+//   - the scale set API confirms its ID, name and scale set membership.
 //
 // SAFETY: the sweep assumes that exactly one runscaler process serves each
 // scale set. A second process that serves the same scale set has local
@@ -285,6 +285,13 @@ func (s *Sweeper) Sweep(parent context.Context) Result {
 			}
 			s.logger.Info("Registration sweep keeps runner of another scale set",
 				slog.Int64("runnerID", r.ID), slog.String("name", r.Name), slog.Int("runnerScaleSetID", seen), slog.Int("scaleSetID", s.cfg.ScaleSetID))
+			continue
+		}
+		if int64(ref.ID) != r.ID || ref.Name != r.Name {
+			res.Errors++
+			s.logger.Warn("Registration sweep keeps runner with mismatched identity",
+				slog.Int64("runnerID", r.ID), slog.String("name", r.Name),
+				slog.Int("referenceID", ref.ID), slog.String("referenceName", ref.Name))
 			continue
 		}
 		res.Candidates++

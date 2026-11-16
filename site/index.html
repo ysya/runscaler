@@ -3,12 +3,22 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Runscaler creates ephemeral GitHub Actions runners on Docker or Tart. Build a configuration and run them on your own host.">
+  <meta name="description" content="Autoscale ephemeral GitHub Actions runners with Docker or Tart on your own host. One Go binary, no Kubernetes. Explore Docker and Apple Silicon macOS setup guides.">
   <meta name="theme-color" content="#0b171c">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'none'; base-uri 'none'; form-action 'none'">
   <link rel="icon" type="image/svg+xml" href="./favicon.svg">
-  <title>Runscaler — runners ready when jobs arrive</title>
+  <title>Runscaler — GitHub Actions runner autoscaling without Kubernetes</title>
   <link rel="stylesheet" href="./style.css">
+  <link rel="canonical" href="https://runscaler.ysya.dev/">
+  <link rel="alternate" hreflang="en" href="https://runscaler.ysya.dev/">
+  <link rel="alternate" hreflang="zh-Hant" href="https://runscaler.ysya.dev/zh-TW.html">
+  <link rel="alternate" hreflang="x-default" href="https://runscaler.ysya.dev/">
+  <link rel="describedby" type="text/plain" href="/llms.txt">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Runscaler">
+  <meta property="og:title" content="Runscaler — GitHub Actions runner autoscaling without Kubernetes">
+  <meta property="og:description" content="Autoscale ephemeral GitHub Actions runners with Docker or Tart on your own host. One Go binary, no Kubernetes. Explore Docker and Apple Silicon macOS setup guides.">
+  <meta property="og:url" content="https://runscaler.ysya.dev/">
 </head>
 <body data-lang="en">
   <a class="skip-link" href="#main">Skip to content</a>
@@ -16,6 +26,7 @@
     <a class="brand" href="./" aria-label="Runscaler home"><span class="brand-mark" aria-hidden="true">r<span>.</span></span><span>runscaler</span></a>
     <nav class="site-nav" aria-label="Main navigation">
       <a href="#how">How it works</a>
+      <a href="./guide/">Selection guide</a>
       <a href="./configure/">Configure</a>
       <a href="https://github.com/ysya/runscaler#documentation">Docs <span aria-hidden="true">↗</span></a>
     </nav>
@@ -29,11 +40,11 @@
     <section class="hero section-shell">
       <div class="hero-copy">
         <p class="eyebrow"><span class="eyebrow-dot"></span> SELF-HOSTED GITHUB ACTIONS</p>
-        <h1>Runners ready <em>when jobs arrive.</em></h1>
-        <p class="hero-lede">One process on your host starts disposable Docker containers or Tart VMs for GitHub Actions, then removes them when the job is done.</p>
+        <h1>GitHub Actions runners. <em>No Kubernetes.</em></h1>
+        <p class="hero-lede">Runscaler auto-scales disposable Docker containers or Tart VMs for GitHub Actions on your own host. One Go binary starts runners when jobs arrive and removes them afterward.</p>
         <div class="hero-actions">
           <a class="button button-primary" href="./configure/">Build your config <span aria-hidden="true">↗</span></a>
-          <a class="button button-text" href="https://github.com/ysya/runscaler">Explore the source <span aria-hidden="true">→</span></a>
+          <a class="button button-text" href="./guide/">Find your setup <span aria-hidden="true">→</span></a>
         </div>
         <div class="hero-facts" aria-label="Project highlights">
           <div><strong>0 → N</strong><span>scale with demand</span></div>

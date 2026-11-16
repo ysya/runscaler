@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="不用 Kubernetes 的 GitHub Actions 自架 runner 選型指南：了解 Runscaler 的 Docker、Apple Silicon macOS VM、與 ARC 及手動管理 runner 的比較，以及先決條件與限制。">
+  <meta name="theme-color" content="#0b171c">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'none'; base-uri 'none'; form-action 'none'">
+  <link rel="icon" type="image/svg+xml" href="../favicon.svg">
+  <link rel="stylesheet" href="../style.css">
+  <title>Runscaler 選型指南 — 不用 Kubernetes 的 GitHub Actions runner</title>
+  <link rel="canonical" href="https://runscaler.ysya.dev/guide/zh-TW.html">
+  <link rel="alternate" hreflang="en" href="https://runscaler.ysya.dev/guide/">
+  <link rel="alternate" hreflang="zh-Hant" href="https://runscaler.ysya.dev/guide/zh-TW.html">
+  <link rel="alternate" hreflang="x-default" href="https://runscaler.ysya.dev/guide/">
+  <link rel="describedby" type="text/plain" href="/llms.txt">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Runscaler">
+  <meta property="og:title" content="Runscaler 選型指南 — 不用 Kubernetes 的 GitHub Actions runner">
+  <meta property="og:description" content="不用 Kubernetes 的 GitHub Actions 自架 runner 選型指南：了解 Runscaler 的 Docker、Apple Silicon macOS VM、與 ARC 及手動管理 runner 的比較，以及先決條件與限制。">
+  <meta property="og:url" content="https://runscaler.ysya.dev/guide/zh-TW.html">
+</head>
+<body data-lang="zh-TW">
+  <a class="skip-link" href="#main">跳至內容</a>
+  <header class="site-header">
+    <a class="brand" href="../zh-TW.html" aria-label="Runscaler 首頁"><span class="brand-mark" aria-hidden="true">r<span>.</span></span><span>runscaler</span></a>
+    <nav class="site-nav" aria-label="主選單"><a href="../zh-TW.html">首頁</a><a href="./zh-TW.html" aria-current="page">選型指南</a><a href="../configure/zh-TW.html">設定產生器</a></nav>
+    <div class="header-actions"><a class="language-link" href="./" lang="en" hreflang="en">English</a><a class="header-github" href="https://github.com/ysya/runscaler">GitHub ↗</a></div>
+  </header>
+  <main id="main" class="guide section-shell">
+    <article>
+      <header class="guide-intro">
+        <p class="eyebrow">選型指南</p>
+        <h1>GitHub Actions runner，<em>不需要 Kubernetes。</em></h1>
+        <p>Runscaler 是以 Go 撰寫的 GitHub Actions 自架 runner 自動擴縮工具。每台主機上的管理程序會為工作啟動用完即移除的 Docker 容器或 Tart VM，並在工作完成後移除。CLI 執行檔名稱為 <code>runner</code>。</p>
+        <p>如果你希望使用自己的 Docker 主機或 Apple Silicon Mac，透過設定檔與 CLI 管理 runner 容量，便可考慮 Runscaler。主機佈建、runner 映像檔、憑證與更新仍由你負責。</p>
+      </header>
+      <nav class="guide-toc" aria-label="本頁內容"><a href="#docker">Docker runner</a><a href="#macos">macOS runner</a><a href="#compare">方案比較</a><a href="#faq">常見問題</a></nav>
+
+      <section id="docker">
+        <h2>在自己的主機自動擴縮 Docker runner</h2>
+        <p>如果你有 Linux Docker 主機，希望為每個可信任的 CI 工作提供全新的 runner 容器，可以選擇 Docker。Runscaler 透過 GitHub runner 規模集 API 長輪詢接收工作，依需求啟動容器，runner 容量也可縮至零。不需要 Kubernetes 叢集或對外開放 webhook 端點。</p>
+        <p>你需要 Docker API 1.49 以上（Docker Engine 28.1+）、相容的 runner 映像檔、GitHub App 或 PAT 憑證，以及足夠的主機資源。Runscaler 在設定的主機容量內擴縮 runner，不會額外佈建主機。</p>
+        <ol>
+          <li>在<a href="../configure/zh-TW.html">設定產生器選擇 Docker</a>，填入 GitHub 網址與規模集名稱。</li>
+          <li>依照 <a href="https://github.com/ysya/runscaler/blob/main/README.zh-TW.md#linux-system-service">Linux 快速開始</a>安裝 <code>runner</code>、儲存設定、在主機填入憑證，再安裝服務。</li>
+          <li>將規模集名稱填入工作流程的 <code>runs-on</code>。例如規模集命名為 <code>my-runners</code>：</li>
+        </ol>
+        <pre><code>jobs:
+  build:
+    runs-on: my-runners
+    steps:
+      - run: echo "Running on a disposable runner"</code></pre>
+        <p>請先閱讀<a href="https://github.com/ysya/runscaler/blob/main/docs/security.zh-TW.md">安全性與隔離</a>：Docker 預設模式共用主機 socket，工作可取得對該 daemon 等同 root 的控制權。選用每工作獨立的 DinD 可分開 Docker 狀態，但仍使用特權 sidecar 並共用主機核心。只執行可信任的程式碼，不要讓公開 fork 的 PR 使用這些 Docker runner。</p>
+      </section>
+
+      <section id="macos">
+        <h2>Apple Silicon 上用完即移除的 macOS runner</h2>
+        <p>需要每個工作使用全新 VM 的 Xcode 或其他 macOS 工作流程，可以選擇 Tart。Runscaler 會複製準備好的映像檔、啟動 VM、註冊 GitHub runner，並在工作結束後移除 VM。選用暖池可預先準備 VM。</p>
+        <p>主機必須是安裝 Tart 的 Apple Silicon Mac。請選擇相容的 macOS／Xcode 映像檔，並以已登入使用者的 LaunchAgent 執行管理程序。macOS 客體共用每台主機最多兩台執行中 VM 的限制。請為映像檔、複製的 VM 與暖池規劃 CPU、記憶體與磁碟容量。</p>
+        <p>Tart 也可在同一台 Apple Silicon 主機執行準備好的 arm64 Linux 客體。Linux 客體不占用 macOS VM 名額，但容量仍受主機資源限制；這不代表能在 Linux 主機使用 Tart 後端。</p>
+        <p>先完成 <a href="https://github.com/ysya/runscaler/blob/main/docs/deployment.zh-TW.md#tart-prerequisites-macos">Tart 先決條件</a>，再到<a href="../configure/zh-TW.html">設定產生器選擇 Tart</a>，依照 <a href="https://github.com/ysya/runscaler/blob/main/README.zh-TW.md#macos-user-service">macOS 快速開始</a>操作。請固定並維護映像檔與 GitHub runner 版本。</p>
+      </section>
+
+      <section id="compare">
+        <h2>Runscaler、ARC，還是手動管理 runner？</h2>
+        <p>依照你希望維運的基礎設施選擇。這是部署方式的比較，不是效能排名。</p>
+        <div class="comparison-scroll" role="region" aria-label="Runner 部署方式比較" tabindex="0">
+          <table class="comparison-table">
+            <caption>部署方式與生命週期管理責任</caption>
+            <thead><tr><th scope="col">考量</th><th scope="col">Runscaler</th><th scope="col">Actions Runner Controller（ARC）</th><th scope="col">手動管理 GitHub runner</th></tr></thead>
+            <tbody>
+              <tr><th scope="row">執行環境</th><td>自己的 Docker 主機，或安裝 Tart 的 Apple Silicon Mac</td><td>Kubernetes 叢集</td><td>自行安裝 runner 應用程式的機器</td></tr>
+              <tr><th scope="row">Runner 生命週期</th><td>為每個工作建立並移除容器或 VM</td><td>協調並擴縮 runner pod</td><td>自行安排啟動、擴縮與清理</td></tr>
+              <tr><th scope="row">維運方式</th><td>每台主機的 Go 執行檔、TOML 與 CLI 診斷</td><td>Kubernetes operator、Helm chart 與叢集資源</td><td>Runner 應用程式與自己的服務或腳本</td></tr>
+              <tr><th scope="row">適合情境</th><td>已有主機；需要 Docker 或 Tart；不想依賴 Kubernetes</td><td>團隊已在維運 Kubernetes</td><td>固定容量，或自行維護客製生命週期</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>GitHub 將 <a href="https://docs.github.com/en/actions/concepts/runners/actions-runner-controller">ARC 定義為 Kubernetes operator</a>，並建議已有 Kubernetes 基礎設施與相關經驗的組織使用。<a href="https://docs.github.com/en/actions/reference/runners/self-hosted-runners#autoscaling">自架 runner 參考文件</a>也介紹了用於客製自動擴縮工具的獨立規模集 client。Runscaler 使用官方 <a href="https://github.com/actions/scaleset">Go 規模集 client</a>，本身是獨立專案。</p>
+        <p>如果你需要完全不維護主機的代管 CI、自動佈建雲端機器、跨主機集中排程，或代管的多使用者網頁控制台，請評估其他方案。Runscaler 管理各台設定主機上的 runner；主機、映像檔與存取政策仍由你維運。</p>
+      </section>
+
+      <section id="faq">
+        <h2>常見問題</h2>
+        <h3>需要 Kubernetes 或公開 webhook 嗎？</h3>
+        <p>不需要。Runscaler 直接在主機上執行，透過對 GitHub 規模集 API 的對外 HTTPS 長輪詢接收工作。主機、runner 與 VM 仍需要連線至 GitHub，以及工作使用的其他服務。</p>
+        <h3>全新 runner 是否代表每個工作完全隔離？</h3>
+        <p>每個 runner 容器或 VM 只處理一個工作，但共用儲存空間與 Docker 存取會影響隔離。Host socket 模式讓工作控制主機 daemon；每工作獨立的 DinD 分開 daemon 狀態，但沒有分開主機核心。Tart 提供 VM 隔離邊界，網路存取、映像檔、憑證與明確共用的資源仍需適當政策。詳見<a href="https://github.com/ysya/runscaler/blob/main/docs/security.zh-TW.md">安全性指南</a>。</p>
+        <h3>一個程序可以管理多個 repository 或組織嗎？</h3>
+        <p>可以。在同一台主機設定多個規模集，主機支援時也能混用 Docker 與 Tart。它們共用管理程序的主機容量，並非叢集排程器。詳見<a href="https://github.com/ysya/runscaler/blob/main/docs/configuration.zh-TW.md">設定指南</a>。</p>
+        <h3>快取與磁碟空間如何處理？</h3>
+        <p>Docker 規模集可搭配支援的 runner 映像檔，選用主機本機的 Actions 快取接收器。明確共用的 volume 也能跨工作保留檔案。快取保留與磁碟清理需要設定；全新的 runner 不代表主機資料都會刪除。請閱讀<a href="https://github.com/ysya/runscaler/blob/main/docs/local-actions-cache.zh-TW.md">主機本機 Actions 快取</a>與<a href="https://github.com/ysya/runscaler/blob/main/docs/caching.zh-TW.md">快取管理</a>。</p>
+        <h3>Runscaler 免費嗎？升級相容性如何？</h3>
+        <p>Runscaler 採 MIT 授權。主機費用、GitHub 條款，以及 Tart 和 runner 映像檔的授權需另外考量。專案仍在 1.0 前，次版本可能變更或移除介面。升級前請閱讀<a href="https://github.com/ysya/runscaler/releases">發版說明</a>與<a href="https://github.com/ysya/runscaler/blob/main/README.zh-TW.md#upgrade-requirements">升級前準備</a>。</p>
+      </section>
+      <div class="guide-next"><p>準備好在自己的主機試用？</p><a class="button button-primary" href="../configure/zh-TW.html">產生設定檔 ↗</a></div>
+    </article>
+  </main>
+  <footer class="site-footer"><div class="section-shell footer-inner"><a class="brand" href="../zh-TW.html"><span class="brand-mark" aria-hidden="true">r<span>.</span></span><span>runscaler</span></a><p>在自己的主機管理自架 runner。</p><div><a href="https://github.com/ysya/runscaler">GitHub</a><a href="https://github.com/ysya/runscaler/blob/main/README.zh-TW.md#documentation">文件</a><a href="https://github.com/ysya/runscaler/blob/main/LICENSE">MIT 授權</a></div></div></footer>
+</body>
+</html>

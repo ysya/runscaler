@@ -3,12 +3,22 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Runscaler 在自己的主機上以 Docker 或 Tart 建立短生命週期的 GitHub Actions runner。選擇設定並開始使用。">
+  <meta name="description" content="Runscaler 以單一 Go 執行檔在自己的主機自動擴縮 GitHub Actions runner，支援 Docker 與 Apple Silicon 上的 Tart VM，不需要 Kubernetes。閱讀適用情境、選型比較與部署指南。">
   <meta name="theme-color" content="#0b171c">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'none'; base-uri 'none'; form-action 'none'">
   <link rel="icon" type="image/svg+xml" href="./favicon.svg">
-  <title>Runscaler — 工作來了，runner 就緒</title>
+  <title>Runscaler — 不需 Kubernetes 的 GitHub Actions runner 自動擴縮</title>
   <link rel="stylesheet" href="./style.css">
+  <link rel="canonical" href="https://runscaler.ysya.dev/zh-TW.html">
+  <link rel="alternate" hreflang="en" href="https://runscaler.ysya.dev/">
+  <link rel="alternate" hreflang="zh-Hant" href="https://runscaler.ysya.dev/zh-TW.html">
+  <link rel="alternate" hreflang="x-default" href="https://runscaler.ysya.dev/">
+  <link rel="describedby" type="text/plain" href="/llms.txt">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Runscaler">
+  <meta property="og:title" content="Runscaler — 不需 Kubernetes 的 GitHub Actions runner 自動擴縮">
+  <meta property="og:description" content="Runscaler 以單一 Go 執行檔在自己的主機自動擴縮 GitHub Actions runner，支援 Docker 與 Apple Silicon 上的 Tart VM，不需要 Kubernetes。閱讀適用情境、選型比較與部署指南。">
+  <meta property="og:url" content="https://runscaler.ysya.dev/zh-TW.html">
 </head>
 <body data-lang="zh-TW">
   <a class="skip-link" href="#main">跳至內容</a>
@@ -16,6 +26,7 @@
     <a class="brand" href="./" aria-label="Runscaler home"><span class="brand-mark" aria-hidden="true">r<span>.</span></span><span>runscaler</span></a>
     <nav class="site-nav" aria-label="主選單">
       <a href="#how">運作方式</a>
+      <a href="./guide/zh-TW.html">選型指南</a>
       <a href="./configure/zh-TW.html">設定產生器</a>
       <a href="https://github.com/ysya/runscaler/blob/main/README.zh-TW.md#documentation">文件 <span aria-hidden="true">↗</span></a>
     </nav>
@@ -29,11 +40,11 @@
     <section class="hero section-shell">
       <div class="hero-copy">
         <p class="eyebrow"><span class="eyebrow-dot"></span> 自架 GITHUB ACTIONS RUNNER</p>
-        <h1>工作來了，<em>runner 就緒。</em></h1>
-        <p class="hero-lede">一個程序在你的主機上依工作需求啟動 Docker 容器或 Tart VM。每個 runner 只執行一個工作，完成後便會移除。</p>
+        <h1>GitHub Actions runner，<em>不需要 Kubernetes。</em></h1>
+        <p class="hero-lede">Runscaler 以單一 Go 執行檔，在自己的主機依 GitHub Actions 工作需求啟動 Docker 容器或 Tart VM。每個 runner 只執行一個工作，完成後便會移除。</p>
         <div class="hero-actions">
           <a class="button button-primary" href="./configure/zh-TW.html">產生設定檔 <span aria-hidden="true">↗</span></a>
-          <a class="button button-text" href="https://github.com/ysya/runscaler">查看原始碼 <span aria-hidden="true">→</span></a>
+          <a class="button button-text" href="./guide/zh-TW.html">選擇適合的方案 <span aria-hidden="true">→</span></a>
         </div>
         <div class="hero-facts" aria-label="專案特點">
           <div><strong>0 → N</strong><span>依需求擴縮</span></div>

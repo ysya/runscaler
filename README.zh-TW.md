@@ -1,4 +1,4 @@
-# runner
+# Runscaler
 
 [![Release](https://img.shields.io/github/v/release/ysya/runscaler)](https://github.com/ysya/runscaler/releases)
 [![Go Version](https://img.shields.io/github/go-mod/go-version/ysya/runscaler)](https://go.dev)
@@ -9,7 +9,7 @@
 
 本文件為 [英文 README](README.md) 的繁體中文版本。更新指令、設定或操作說明時，請同步維護英文與繁體中文版本（包含 `docs/` 內的文件）；若內容有差異，以英文版為準。
 
-以 Docker 容器或 macOS 與 Linux VM 自動擴縮 GitHub Actions 自架 runner。採用 [actions/scaleset](https://github.com/actions/scaleset)。
+Runscaler 以 Docker 容器或 macOS 與 Linux VM 自動擴縮 GitHub Actions 自架 runner。採用 [actions/scaleset](https://github.com/actions/scaleset)。命令列執行檔名稱為 `runner`。
 
 runner 採用**短生命週期**模式 — 每個容器／VM 只處理一個工作，完成後便會移除。不需要 Kubernetes。
 
@@ -18,10 +18,23 @@ runner 映像檔與快取格式；修訂版本則以維持相容性為目標。�
 [發版說明](https://github.com/ysya/runscaler/releases)與[升級前準備](#upgrade-requirements)，
 並備份需要保留的設定與資料。
 
+<a id="when-to-choose-runscaler"></a>
+
+## 何時選擇 Runscaler
+
+- 你有 Docker 主機，希望依 GitHub Actions 工作需求自動建立用完即移除的 runner，並且不需要維運 Kubernetes。
+- 你有 Apple Silicon Mac，希望透過 Tart 為工作建立全新的 macOS 或 arm64 Linux VM。
+- 你希望每台主機透過一個 Go 執行檔、TOML 設定與 CLI 診斷管理多個規模集。
+
+主機、runner 映像檔、憑證與容量仍由你維護。短生命週期的 runner 不會消除 Docker
+socket 存取或明確共用儲存空間的風險。選用前請閱讀[選型指南](https://runscaler.ysya.dev/guide/zh-TW.html)，
+了解先決條件、與 ARC 及手動管理 runner 的比較，以及使用限制。
+
 <a id="table-of-contents"></a>
 
 ## 目錄
 
+- [何時選擇 Runscaler](#when-to-choose-runscaler)
 - [運作方式](#how-it-works)
 - [功能](#features)
 - [快速開始](#quick-start)
@@ -68,7 +81,7 @@ Go cache-v2 接收器。具備快取能力的 runner 與 BuildKit 容器透過
 ## 功能
 
 - **不需 Kubernetes** — 可直接在任何 Docker 主機或 Apple Silicon Mac 上執行
-- **短生命週期 runner** — 每個工作都使用全新的容器／VM，不會殘留前一個工作的狀態
+- **短生命週期 runner** — 每個工作都使用全新的容器／VM；明確共用的儲存空間與 Docker 存取仍會影響隔離
 - **自動擴縮** — 透過長輪詢依工作需求在 0 到 N 個 runner 之間擴縮（不需 cron，也沒有定期輪詢的延遲）
 - **每個工作獨立的 Docker-in-Docker** — 可選用私人、用完即丟的 daemon，預設仍維持共用主機 socket
 - **透過 Tart 執行 macOS 與 Linux VM** — 使用原生 Apple Virtualization.framework，搭配 APFS 寫入時複製（Copy-on-Write）複製機制

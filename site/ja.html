@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Runscaler は、Docker または Apple Silicon 上の Tart VM で GitHub Actions の一時的なランナーを自動スケーリングします。Go の実行ファイル 1 つで動作し、Kubernetes は不要です。構成の選び方と導入手順を紹介します。">
+  <meta name="theme-color" content="#0b171c">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'none'; base-uri 'none'; form-action 'none'">
+  <link rel="icon" type="image/svg+xml" href="./favicon.svg">
+  <title>Runscaler — Kubernetes 不要の GitHub Actions ランナー自動スケーリング</title>
+  <link rel="stylesheet" href="./style.css">
+  <link rel="canonical" href="https://runscaler.ysya.dev/ja.html">
+  <link rel="alternate" hreflang="en" href="https://runscaler.ysya.dev/">
+  <link rel="alternate" hreflang="zh-Hant" href="https://runscaler.ysya.dev/zh-TW.html">
+  <link rel="alternate" hreflang="ja" href="https://runscaler.ysya.dev/ja.html">
+  <link rel="alternate" hreflang="x-default" href="https://runscaler.ysya.dev/">
+  <link rel="describedby" type="text/plain" href="/llms.txt">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Runscaler">
+  <meta property="og:title" content="Runscaler — Kubernetes 不要の GitHub Actions ランナー自動スケーリング">
+  <meta property="og:description" content="Runscaler は、Docker または Apple Silicon 上の Tart VM で GitHub Actions の一時的なランナーを自動スケーリングします。Go の実行ファイル 1 つで動作し、Kubernetes は不要です。構成の選び方と導入手順を紹介します。">
+  <meta property="og:url" content="https://runscaler.ysya.dev/ja.html">
+</head>
+<body data-lang="ja">
+  <a class="skip-link" href="#main">本文へスキップ</a>
+  <header class="site-header">
+    <a class="brand" href="./ja.html" aria-label="Runscaler ホーム"><span class="brand-mark" aria-hidden="true">r<span>.</span></span><span>runscaler</span></a>
+    <nav class="site-nav" aria-label="メインナビゲーション">
+      <a href="#how">仕組み</a>
+      <a href="./guide/ja.html">構成ガイド</a>
+      <a href="./configure/ja.html">設定ツール</a>
+      <a href="https://github.com/ysya/runscaler#documentation">ドキュメント <span aria-hidden="true">↗</span></a>
+    </nav>
+    <div class="header-actions">
+      <a class="language-link" href="./" lang="en" hreflang="en">English</a>
+      <a class="language-link" href="./zh-TW.html" lang="zh-Hant" hreflang="zh-Hant">繁體中文</a>
+      <a class="header-github" href="https://github.com/ysya/runscaler" aria-label="GitHub 上の Runscaler">GitHub <span aria-hidden="true">↗</span></a>
+    </div>
+  </header>
+
+  <main id="main">
+    <section class="hero section-shell">
+      <div class="hero-copy">
+        <p class="eyebrow"><span class="eyebrow-dot"></span> セルフホスト型 GITHUB ACTIONS</p>
+        <h1>GitHub Actions ランナー。<em>Kubernetes は不要。</em></h1>
+        <p class="hero-lede">Runscaler は、自分のホスト上で GitHub Actions のジョブに応じて Docker コンテナや Tart VM を起動します。Go の実行ファイル 1 つで、ジョブの到着からランナーの削除まで管理します。</p>
+        <div class="hero-actions">
+          <a class="button button-primary" href="./configure/ja.html">設定ファイルを作成 <span aria-hidden="true">↗</span></a>
+          <a class="button button-text" href="./guide/ja.html">構成を選ぶ <span aria-hidden="true">→</span></a>
+        </div>
+        <div class="hero-facts" aria-label="プロジェクトの特長">
+          <div><strong>0 → N</strong><span>需要に応じてスケール</span></div>
+          <div><strong>1 job</strong><span>毎回新しいランナーで実行</span></div>
+          <div><strong>1 binary</strong><span>ホスト上で動作</span></div>
+        </div>
+      </div>
+      <div class="hero-visual" role="img" aria-label="GitHub Actions のジョブを管理プロセスが受け取り、一時的な Docker ランナーまたは Tart VM を起動し、完了後に削除する流れ">
+        <div class="visual-topline"><span class="terminal-dots" aria-hidden="true"><i></i><i></i><i></i></span><span>runscaler / ジョブの流れ</span><span class="signal"><i></i> 稼働中</span></div>
+        <div class="queue-card"><span class="node-icon">01</span><div><small>GITHUB ACTIONS</small><strong>ジョブがキューに到着</strong></div><span class="pulse-dot"></span></div>
+        <div class="flow-line"><span></span><i></i></div>
+        <div class="manager-card"><span class="manager-badge">r.</span><div><small>自分のホスト</small><strong>runscaler</strong><span>ジョブを受け取り、ランナーを起動</span></div></div>
+        <div class="split-line" aria-hidden="true"><span></span><span></span></div>
+        <div class="provider-cards"><div><small>LINUX</small><strong>Docker</strong><span>一時的なコンテナ</span></div><div><small>MACOS · LINUX</small><strong>Tart</strong><span>一時的な VM</span></div></div>
+        <div class="visual-footer"><span class="footer-indicator"></span> ジョブ完了 <span aria-hidden="true">→</span> ランナーを削除</div>
+      </div>
+    </section>
+
+    <section class="principles section-shell" id="how">
+      <div class="section-heading"><p class="eyebrow">仕組み</p><h2>キューに合わせて実行容量を調整。</h2><p>使い慣れたホストとワークフローはそのままに。Runscaler がランナーのライフサイクルを管理します。</p></div>
+      <div class="principle-grid">
+        <article class="principle"><span class="principle-number">01 / 待機</span><h3>ジョブが来たら起動</h3><p>GitHub のスケールセット API をロングポーリングし、割り当てられたジョブに応じてランナーを起動します。</p></article>
+        <article class="principle"><span class="principle-number">02 / 実行</span><h3>ホストに合った環境を選択</h3><p>Docker ホストではコンテナを、macOS や Linux のジョブには Tart VM を使用できます。</p></article>
+        <article class="principle"><span class="principle-number">03 / 回収</span><h3>ジョブ完了後にクリーンアップ</h3><p>各ランナーは 1 つのジョブを処理した後に削除されます。再起動時には残存リソースも整理します。</p></article>
+      </div>
+    </section>
+
+    <section class="configure-band" id="configure"><div class="section-shell configure-heading"><div><p class="eyebrow">はじめる</p><h2>ランナーの設定をまとめて作成。</h2><p>設定ツールでは、スケールセット、内蔵・外部 Actions キャッシュ、Docker と Tart のオプション、ディスクのクリーンアップ、診断を設定できます。生成した TOML をコピーし、ホスト上で検証してください。</p><a class="button button-primary" href="./configure/ja.html">設定ツールを開く ↗</a></div><span class="local-only">● 認証情報はホスト上で管理</span></div></section>
+  </main>
+
+  <footer class="site-footer"><div class="section-shell footer-inner"><a class="brand" href="./ja.html"><span class="brand-mark" aria-hidden="true">r<span>.</span></span><span>runscaler</span></a><p>自分のホストで、自分に合ったランナー運用を。</p><div><a href="https://github.com/ysya/runscaler">GitHub</a><a href="https://github.com/ysya/runscaler#documentation">ドキュメント</a><a href="https://github.com/ysya/runscaler/blob/main/LICENSE">MIT ライセンス</a></div></div></footer>
+</body>
+</html>

@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Kubernetes を使わない GitHub Actions ランナーの運用に Runscaler を選ぶには。Docker、Apple Silicon 上の macOS VM、ARC、手動管理のランナーを比較し、前提条件と制限を紹介します。">
+  <meta name="theme-color" content="#0b171c">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'none'; base-uri 'none'; form-action 'none'">
+  <link rel="icon" type="image/svg+xml" href="../favicon.svg">
+  <link rel="stylesheet" href="../style.css">
+  <title>Runscaler の構成ガイド — Kubernetes 不要の GitHub Actions ランナー</title>
+  <link rel="canonical" href="https://runscaler.ysya.dev/guide/ja.html">
+  <link rel="alternate" hreflang="en" href="https://runscaler.ysya.dev/guide/">
+  <link rel="alternate" hreflang="zh-Hant" href="https://runscaler.ysya.dev/guide/zh-TW.html">
+  <link rel="alternate" hreflang="ja" href="https://runscaler.ysya.dev/guide/ja.html">
+  <link rel="alternate" hreflang="x-default" href="https://runscaler.ysya.dev/guide/">
+  <link rel="describedby" type="text/plain" href="/llms.txt">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Runscaler">
+  <meta property="og:title" content="Runscaler の構成ガイド — Kubernetes 不要の GitHub Actions ランナー">
+  <meta property="og:description" content="Kubernetes を使わない GitHub Actions ランナーの運用に Runscaler を選ぶには。Docker、Apple Silicon 上の macOS VM、ARC、手動管理のランナーを比較し、前提条件と制限を紹介します。">
+  <meta property="og:url" content="https://runscaler.ysya.dev/guide/ja.html">
+</head>
+<body data-lang="ja">
+  <a class="skip-link" href="#main">本文へスキップ</a>
+  <header class="site-header">
+    <a class="brand" href="../ja.html" aria-label="Runscaler ホーム"><span class="brand-mark" aria-hidden="true">r<span>.</span></span><span>runscaler</span></a>
+    <nav class="site-nav" aria-label="メインナビゲーション"><a href="../ja.html">ホーム</a><a href="./ja.html" aria-current="page">構成ガイド</a><a href="../configure/ja.html">設定ツール</a></nav>
+    <div class="header-actions"><a class="language-link" href="./" lang="en" hreflang="en">English</a><a class="language-link" href="./zh-TW.html" lang="zh-Hant" hreflang="zh-Hant">繁體中文</a><a class="header-github" href="https://github.com/ysya/runscaler">GitHub ↗</a></div>
+  </header>
+  <main id="main" class="guide section-shell">
+    <article>
+      <header class="guide-intro">
+        <p class="eyebrow">構成ガイド</p>
+        <h1>GitHub Actions ランナーを、<em>Kubernetes なしで。</em></h1>
+        <p>Runscaler は、Go で実装されたセルフホスト型 GitHub Actions ランナーのオートスケーラーです。各ホストで動く 1 つの管理プロセスが、ジョブごとに一時的な Docker コンテナまたは Tart VM を起動し、完了後に削除します。CLI の実行ファイル名は <code>runner</code> です。</p>
+        <p>自分の Docker ホストや Apple Silicon Mac を使い、設定ファイルと CLI でランナーの実行容量を管理したい場合に適しています。ホストの用意、ランナーイメージ、認証情報、更新は利用者が管理します。</p>
+      </header>
+      <nav class="guide-toc" aria-label="このページの目次"><a href="#docker">Docker ランナー</a><a href="#macos">macOS ランナー</a><a href="#compare">方式の比較</a><a href="#faq">よくある質問</a></nav>
+
+      <section id="docker">
+        <h2>自分のホストで Docker ランナーを自動スケーリング</h2>
+        <p>Linux の Docker ホストを持ち、信頼できる CI ジョブごとに新しいランナーコンテナを使いたい場合は Docker を選びます。Runscaler は GitHub のランナースケールセット API をロングポーリングし、ジョブが届くとコンテナを起動します。ランナー数はゼロまで縮小でき、Kubernetes クラスターや外部から接続できる Webhook エンドポイントは不要です。</p>
+        <p>Docker API 1.49 以降（Docker Engine 28.1 以降）、互換性のあるランナーイメージ、GitHub App または PAT の認証情報、十分なホストリソースが必要です。Runscaler は設定されたホスト容量の範囲内でランナー数を調整します。ホストの追加作成は行いません。</p>
+        <ol>
+          <li><a href="../configure/ja.html">Docker の設定を作成</a>し、GitHub URL とスケールセット名を指定します。</li>
+          <li><a href="https://github.com/ysya/runscaler#linux-system-service">Linux のクイックスタート</a>に従って <code>runner</code> をインストールし、設定を保存します。認証情報はホスト上で追加してからサービスをインストールします。</li>
+          <li>ワークフローの <code>runs-on</code> にスケールセット名を指定します。名前を <code>my-runners</code> にした場合の例：</li>
+        </ol>
+        <pre><code>jobs:
+  build:
+    runs-on: my-runners
+    steps:
+      - run: echo "Running on a disposable runner"</code></pre>
+        <p><a href="https://github.com/ysya/runscaler/blob/main/docs/security.md">セキュリティと分離</a>を確認してください。既定の Docker モードではホストのソケットを共有するため、ジョブはそのデーモンに対して root 相当の制御権を持ちます。任意のジョブ単位 DinD は Docker の状態を分離しますが、特権サイドカーを使用し、ホストのカーネルを共有します。信頼できるコードを実行し、公開フォークからのプルリクエストにこれらの Docker ランナーを開放しないでください。</p>
+      </section>
+
+      <section id="macos">
+        <h2>Apple Silicon でジョブごとに新しい macOS ランナーを実行</h2>
+        <p>Xcode など、ジョブごとに新しい VM が必要な macOS ワークフローには Tart を使用します。Runscaler は用意したイメージを複製し、VM を起動して GitHub ランナーを登録します。ジョブ完了後には VM を削除します。任意のウォームプールで VM を事前に用意することもできます。</p>
+        <p>ホストには Tart をインストールした Apple Silicon Mac が必要です。互換性のある macOS/Xcode イメージを選び、ログイン中のユーザーの LaunchAgent として管理プロセスを実行します。macOS ゲストはホスト全体で同時に 2 台まで起動できます。イメージ、複製、待機 VM に必要な CPU、メモリ、ディスク容量を確保してください。</p>
+        <p>Tart は、同じ Apple Silicon ホスト上で、事前に準備した arm64 Linux ゲストイメージにも対応しています。Linux ゲストは macOS VM の起動枠を消費しませんが、実行容量はホストのリソースに依存します。Linux ホスト上で Tart バックエンドを実行できるという意味ではありません。</p>
+        <p>まず <a href="https://github.com/ysya/runscaler/blob/main/docs/deployment.md#tart-prerequisites-macos">Tart の前提条件</a>を確認し、<a href="../configure/ja.html">設定ツールで Tart を選択</a>して、<a href="https://github.com/ysya/runscaler#macos-user-service">macOS のクイックスタート</a>に従ってください。イメージと GitHub ランナーのバージョンを固定し、保守してください。</p>
+      </section>
+
+      <section id="compare">
+        <h2>Runscaler、ARC、それとも手動管理？</h2>
+        <p>運用したいインフラに合わせて選んでください。以下はデプロイ方式の違いを示すもので、性能の順位ではありません。</p>
+        <div class="comparison-scroll" role="region" aria-label="ランナーのデプロイ方式の比較" tabindex="0">
+          <table class="comparison-table">
+            <caption>デプロイとライフサイクル管理の責任範囲</caption>
+            <thead><tr><th scope="col">項目</th><th scope="col">Runscaler</th><th scope="col">Actions Runner Controller（ARC）</th><th scope="col">手動管理の GitHub ランナー</th></tr></thead>
+            <tbody>
+              <tr><th scope="row">実行環境</th><td>自分の Docker ホスト、または Tart を備えた Apple Silicon Mac</td><td>Kubernetes クラスター</td><td>ランナーアプリケーションをインストールしたマシン</td></tr>
+              <tr><th scope="row">ライフサイクル</th><td>ジョブごとにコンテナまたは VM を作成・削除</td><td>ランナー Pod を管理してスケーリング</td><td>起動、スケーリング、削除を自分で管理</td></tr>
+              <tr><th scope="row">運用対象</th><td>各ホストの Go 実行ファイルと TOML、CLI による診断</td><td>Kubernetes オペレーター、Helm チャート、クラスターリソース</td><td>ランナーアプリケーションと自分のサービスやスクリプト</td></tr>
+              <tr><th scope="row">適した用途</th><td>既存のホストで Docker や Tart を使用し、Kubernetes を必要としない環境</td><td>すでに Kubernetes を運用しているチーム</td><td>固定の実行容量、または独自のライフサイクル管理</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p>GitHub は <a href="https://docs.github.com/en/actions/concepts/runners/actions-runner-controller">ARC を Kubernetes オペレーターと説明</a>し、Kubernetes のインフラと運用経験を持つ組織に推奨しています。<a href="https://docs.github.com/en/actions/reference/runners/self-hosted-runners#autoscaling">セルフホストランナーのリファレンス</a>では、独自のオートスケーラーを作るための独立したスケールセットクライアントも紹介しています。Runscaler は公式の <a href="https://github.com/actions/scaleset">Go スケールセットクライアント</a>を使用する独立したプロジェクトです。</p>
+        <p>ホスト保守が不要なマネージド CI、クラウドマシンの自動作成、複数ホストにまたがる一元的なスケジューリング、マネージド型の複数ユーザー向け Web コンソールが必要な場合は、別の方式を検討してください。Runscaler は設定された各ホスト上のランナーを管理します。ホスト、イメージ、アクセス方針の運用は利用者が担当します。</p>
+      </section>
+
+      <section id="faq">
+        <h2>よくある質問</h2>
+        <h3>Kubernetes や公開 Webhook は必要ですか？</h3>
+        <p>不要です。Runscaler はホスト上で直接動作し、GitHub のスケールセット API への外向き HTTPS ロングポーリング接続でジョブを受け取ります。ホスト、ランナー、VM には、GitHub とジョブが使用するサービスへのネットワーク接続が必要です。</p>
+        <h3>新しいランナーなら、ジョブは完全に分離されますか？</h3>
+        <p>各ランナーコンテナまたは VM は 1 つのジョブを処理しますが、共有ストレージや Docker へのアクセスが分離に影響します。ホストソケットモードではジョブがホストのデーモンを制御できます。ジョブ単位 DinD はデーモンの状態を分離しますが、ホストのカーネルは共有します。Tart は VM の境界を提供しますが、ネットワーク、イメージ、認証情報、明示的な共有リソースには適切な方針が必要です。<a href="https://github.com/ysya/runscaler/blob/main/docs/security.md">セキュリティガイド</a>を確認してください。</p>
+        <h3>1 つのプロセスで複数のリポジトリや組織を管理できますか？</h3>
+        <p>はい。同じホスト上に複数のスケールセットを設定でき、ホストが対応していれば Docker と Tart を組み合わせることもできます。管理プロセスのホスト容量を共有しますが、クラスターのスケジューラーではありません。<a href="https://github.com/ysya/runscaler/blob/main/docs/configuration.md">設定ガイド</a>を確認してください。</p>
+        <h3>キャッシュとディスク使用量はどう管理しますか？</h3>
+        <p>Docker スケールセットでは、対応するランナーイメージを使い、ホスト内の Actions キャッシュ受信機能を有効にできます。明示的な共有ボリュームではジョブ間でファイルを保持できます。キャッシュの保持とディスクのクリーンアップは設定が必要です。新しいランナーを使ってもホスト上のすべてのデータが削除されるわけではありません。<a href="https://github.com/ysya/runscaler/blob/main/docs/local-actions-cache.md">ホスト内 Actions キャッシュ</a>と<a href="https://github.com/ysya/runscaler/blob/main/docs/caching.md">キャッシュガイド</a>を確認してください。</p>
+        <h3>無料ですか？ アップグレードの互換性は？</h3>
+        <p>Runscaler は MIT ライセンスです。ホストの費用、GitHub の利用条件、Tart とランナーイメージのライセンスは別途適用されます。バージョン 1.0 より前のため、マイナーリリースでもインターフェースを変更・削除する場合があります。更新前に<a href="https://github.com/ysya/runscaler/releases">リリースノート</a>と<a href="https://github.com/ysya/runscaler#upgrade-requirements">アップグレード要件</a>を確認してください。</p>
+      </section>
+      <div class="guide-next"><p>自分のホストで試してみませんか？</p><a class="button button-primary" href="../configure/ja.html">設定ファイルを作成 ↗</a></div>
+    </article>
+  </main>
+  <footer class="site-footer"><div class="section-shell footer-inner"><a class="brand" href="../ja.html"><span class="brand-mark" aria-hidden="true">r<span>.</span></span><span>runscaler</span></a><p>自分のホストで、自分に合ったランナー運用を。</p><div><a href="https://github.com/ysya/runscaler">GitHub</a><a href="https://github.com/ysya/runscaler#documentation">ドキュメント</a><a href="https://github.com/ysya/runscaler/blob/main/LICENSE">MIT ライセンス</a></div></div></footer>
+</body>
+</html>

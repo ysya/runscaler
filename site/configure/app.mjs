@@ -1,8 +1,8 @@
 import { groups } from './schema.mjs';
 import { generateFullConfig } from './config.mjs';
 
-const lang = document.body.dataset.lang === 'zh-TW' ? 'zh-TW' : 'en';
-const t = (en, zh) => lang === 'zh-TW' ? zh : en;
+const lang = ['zh-TW', 'ja'].includes(document.body.dataset.lang) ? document.body.dataset.lang : 'en';
+const t = (en, zh, ja) => lang === 'ja' ? ja : lang === 'zh-TW' ? zh : en;
 const defaults = fields => Object.fromEntries(fields.filter(field => field.value !== undefined).map(field => [field.key, field.value]));
 const newSet = () => ({ set: defaults(groups.set), docker: defaults(groups.docker), tart: defaults(groups.tart), retry: {} });
 const state = { global: defaults(groups.global), actionsCache: {}, disk: {}, diagnostics: {}, scaleSets: [newSet()] };
@@ -21,7 +21,7 @@ function element(tag, className, text) {
   return node;
 }
 
-const errorButton = element('button', 'error-jump', t('Go to field', '前往欄位'));
+const errorButton = element('button', 'error-jump', t('Go to field', '前往欄位', '該当する項目へ移動'));
 errorButton.type = 'button';
 errorButton.hidden = true;
 message.after(errorButton);
@@ -56,14 +56,14 @@ function renderField(field, group, index, values) {
   const wrapper = element('div', `tool-field${field.legacy ? ' legacy-field' : ''}`);
   wrapper.dataset.visible = field.visible || '';
   const id = `${group}-${index}-${field.key}`;
-  const label = element('label', '', lang === 'zh-TW' ? field.zh : field.en);
+  const label = element('label', '', t(field.en, field.zh, field.ja));
   label.htmlFor = id;
   wrapper.append(label);
   let input;
   if (field.type === 'bool' || field.type === 'select') {
     input = element('select');
-    const options = field.type === 'bool' ? [['', t('Use default', '使用預設值')], ['true', t('On', '開啟')], ['false', t('Off', '關閉')]] : [
-      ...(field.value === undefined ? [['', t('Use default', '使用預設值')]] : []),
+    const options = field.type === 'bool' ? [['', t('Use default', '使用預設值', '既定値を使用')], ['true', t('On', '開啟', '有効')], ['false', t('Off', '關閉', '無効')]] : [
+      ...(field.value === undefined ? [['', t('Use default', '使用預設值', '既定値を使用')]] : []),
       ...field.choices.map(choice => [choice, choice]),
     ];
     for (const [value, title] of options) {
@@ -90,8 +90,8 @@ function renderField(field, group, index, values) {
   input.value = values[field.key] ?? '';
   if (field.placeholder) input.placeholder = field.placeholder;
   wrapper.append(input);
-  if (field.helpEn || field.helpZh) wrapper.append(element('p', 'field-help', t(field.helpEn, field.helpZh)));
-  if (field.legacy) wrapper.append(element('p', 'legacy-note', t('Sunset: supported for existing configs; prefer workflow Actions cache for new deployments.', '已淘汰：僅為現有設定保留；新部署建議使用工作流程 Actions 快取。')));
+  if (field.helpEn || field.helpZh) wrapper.append(element('p', 'field-help', t(field.helpEn, field.helpZh, field.helpJa)));
+  if (field.legacy) wrapper.append(element('p', 'legacy-note', t('Sunset: supported for existing configs; prefer workflow Actions cache for new deployments.', '已淘汰：僅為現有設定保留；新部署建議使用工作流程 Actions 快取。', '廃止予定：既存の設定向けに対応しています。新しい環境ではワークフローの Actions キャッシュを推奨します。')));
   if (field.key === 'log-file') {
     const disable = element('label', 'inline-check');
     const check = element('input');
@@ -100,7 +100,7 @@ function renderField(field, group, index, values) {
     check.dataset.index = String(index);
     check.dataset.key = 'log-file-disabled';
     check.checked = values['log-file-disabled'] === true;
-    disable.append(check, document.createTextNode(t(' Disable file logging', ' 停用檔案紀錄')));
+    disable.append(check, document.createTextNode(t(' Disable file logging', ' 停用檔案紀錄', ' ファイルへのログ出力を無効化')));
     wrapper.append(disable);
   }
   return wrapper;
@@ -127,10 +127,10 @@ function renderSets() {
   state.scaleSets.forEach((scale, index) => {
     const card = element('article', 'scale-card');
     const heading = element('div', 'scale-heading');
-    const title = element('h3', '', `${t('Scale set', '規模集')} ${index + 1}`);
+    const title = element('h3', '', `${t('Scale set', '規模集', 'スケールセット')} ${index + 1}`);
     heading.append(title);
     if (state.scaleSets.length > 1) {
-      const remove = element('button', 'remove-button', t('Remove', '移除'));
+      const remove = element('button', 'remove-button', t('Remove', '移除', '削除'));
       remove.type = 'button';
       remove.dataset.remove = String(index);
       heading.append(remove);
@@ -139,11 +139,11 @@ function renderSets() {
     const basics = element('div', 'field-grid');
     appendFields(basics, groups.set, 'set', index, scale.set);
     card.append(basics);
-    const docker = details(t('Docker options and cache', 'Docker 選項與快取'), t('Includes external and native Actions cache, Docker cleanup, and sunset cache volumes.', '包含外部及內建 Actions 快取、Docker 清理與已淘汰的 cache volume。'), 'docker', index, scale.docker, groups.docker, oldOpen[index * 3] ?? false);
+    const docker = details(t('Docker options and cache', 'Docker 選項與快取', 'Docker のオプションとキャッシュ'), t('Includes external and native Actions cache, Docker cleanup, and sunset cache volumes.', '包含外部及內建 Actions 快取、Docker 清理與已淘汰的 cache volume。', '外部・内蔵 Actions キャッシュ、Docker のクリーンアップ、廃止予定のキャッシュボリュームを設定します。'), 'docker', index, scale.docker, groups.docker, oldOpen[index * 3] ?? false);
     docker.dataset.provider = 'docker';
-    const tart = details(t('Tart options and cache', 'Tart 選項與快取'), t('VM resources, network, warm pool, and OCI/IPSW cache retention.', 'VM 資源、網路、預熱池與 OCI/IPSW 快取保留策略。'), 'tart', index, scale.tart, groups.tart, oldOpen[index * 3 + 1] ?? false);
+    const tart = details(t('Tart options and cache', 'Tart 選項與快取', 'Tart のオプションとキャッシュ'), t('VM resources, network, warm pool, and OCI/IPSW cache retention.', 'VM 資源、網路、預熱池與 OCI/IPSW 快取保留策略。', 'VM のリソース、ネットワーク、ウォームプール、OCI/IPSW キャッシュの保持を設定します。'), 'tart', index, scale.tart, groups.tart, oldOpen[index * 3 + 1] ?? false);
     tart.dataset.provider = 'tart';
-    card.append(docker, tart, details(t('Retry behavior', '重試設定'), '', 'retry', index, scale.retry, groups.retry, oldOpen[index * 3 + 2] ?? false));
+    card.append(docker, tart, details(t('Retry behavior', '重試設定', '再試行の設定'), '', 'retry', index, scale.retry, groups.retry, oldOpen[index * 3 + 2] ?? false));
     scaleList.append(card);
   });
   updateVisibility();
@@ -181,15 +181,15 @@ function renderPreview() {
   const incomplete = state.scaleSets.some(scale => !scale.set.url?.trim() || !scale.set.name?.trim());
   try {
     const config = generateFullConfig(incomplete ? exampleState() : state, lang);
-    output.textContent = incomplete ? `${t('# Example only — enter a GitHub URL and scale-set name to copy.', '# 範例設定；填寫 GitHub 網址與規模集名稱後才能複製。')}\n${config}` : config;
+    output.textContent = incomplete ? `${t('# Example only — enter a GitHub URL and scale-set name to copy.', '# 範例設定；填寫 GitHub 網址與規模集名稱後才能複製。', '# 設定例です。GitHub URL とスケールセット名を入力するとコピーできます。')}\n${config}` : config;
     currentConfig = incomplete ? '' : config;
     copyButton.disabled = incomplete;
-    message.textContent = incomplete ? t('Example preview. Complete the required fields to copy your config.', '目前顯示範例；填寫必填欄位後即可複製設定檔。') : t('Ready to copy. Add credentials only on your host.', '可以複製；請只在主機上填入憑證。');
+    message.textContent = incomplete ? t('Example preview. Complete the required fields to copy your config.', '目前顯示範例；填寫必填欄位後即可複製設定檔。', '設定例を表示しています。必須項目を入力すると設定をコピーできます。') : t('Ready to copy. Add credentials only on your host.', '可以複製；請只在主機上填入憑證。', 'コピーできます。認証情報はホスト上でのみ追加してください。');
     message.classList.toggle('is-error', false);
   } catch (error) {
     currentConfig = '';
     copyButton.disabled = true;
-    output.textContent = t('# Fix the form error above to generate config.toml.', '# 請修正上方的欄位錯誤以產生 config.toml。');
+    output.textContent = t('# Fix the form error above to generate config.toml.', '# 請修正上方的欄位錯誤以產生 config.toml。', '# 上の入力エラーを修正すると config.toml を生成できます。');
     message.textContent = error.message;
     message.classList.toggle('is-error', true);
     showFieldError(error);
@@ -243,14 +243,14 @@ copyButton.addEventListener('click', async () => {
   if (!currentConfig) return;
   try {
     await navigator.clipboard.writeText(currentConfig);
-    copyStatus.textContent = t('TOML copied.', '已複製 TOML。');
+    copyStatus.textContent = t('TOML copied.', '已複製 TOML。', 'TOML をコピーしました。');
   } catch {
     const range = document.createRange();
     range.selectNodeContents(output);
     const selection = window.getSelection();
     selection.removeAllRanges();
     selection.addRange(range);
-    copyStatus.textContent = t('Select the preview text and copy it manually.', '請選取預覽文字並手動複製。');
+    copyStatus.textContent = t('Select the preview text and copy it manually.', '請選取預覽文字並手動複製。', 'プレビューのテキストを選択し、手動でコピーしてください。');
   }
 });
 errorButton.addEventListener('click', () => {

@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Docker や Tart 向けの Runscaler config.toml を作成できます。Actions キャッシュ、クリーンアップ、複数のスケールセットにも対応しています。">
+  <meta name="theme-color" content="#0b171c">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'none'; base-uri 'none'; form-action 'none'">
+  <link rel="icon" type="image/svg+xml" href="../favicon.svg">
+  <link rel="stylesheet" href="../style.css">
+  <link rel="stylesheet" href="./style.css">
+  <script type="module" src="./app.mjs"></script>
+  <title>設定ツール — Runscaler</title>
+  <link rel="canonical" href="https://runscaler.ysya.dev/configure/ja.html">
+  <link rel="alternate" hreflang="en" href="https://runscaler.ysya.dev/configure/">
+  <link rel="alternate" hreflang="zh-Hant" href="https://runscaler.ysya.dev/configure/zh-TW.html">
+  <link rel="alternate" hreflang="ja" href="https://runscaler.ysya.dev/configure/ja.html">
+  <link rel="alternate" hreflang="x-default" href="https://runscaler.ysya.dev/configure/">
+  <link rel="describedby" type="text/plain" href="/llms.txt">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Runscaler">
+  <meta property="og:title" content="設定ツール — Runscaler">
+  <meta property="og:description" content="Docker や Tart 向けの Runscaler config.toml を作成できます。Actions キャッシュ、クリーンアップ、複数のスケールセットにも対応しています。">
+  <meta property="og:url" content="https://runscaler.ysya.dev/configure/ja.html">
+</head>
+<body data-lang="ja">
+  <a class="skip-link" href="#main">本文へスキップ</a>
+  <header class="site-header">
+    <a class="brand" href="../ja.html"><span class="brand-mark" aria-hidden="true">r<span>.</span></span><span>runscaler</span></a>
+    <nav class="site-nav" aria-label="メインナビゲーション"><a href="../ja.html">ホーム</a><a href="../guide/ja.html">構成ガイド</a><a href="#builder">設定ツール</a><a href="https://github.com/ysya/runscaler/blob/main/docs/configuration.md">設定ガイド ↗</a></nav>
+    <div class="header-actions"><a class="language-link" href="./" lang="en" hreflang="en">English</a><a class="language-link" href="./zh-TW.html" lang="zh-Hant" hreflang="zh-Hant">繁體中文</a><a class="header-github" href="https://github.com/ysya/runscaler">GitHub ↗</a></div>
+  </header>
+  <main id="main">
+    <div class="tool-intro section-shell">
+      <p class="eyebrow">設定ツール</p><h1><em>config.toml</em> を作成。</h1>
+      <p>スケールセット、キャッシュ、ホストの設定を選びます。生成した TOML をコピーし、自分のホスト上で認証情報を追加して検証してください。</p>
+      <span class="privacy-pill">● 認証情報の入力・送信は不要</span><a class="mobile-start" href="#scale-sets">編集をはじめる ↓</a>
+    </div>
+    <div class="tool-layout section-shell" id="builder">
+      <div class="editor-column">
+        <nav class="tool-sections" aria-label="設定セクション"><a href="#scale-sets">スケールセット</a><a href="#native-cache">Actions キャッシュ</a><a href="#disk-settings">ディスク監視</a><a href="#global-settings">プロセス設定</a></nav>
+        <form id="builder-form" novalidate>
+          <section class="tool-card" id="scale-sets">
+            <div class="card-heading"><div><p class="eyebrow">01 / ランナー</p><h2>スケールセット</h2><p>各スケールセットは GitHub 組織またはリポジトリに接続します。</p></div><button type="button" class="add-button" id="add-set">+ スケールセットを追加</button></div>
+            <div id="scale-list"></div>
+          </section>
+          <section class="tool-card" id="native-cache">
+            <div class="card-heading"><div><p class="eyebrow">02 / キャッシュ</p><h2>内蔵 Actions キャッシュ</h2><p>対応するランナーイメージ向けの任意のプライベートキャッシュ受信機能です。Docker スケールセットでは外部エンドポイントも使用できます。</p></div></div>
+            <div id="native-cache-fields" class="field-grid"></div>
+            <p class="section-warning">標準のランナーイメージはキャッシュに対応していません。受信機能を有効にする前に、対応するイメージとプライベートアドレスを用意してください。<a href="https://github.com/ysya/runscaler/blob/main/docs/local-actions-cache.md">導入ガイド ↗</a></p>
+          </section>
+          <section class="tool-card" id="disk-settings">
+            <div class="card-heading"><div><p class="eyebrow">03 / ストレージ</p><h2>ディスク監視</h2><p>空き容量が不足するとホスト全体をクリーンアップします。レベル 4 では旧形式のキャッシュボリュームを空にする場合があります。</p></div></div>
+            <div id="disk-fields" class="field-grid"></div>
+          </section>
+          <section class="tool-card" id="global-settings">
+            <div class="card-heading"><div><p class="eyebrow">04 / プロセス</p><h2>グローバル設定</h2><p>ログ、ヘルスチェック、同時実行数、診断はプロセス全体に適用されます。</p></div></div>
+            <div id="global-fields" class="field-grid"></div>
+            <details><summary>診断</summary><div id="diagnostics-fields" class="field-grid"></div></details>
+          </section>
+        </form>
+      </div>
+      <aside class="output-panel tool-output">
+        <div class="output-header"><div><span class="output-kicker">生成した設定</span><h3>config.toml</h3></div><span class="output-badge">TOML</span></div>
+        <p id="form-message" class="form-message" role="status" aria-live="polite"></p>
+        <pre class="code-window"><code id="config-output"></code></pre>
+        <button id="copy-config" class="button button-primary copy-button" type="button" disabled>TOML をコピー ↗</button>
+        <p id="copy-status" class="copy-status" role="status" aria-live="polite"></p>
+        <div class="output-note"><strong>ホスト上で仕上げる</strong><p>ファイルを保存し、ホスト上で PAT を追加するか、GitHub App の秘密鍵を指定したパスに配置してから、<code>runner validate</code> を実行してください。ファイルの権限は <code>0600</code> に設定します。通常の保存先は Linux では <code>/etc/runner/config.toml</code>、macOS のユーザーサービスでは <code>~/.config/runner/config.toml</code> です。</p><p>Docker または Tart の <a href="https://github.com/ysya/runscaler/blob/main/docs/deployment.md">デプロイガイド ↗</a> に従ってください。</p></div>
+      </aside>
+    </div>
+  </main>
+  <footer class="site-footer"><div class="section-shell footer-inner"><a class="brand" href="../ja.html"><span class="brand-mark" aria-hidden="true">r<span>.</span></span><span>runscaler</span></a><p>自分のホストで、自分に合ったランナー運用を。</p><div><a href="https://github.com/ysya/runscaler">GitHub</a><a href="https://github.com/ysya/runscaler/blob/main/docs/configuration.md">ドキュメント</a></div></div></footer>
+</body>
+</html>

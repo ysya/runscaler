@@ -70,10 +70,13 @@ pages = {}
 for filename, html_lang, body_lang, required_ids, scripts, styles in (
     ("index.html", "en", "en", {"configure", "how"}, [], ["./style.css"]),
     ("zh-TW.html", "zh-Hant", "zh-TW", {"configure", "how"}, [], ["./style.css"]),
+    ("ja.html", "ja", "ja", {"configure", "how"}, [], ["./style.css"]),
     ("configure/index.html", "en", "en", {"builder-form", "scale-sets", "scale-list", "native-cache-fields", "disk-fields", "global-fields", "config-output", "copy-config", "form-message", "copy-status"}, [{"type": "module", "src": "./app.mjs"}], ["../style.css", "./style.css"]),
     ("configure/zh-TW.html", "zh-Hant", "zh-TW", {"builder-form", "scale-sets", "scale-list", "native-cache-fields", "disk-fields", "global-fields", "config-output", "copy-config", "form-message", "copy-status"}, [{"type": "module", "src": "./app.mjs"}], ["../style.css", "./style.css"]),
     ("guide/index.html", "en", "en", {"docker", "macos", "compare", "faq"}, [], ["../style.css"]),
     ("guide/zh-TW.html", "zh-Hant", "zh-TW", {"docker", "macos", "compare", "faq"}, [], ["../style.css"]),
+    ("guide/ja.html", "ja", "ja", {"docker", "macos", "compare", "faq"}, [], ["../style.css"]),
+    ("configure/ja.html", "ja", "ja", {"builder-form", "scale-sets", "scale-list", "native-cache-fields", "disk-fields", "global-fields", "config-output", "copy-config", "form-message", "copy-status"}, [{"type": "module", "src": "./app.mjs"}], ["../style.css", "./style.css"]),
 ):
     source = (SITE / filename).read_text()
     page = Page()
@@ -99,11 +102,17 @@ for filename, html_lang, body_lang, required_ids, scripts, styles in (
     prefix = directory + "/" if directory else ""
     english = public_url(prefix + "index.html")
     chinese = public_url(prefix + "zh-TW.html")
+    japanese = public_url(prefix + "ja.html")
     alternates = [link for link in page.links if link.get("rel") == "alternate" and link.get("hreflang")]
-    assert len(alternates) == 3, (filename, "language alternatives")
+    assert len(alternates) == 4, (filename, "language alternatives")
     assert {link["hreflang"]: link["href"] for link in alternates} == {
-        "en": english, "zh-Hant": chinese, "x-default": english,
+        "en": english, "zh-Hant": chinese, "ja": japanese, "x-default": english,
     }, (filename, "language alternatives")
+    switches = [link for link in page.links if "language-link" in link.get("class", "").split()]
+    assert len(switches) == 2, (filename, "language switches")
+    assert {link.get("hreflang"): urljoin(public_url(filename), link["href"]) for link in switches} == {
+        lang: url for lang, url in {"en": english, "zh-Hant": chinese, "ja": japanese}.items() if lang != html_lang
+    }, (filename, "language switches must preserve the current section")
     assert page.title.strip() and page.meta.get("description"), (filename, "title/description")
     assert page.meta.get("og:title") == page.title, (filename, "Open Graph title")
     assert page.meta.get("og:description") == page.meta["description"], (filename, "Open Graph description")

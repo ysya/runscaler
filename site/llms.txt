@@ -10,6 +10,10 @@ Runscaler is pre-1.0. Minor releases may change or remove interfaces. Main-branc
 
 ## Choosing a setup
 
+- [Japanese website](https://runscaler.ysya.dev/ja.html): Project overview in Japanese.
+- [Japanese selection guide](https://runscaler.ysya.dev/guide/ja.html): Use cases, prerequisites, comparison, limitations, and FAQ in Japanese.
+- [Japanese config builder](https://runscaler.ysya.dev/configure/ja.html): Browser-local TOML generation with Japanese field labels and validation messages.
+
 - [Selection guide](https://runscaler.ysya.dev/guide/): Docker and macOS use cases, prerequisites, comparison with ARC and manually managed runners, limitations, and FAQ.
 - [Traditional Chinese selection guide](https://runscaler.ysya.dev/guide/zh-TW.html): The same selection information in Traditional Chinese.
 - [README](https://raw.githubusercontent.com/ysya/runscaler/main/README.md): Quick start, workflow routing, commands, and upgrade requirements.

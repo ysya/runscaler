@@ -10,6 +10,7 @@ import (
 
 	cerrdefs "github.com/containerd/errdefs"
 	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/mount"
 	"github.com/moby/moby/api/types/volume"
 	dockerclient "github.com/moby/moby/client"
 
@@ -17,11 +18,13 @@ import (
 )
 
 // fakeContainer is a minimal fixture for driving orphanFake.ContainerList in
-// tests: just the fields findOrphanContainers' matching logic reads.
+// tests: just the fields orphan discovery and lifecycle cleanup read.
 type fakeContainer struct {
-	id     string
-	names  []string
-	labels map[string]string
+	id          string
+	names       []string
+	labels      map[string]string
+	networkMode string
+	mounts      []container.MountPoint
 }
 
 func TestUniqueSortedStringsPreservesEmptyOutputAndInput(t *testing.T) {
@@ -70,7 +73,8 @@ type orphanFake struct {
 func (f *orphanFake) ContainerList(_ context.Context, _ dockerclient.ContainerListOptions) (dockerclient.ContainerListResult, error) {
 	items := make([]container.Summary, len(f.containers))
 	for i, c := range f.containers {
-		items[i] = container.Summary{ID: c.id, Names: c.names, Labels: c.labels}
+		items[i] = container.Summary{ID: c.id, Names: c.names, Labels: c.labels, Mounts: c.mounts}
+		items[i].HostConfig.NetworkMode = c.networkMode
 	}
 	return dockerclient.ContainerListResult{Items: items}, nil
 }
@@ -154,6 +158,54 @@ func TestRemoveOrphanContainers_NeverTouchesVolumes(t *testing.T) {
 	if len(md.volumesRemoved) != 0 {
 		t.Errorf("reconciliation removed volumes %v — the shared volume carries "+
 			"handoff data between jobs of one workflow run", md.volumesRemoved)
+	}
+}
+
+func TestRemoveOrphanContainers_CleansOwnedChildren(t *testing.T) {
+	md := &orphanFake{containers: []fakeContainer{
+		{id: "a1", names: []string{"/runner-one"}, labels: map[string]string{"managed-by": "runner"}},
+		{id: "network-child", networkMode: "container:runner-one"},
+		{id: "label-child", labels: map[string]string{"runscaler.runner-id": "a1"}},
+		{id: "unrelated", networkMode: "runners"},
+	}}
+	removed := removeOrphanContainers(context.Background(), md,
+		[]OrphanContainer{{ID: "a1", Name: "runner-one"}}, slog.New(slog.DiscardHandler))
+	if removed != 1 || !slices.Equal(md.removed, []string{"network-child", "label-child", "a1"}) {
+		t.Fatalf("removed runners = %d, containers = %v", removed, md.removed)
+	}
+}
+
+func TestRemoveOrphanContainers_ContinuesAfterChildFailure(t *testing.T) {
+	md := &orphanFake{removeErrOn: "failed-child", containers: []fakeContainer{
+		{id: "a1", names: []string{"/runner-one"}, labels: map[string]string{"managed-by": "runner"}},
+		{id: "failed-child", networkMode: "container:runner-one"},
+		{id: "b2", labels: map[string]string{"managed-by": "runner"}},
+	}}
+	removed := removeOrphanContainers(context.Background(), md,
+		[]OrphanContainer{{ID: "a1"}, {ID: "b2"}}, slog.New(slog.DiscardHandler))
+	if removed != 1 || !slices.Equal(md.removed, []string{"failed-child", "b2"}) {
+		t.Fatalf("removed runners = %d, containers = %v; want failed runner retained and other runner removed", removed, md.removed)
+	}
+}
+
+func TestRemoveOrphanContainers_CleansOwnedVolumes(t *testing.T) {
+	shared := container.MountPoint{Type: mount.TypeVolume, Name: "runner-shared"}
+	md := &orphanFake{
+		containers: []fakeContainer{
+			{id: "a1", names: []string{"/runner-one"}, mounts: []container.MountPoint{shared}},
+			{id: "builder", names: []string{"/buildx_buildkit_orphan0"}, networkMode: "container:runner-one", mounts: []container.MountPoint{
+				{Type: mount.TypeVolume, Name: "buildx_buildkit_orphan0_state"}, shared,
+			}},
+		},
+		cleanupVolumes: []volume.Volume{
+			{Name: "temporary", Labels: map[string]string{"runscaler.runner-id": "a1"}},
+			{Name: "runner-shared", Labels: map[string]string{"runscaler.runner-id": "a1"}},
+		},
+	}
+	removed := removeOrphanContainers(context.Background(), md,
+		[]OrphanContainer{{ID: "a1", Name: "runner-one"}}, slog.New(slog.DiscardHandler))
+	if removed != 1 || !slices.Equal(md.volumesRemoved, []string{"buildx_buildkit_orphan0_state", "temporary"}) {
+		t.Fatalf("removed runners = %d, volumes = %v", removed, md.volumesRemoved)
 	}
 }
 

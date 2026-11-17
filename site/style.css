@@ -263,3 +263,8 @@ h2 { margin: 0; font-size: clamp(36px, 4vw, 52px); line-height: 1.12; letter-spa
   html { scroll-behavior: auto; }
   .button, .choice-content { transition: none; }
 }
+
+html:lang(ja) h1 { line-height: 1.2; letter-spacing: -.035em; word-break: keep-all; overflow-wrap: anywhere; }
+html:lang(ja) .hero { position: relative; }
+html:lang(ja) .hero h1 { font-size: clamp(38px, 4.2vw, 60px); }
+html:lang(ja) .hero::before, html:lang(ja) .hero::after { inset: 0 auto 0 50%; width: 100vw; height: auto; transform: translateX(-50%); }

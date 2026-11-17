@@ -11,6 +11,42 @@ const baseSet = () => ({
 });
 const base = () => ({ global: { 'log-level': 'info', 'log-format': 'text', 'health-port': '8080', 'health-address': '127.0.0.1' }, actionsCache: {}, disk: {}, diagnostics: {}, scaleSets: [baseSet()] });
 
+test('Japanese form preserves TOML keys and user-entered Unicode', () => {
+  const state = base();
+  state.scaleSets[0].set.name = '日本語-runner';
+  assert.equal(generateFullConfig(state, 'ja'), generateFullConfig(state, 'en'));
+  assert.match(generateFullConfig(state, 'ja'), /name = "日本語-runner"/u);
+});
+
+for (const [group, key, value] of [
+  ['global', 'concurrent', '-1'],
+  ['global', 'dry-run', 'invalid'],
+  ['global', 'log-level', 'invalid'],
+  ['global', 'drain-timeout', 'tomorrow'],
+  ['set', 'url', 'http://github.com/example-org'],
+  ['set', 'name', 'bad\nname'],
+  ['set', 'name', '\ud800'],
+  ['docker', 'cache-volumes', 'cache:relative/path'],
+  ['docker', 'cache', 'cache'],
+  ['docker', 'actions-cache-url', 'not-a-url'],
+  ['retry', 'initial', '-1s'],
+  ['tart', 'dns', 'not-an-ip'],
+  ['disk', 'target-free', '1%'],
+]) {
+  test(`Japanese validation localizes ${group}.${key} and keeps the field target`, () => {
+    const state = base();
+    const values = ['set', 'docker', 'retry', 'tart'].includes(group) ? state.scaleSets[0][group] : state[group];
+    values[key] = value;
+    if (group === 'tart') state.scaleSets[0].set.provider = 'tart';
+    assert.throws(() => generateFullConfig(state, 'ja'), error => {
+      assert.equal(error.field?.group, group);
+      assert.equal(error.field?.key, key);
+      assert.match(error.message, /[ぁ-んァ-ン]/u);
+      return true;
+    });
+  });
+}
+
 test('schema defaults omit optional unreleased settings', () => {
   const defaults = fields => Object.fromEntries(fields.filter(field => field.value !== undefined).map(field => [field.key, field.value]));
   const state = base();

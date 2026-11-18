@@ -92,12 +92,15 @@
         <p>Yes. Configure multiple scale sets on the same host, including Docker and Tart where the host supports them. They share the manager's host capacity; this is not a cluster scheduler. See <a href="https://github.com/ysya/runscaler/blob/main/docs/configuration.md">Configuration</a>.</p>
         <h3>What about caching and disk usage?</h3>
         <p>Docker scale sets can opt into a host-local Actions cache receiver with supported runner images. Explicit shared volumes can retain files across jobs. Cache retention and disk cleanup require configuration; fresh runners do not imply that all host data is deleted. Read <a href="https://github.com/ysya/runscaler/blob/main/docs/local-actions-cache.md">Host-local Actions cache</a> and <a href="https://github.com/ysya/runscaler/blob/main/docs/caching.md">Caching</a>.</p>
-        <h3>Is Runscaler free, and how stable are upgrades?</h3>
-        <p>Runscaler is MIT-licensed. Host costs, GitHub terms, and the licenses of Tart and runner images are separate. The project is pre-1.0: minor releases may change or remove interfaces. Review <a href="https://github.com/ysya/runscaler/releases">release notes</a> and <a href="https://github.com/ysya/runscaler#upgrade-requirements">upgrade requirements</a> before upgrading.</p>
+        <h3>Is Runscaler free to use?</h3>
+        <p>The <a href="https://github.com/ysya/runscaler/blob/main/LICENSE">Runscaler Community License 1.0</a> allows free personal, non-commercial, and internal business use, including CI/CD for your own products. Selling Runscaler or using it in a paid offering for customers, such as hosted runners or CI/CD, requires prior written permission from the maintainer. This includes backend-only use and offerings with no separate fee for Runscaler. Versions released under the <a href="https://github.com/ysya/runscaler/blob/v0.23.0/LICENSE">MIT License</a>, including v0.23.0, keep that license.</p>
+        <p>Host costs, GitHub terms, and the licenses of Tart and runner images are separate.</p>
+        <h3>How stable are upgrades?</h3>
+        <p>The project is pre-1.0: minor releases may change or remove interfaces. Review <a href="https://github.com/ysya/runscaler/releases">release notes</a> and <a href="https://github.com/ysya/runscaler#upgrade-requirements">upgrade requirements</a> before upgrading.</p>
       </section>
       <div class="guide-next"><p>Ready to try it on your host?</p><a class="button button-primary" href="../configure/">Build your config ↗</a></div>
     </article>
   </main>
-  <footer class="site-footer"><div class="section-shell footer-inner"><a class="brand" href="../"><span class="brand-mark" aria-hidden="true">r<span>.</span></span><span>runscaler</span></a><p>Self-hosted runners, on your terms.</p><div><a href="https://github.com/ysya/runscaler">GitHub</a><a href="https://github.com/ysya/runscaler#documentation">Documentation</a><a href="https://github.com/ysya/runscaler/blob/main/LICENSE">MIT License</a></div></div></footer>
+  <footer class="site-footer"><div class="section-shell footer-inner"><a class="brand" href="../"><span class="brand-mark" aria-hidden="true">r<span>.</span></span><span>runscaler</span></a><p>Self-hosted runners, on your terms.</p><div><a href="https://github.com/ysya/runscaler">GitHub</a><a href="https://github.com/ysya/runscaler#documentation">Documentation</a><a href="https://github.com/ysya/runscaler/blob/main/LICENSE">License</a></div></div></footer>
 </body>
 </html>

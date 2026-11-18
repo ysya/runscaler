@@ -1,12 +1,14 @@
 # Runscaler
 
-> Runscaler is an independent, MIT-licensed Go autoscaler for ephemeral GitHub Actions self-hosted runners on Docker hosts or Apple Silicon Macs with Tart. No Kubernetes is required. The command-line executable is named `runner`.
+> Runscaler is an independent Go autoscaler for ephemeral GitHub Actions self-hosted runners on Docker hosts or Apple Silicon Macs with Tart. No Kubernetes is required. The command-line executable is named `runner`.
 
 Each container or VM handles one job and is removed afterward. One manager process manages scale sets on each host; it does not provision hosts or schedule across a cluster. Tart supports macOS and prepared arm64 Linux guests on Apple Silicon Macs. macOS guests share a host-wide limit of two running VMs.
 
 The Docker default shares the host socket and grants jobs root-equivalent daemon access. Optional per-job DinD separates Docker state but uses a privileged sidecar and shares the host kernel. Explicit shared volumes and caches retain data across jobs. Ephemeral lifecycle alone does not provide isolation from hostile workloads. See the security guide before deployment.
 
-Runscaler is pre-1.0. Minor releases may change or remove interfaces. Main-branch documentation describes current source; consult the release notes for the version you install. Host costs, GitHub terms, and third-party tool and image licenses are separate from Runscaler's MIT license.
+Runscaler is pre-1.0. Minor releases may change or remove interfaces. Main-branch documentation describes current source. Consult the release notes for the version you install. Host costs, GitHub terms, and third-party tool and image licenses apply separately.
+
+The Runscaler Community License 1.0 allows free personal, non-commercial, and internal business use, including CI/CD for your own products. Selling Runscaler or using it in paid third-party offerings such as hosted CI/CD requires prior written permission, including backend-only use or when there is no separate fee. Previously published MIT versions, including v0.23.0, retain their original license.
 
 ## Choosing a setup
 
@@ -33,4 +35,5 @@ Runscaler is pre-1.0. Minor releases may change or remove interfaces. Main-branc
 
 - [Source repository](https://github.com/ysya/runscaler): Source code, issues, and contribution history.
 - [Releases](https://github.com/ysya/runscaler/releases): Versioned changes and downloadable binaries.
-- [License](https://raw.githubusercontent.com/ysya/runscaler/main/LICENSE): MIT license for Runscaler.
+- [Runscaler Community License 1.0](https://raw.githubusercontent.com/ysya/runscaler/main/LICENSE): Current license, based on n8n's Sustainable Use License 1.0.
+- [MIT License](https://raw.githubusercontent.com/ysya/runscaler/v0.23.0/LICENSE): Original license for previously published MIT versions.

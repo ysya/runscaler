@@ -2,7 +2,7 @@
 
 [![Release](https://img.shields.io/github/v/release/ysya/runscaler)](https://github.com/ysya/runscaler/releases)
 [![Go Version](https://img.shields.io/github/go-mod/go-version/ysya/runscaler)](https://go.dev)
-[![License](https://img.shields.io/github/license/ysya/runscaler)](LICENSE)
+[![授權條款](https://img.shields.io/badge/license-Runscaler%20Community-blue)](LICENSE)
 [![Go Report Card](https://goreportcard.com/badge/github.com/ysya/runscaler)](https://goreportcard.com/report/github.com/ysya/runscaler)
 
 [官網](https://runscaler.ysya.dev/zh-TW.html) · [設定產生器](https://runscaler.ysya.dev/configure/zh-TW.html) | [English](README.md) | [繁體中文](README.zh-TW.md)
@@ -240,4 +240,8 @@ release notes。
 
 ## 授權條款
 
-MIT
+Runscaler 採用 [Runscaler Community License 1.0](LICENSE)，以 n8n 的 Sustainable Use License 1.0 為基礎。個人、非商業及企業內部使用皆可免費使用，包括為自家產品執行 CI/CD。
+
+販售 Runscaler，或將它用於對客戶提供的付費產品或服務，須事先取得維護者的書面授權。即使只在付費主機代管或 CI/CD 服務的後台執行，客戶無法直接操作或無須另付費，也適用此限制。
+
+先前以 MIT 發布的版本（包括 v0.23.0）繼續適用 [MIT 授權](LICENSE-MIT)。

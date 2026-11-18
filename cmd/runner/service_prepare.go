@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"os/exec"
 	osuser "os/user"
@@ -22,6 +23,15 @@ import (
 var readServiceIdentityFile = os.ReadFile
 var lookupServiceGroup = osuser.LookupGroup
 
+func parseServiceID(value string) (int, bool) {
+	id, err := strconv.ParseUint(value, 10, 32)
+	// Linux reserves the all-ones UID and GID as the chown no-change sentinel.
+	if err != nil || id == 0 || id == math.MaxUint32 || id > math.MaxInt {
+		return 0, false
+	}
+	return int(id), true
+}
+
 func parseServiceAccount(data []byte) (serviceAccount, bool, error) {
 	for _, line := range strings.Split(string(data), "\n") {
 		fields := strings.Split(line, ":")
@@ -31,10 +41,10 @@ func parseServiceAccount(data []byte) (serviceAccount, bool, error) {
 		if len(fields) != 7 {
 			return serviceAccount{}, false, errors.New("invalid runscaler account record")
 		}
-		uid, e1 := strconv.Atoi(fields[2])
-		gid, e2 := strconv.Atoi(fields[3])
+		uid, uidOK := parseServiceID(fields[2])
+		gid, gidOK := parseServiceID(fields[3])
 		account := serviceAccount{Name: fields[0], UID: uid, GID: gid, Home: fields[5], Shell: fields[6]}
-		if e1 != nil || e2 != nil {
+		if !uidOK || !gidOK {
 			return account, true, errors.New("invalid service account IDs")
 		}
 		return account, true, validateServiceAccount(account)
@@ -92,9 +102,9 @@ func ensureServiceAccount(ctx context.Context) (serviceAccount, error) {
 	if groupErr != nil {
 		return account, errors.New("service group was not created")
 	}
-	gid, err := strconv.Atoi(group.Gid)
-	if err != nil || gid <= 0 {
-		return account, errors.New("service group must be non-root")
+	gid, ok := parseServiceID(group.Gid)
+	if !ok {
+		return account, errors.New("service group must have a valid non-root ID")
 	}
 	groups, err := readServiceIdentityFile("/etc/group")
 	if err != nil {

@@ -201,6 +201,19 @@ func (p *SeatbeltProvider) StartInstance(ctx context.Context, name, jit string) 
 			return "", err
 		}
 	}
+	// GitHub-hosted macOS runners expose rustup and its cargo bin directory to
+	// every step. Keep that contract when the job gets its own HOME/CARGO_HOME:
+	// reuse the host rustup executable, but place its proxy and installed
+	// toolchains under the job's private cargo directory.
+	cargoBin := filepath.Join(dir, "home", ".cargo", "bin")
+	if err := os.MkdirAll(cargoBin, 0700); err != nil {
+		return "", err
+	}
+	if rustup, err := executableInPath(p.cfg.Path, "rustup"); err == nil {
+		if err := os.Symlink(rustup, filepath.Join(cargoBin, "rustup")); err != nil && !errors.Is(err, os.ErrExist) {
+			return "", err
+		}
+	}
 	userDirs, err := seatbeltUserDirs(dir)
 	if err != nil {
 		return "", err
@@ -219,7 +232,7 @@ func (p *SeatbeltProvider) StartInstance(ctx context.Context, name, jit string) 
 	}
 	cmd := exec.Command("/usr/bin/sandbox-exec", "-f", filepath.Join(dir, "profile.sb"), filepath.Join(dir, "run.sh"))
 	cmd.Dir = dir
-	cmd.Env = []string{"PATH=" + p.cfg.Path, "HOME=" + filepath.Join(dir, "home"), "CFFIXED_USER_HOME=" + filepath.Join(dir, "home"), "TMPDIR=" + filepath.Join(dir, "tmp"), "DIRHELPER_USER_DIR_SUFFIX=" + seatbeltUserDirSuffix(dir), "LANG=en_US.UTF-8", "xcrun_nocache=1", "RUNSCALER_PROVIDER=seatbelt", "ACTIONS_RUNNER_INPUT_JITCONFIG=" + jit, marker}
+	cmd.Env = []string{"PATH=" + cargoBin + ":" + p.cfg.Path, "HOME=" + filepath.Join(dir, "home"), "CFFIXED_USER_HOME=" + filepath.Join(dir, "home"), "TMPDIR=" + filepath.Join(dir, "tmp"), "DIRHELPER_USER_DIR_SUFFIX=" + seatbeltUserDirSuffix(dir), "LANG=en_US.UTF-8", "xcrun_nocache=1", "RUNSCALER_PROVIDER=seatbelt", "ACTIONS_RUNNER_INPUT_JITCONFIG=" + jit, marker}
 	if p.cfg.SDKRoot != "" {
 		cmd.Env = append(cmd.Env, "SDKROOT="+p.cfg.SDKRoot)
 	}
@@ -279,6 +292,20 @@ func (p *SeatbeltProvider) StartInstance(ctx context.Context, name, jit string) 
 	go func() { inst.err = cmd.Wait(); _ = log.Close(); close(inst.done) }()
 	ok = true
 	return dir, nil
+}
+
+func executableInPath(pathValue, name string) (string, error) {
+	for _, dir := range strings.Split(pathValue, string(os.PathListSeparator)) {
+		if dir == "" {
+			continue
+		}
+		candidate := filepath.Join(dir, name)
+		info, err := os.Stat(candidate)
+		if err == nil && !info.IsDir() && info.Mode()&0111 != 0 {
+			return candidate, nil
+		}
+	}
+	return "", exec.ErrNotFound
 }
 func (p *SeatbeltProvider) instance(id string) *seatbeltInstance {
 	p.mu.Lock()

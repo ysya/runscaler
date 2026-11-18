@@ -396,7 +396,7 @@ func doctorSharedVolumes(sockets map[string]bool, scaleSets []config.ScaleSetCon
 		names[socket] = []string{config.DefaultSharedVolumeName}
 	}
 	for _, ss := range scaleSets {
-		if ss.IsTart() || ss.Docker.SharedVolume == "" {
+		if (ss.Provider != "" && ss.Provider != "docker") || ss.Docker.SharedVolume == "" {
 			continue
 		}
 		if name := ss.SharedVolumeName(); !slices.Contains(names[ss.Docker.Socket], name) {

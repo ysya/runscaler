@@ -117,7 +117,7 @@ func dockerCacheStoresForSocket(sets []config.ScaleSetConfig, client *dockerclie
 func dockerSettingsSource(sets []config.ScaleSetConfig, isEnabled func(config.ScaleSetConfig) bool) (source config.ScaleSetConfig, enabled bool, ok bool) {
 	var dockerSets []config.ScaleSetConfig
 	for _, ss := range sets {
-		if !ss.IsTart() {
+		if ss.Provider == "" || ss.Provider == "docker" {
 			dockerSets = append(dockerSets, ss)
 		}
 	}
@@ -213,7 +213,7 @@ func sharedVolumeSweepTargetsFor(sets []config.ScaleSetConfig, client *dockercli
 	picked := make(map[string]settings)
 	var order []string // insertion order — map iteration is not stable
 	for _, ss := range sets {
-		if ss.IsTart() || ss.Docker.SharedVolume == "" {
+		if (ss.Provider != "" && ss.Provider != "docker") || ss.Docker.SharedVolume == "" {
 			continue
 		}
 		interval := ss.DockerSharedVolumeCleanupInterval()

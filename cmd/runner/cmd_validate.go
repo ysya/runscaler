@@ -95,6 +95,13 @@ func runValidate(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	for _, ss := range scaleSets {
+		if ss.Provider == "seatbelt" {
+			if err := provider.NewSeatbeltProvider(ss).Validate(); err != nil {
+				return err
+			}
+		}
+	}
 	// Test Tart binary (only if needed)
 	if needsTart {
 		if _, err := exec.LookPath("tart"); err != nil {

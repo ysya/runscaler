@@ -106,8 +106,21 @@ type ScaleSetConfig struct {
 	// Docker provider settings
 	Docker DockerConfig `mapstructure:"docker"`
 
+	Seatbelt SeatbeltConfig `mapstructure:"seatbelt"`
+
 	// Tart VM provider settings
 	Tart TartConfig `mapstructure:"tart"`
+}
+
+// SeatbeltConfig selects an unconfigured runner template and private job roots.
+type SeatbeltConfig struct {
+	Environment   map[string]string `mapstructure:"environment"`
+	SDKRoot       string            `mapstructure:"sdk-root"`
+	DeveloperDir  string            `mapstructure:"developer-dir"`
+	RunnerDir     string            `mapstructure:"runner-dir"`
+	StateDir      string            `mapstructure:"state-dir"`
+	ReadOnlyPaths []string          `mapstructure:"read-only-paths"`
+	Path          string            `mapstructure:"path"`
 }
 
 // DockerConfig holds Docker-specific provider settings.
@@ -669,6 +682,15 @@ func (ss *ScaleSetConfig) ValidationErrors() []error {
 					add(fmt.Errorf("shared-volume conflicts with cache-volumes path %q", mount.Path))
 				}
 			}
+		}
+	case "seatbelt":
+		for _, path := range append([]string{ss.Seatbelt.RunnerDir, ss.Seatbelt.StateDir}, ss.Seatbelt.ReadOnlyPaths...) {
+			if !filepath.IsAbs(path) || filepath.Clean(path) != path || path == "/" {
+				add(fmt.Errorf("seatbelt requires clean absolute paths other than /"))
+			}
+		}
+		if ss.Seatbelt.Path == "" {
+			add(fmt.Errorf("seatbelt.path is required"))
 		}
 	case "tart":
 		if ss.Tart.PoolSize < 0 || ss.Tart.PoolSize > ss.MaxRunners {

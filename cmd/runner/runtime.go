@@ -32,8 +32,9 @@ type scaleSetRuntime struct {
 	capacity   *capacity.Allocator // set by runManager when the broker exists
 
 	// Exactly one is set.
-	docker *dockerRuntime
-	tart   *tartRuntime
+	docker   *dockerRuntime
+	tart     *tartRuntime
+	seatbelt bool
 }
 
 type dockerRuntime struct {
@@ -59,6 +60,8 @@ func newScaleSetRuntimes(scaleSets []config.ScaleSetConfig, b runtimeBackends) [
 		rt := &scaleSetRuntime{index: i, config: ss, maxRunners: ss.MaxRunners}
 		if ss.IsTart() {
 			rt.tart = &tartRuntime{host: b.tartHost}
+		} else if ss.Provider == "seatbelt" {
+			rt.seatbelt = true
 		} else {
 			rt.docker = &dockerRuntime{client: b.dockerClients[ss.Docker.Socket], pulls: b.dockerPulls}
 		}
@@ -86,6 +89,9 @@ func (rt *scaleSetRuntime) newProvider(ctx context.Context, deps managerDeps) pr
 		tb := provider.NewTartProviderWithCoordinator(rt.config, rt.logger, rt.tart.host, rt.tart.guest)
 		tb.StartPool(ctx) // starts warm pool if tart-pool-size > 0
 		return tb
+	}
+	if rt.seatbelt {
+		return provider.NewSeatbeltProvider(rt.config)
 	}
 	dp := provider.NewDockerProviderWithCoordinator(rt.config, rt.docker.client, rt.logger, rt.docker.pulls)
 	dp.EnableDiagnosticLogs(deps.captureLogs && deps.diagnostics != nil)

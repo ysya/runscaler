@@ -119,7 +119,15 @@ func (s *Store) Save(ctx context.Context, r Record, secrets ...string) (string, 
 	if err = unix.Renameat(fd, temp, fd, name); err != nil {
 		return "", err
 	}
-	if err = prune(dir, time.Now()); err != nil {
+	// Open a fresh directory description after rename: overlay filesystems may
+	// retain the pre-rename directory view on the descriptor used for writing.
+	pruneFD, err := unix.Openat(fd, ".", unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return filepath.Join(s.dir, name), err
+	}
+	pruneDir := os.NewFile(uintptr(pruneFD), s.dir)
+	defer pruneDir.Close()
+	if err = prune(pruneDir, time.Now()); err != nil {
 		return filepath.Join(s.dir, name), err
 	}
 	return filepath.Join(s.dir, name), nil

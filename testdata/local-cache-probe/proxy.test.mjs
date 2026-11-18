@@ -17,7 +17,9 @@ test('measurement proxy verifies payload routes and counts without retaining cap
   const advertised = `http://127.0.0.1:${port}`;
   await new Promise(r => foreign.listen(0, '127.0.0.1', r));
   const foreignURL = `http://127.0.0.1:${foreign.address().port}`;
+  let backendRequestTarget;
   const backend = http.createServer((req,res) => {
+    backendRequestTarget = req.url;
     if (req.url === '/payload-redirect') { res.writeHead(302, { location: foreignURL + '/cache-payload' }).end(); return; }
     if (req.url.includes('.CacheService/')) {
       req.resume(); req.on('end', () => res.end(JSON.stringify({ signed_download_url: req.url.endsWith('redirectmeta') ? advertised + '/payload-redirect' : (req.url.endsWith('foreign') ? foreignURL : advertised) + '/' + secret })));
@@ -30,6 +32,10 @@ test('measurement proxy verifies payload routes and counts without retaining cap
     PROBE_ADVERTISE_URL: advertised, PROBE_PROXY_LOG: path.join(dir, 'metrics') }, stdio: ['ignore','pipe','pipe'] });
   try {
     await once(child.stdout, 'data');
+    const requestTarget = '/fixture%20path?value=a%2Fb';
+    const fixture = await fetch(advertised + requestTarget);
+    assert.equal(await fixture.text(), 'verified-payload');
+    assert.equal(backendRequestTarget, requestTarget);
     const rpc = '/twirp/github.actions.results.api.v1.CacheService/GetCacheEntryDownloadURL';
     const meta = await (await fetch(advertised + rpc, { method: 'POST', body: JSON.stringify({ key: 'index-runscaler-linux-amd64-fixture-v1-1-refs/heads/main' }) })).json();
     assert.equal(await (await fetch(meta.signed_download_url)).text(), 'verified-payload');

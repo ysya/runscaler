@@ -11,8 +11,18 @@ function record(kind, workload, bytes, start, status) {
 }
 http.createServer(async (incoming, outgoing) => {
   const start = performance.now();
-  const location = new URL(incoming.url, advertised);
-  if (location.origin !== advertised.origin) { outgoing.writeHead(403).end(); record('blocked', 'unknown', 0, start, 403); return; }
+  let location;
+  try {
+    location = new URL(incoming.url, advertised);
+  } catch {
+    outgoing.writeHead(400).end();
+    return;
+  }
+  if (location.protocol !== advertised.protocol || location.origin !== advertised.origin) {
+    outgoing.writeHead(403).end();
+    record('blocked', 'unknown', 0, start, 403);
+    return;
+  }
   const rpc = location.pathname.includes('.CacheService/');
   let workload = payloads.get(location.pathname) || 'other';
   let body;
@@ -22,7 +32,12 @@ http.createServer(async (incoming, outgoing) => {
     body = Buffer.concat(chunks);
     try { const key = JSON.parse(body).key || ''; workload = (key.startsWith('index-runscaler-linux-amd64-fixture') || key.startsWith('buildkit-blob-')) ? 'docker' : 'toolkit'; } catch { workload = 'unknown'; }
   }
-  const upstream = http.request(new URL(incoming.url, base), { method: incoming.method, headers: incoming.headers }, response => {
+  // Only the path and query come from the client. The configured URL supplies the connection authority.
+  const upstream = http.request(base, {
+    path: location.pathname + location.search,
+    method: incoming.method,
+    headers: incoming.headers,
+  }, response => {
     if (workload !== 'other' && !rpc && response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
       const target = new URL(response.headers.location, location);
       if (target.origin !== advertised.origin) {

@@ -243,3 +243,25 @@ func TestParseDedicatedAccountUsesActualPasswdIdentity(t *testing.T) {
 		t.Fatal("root account accepted")
 	}
 }
+
+func TestParseServiceAccountRejectsInvalidIDs(t *testing.T) {
+	records := []struct {
+		name     string
+		uid, gid string
+	}{
+		{"UID outside range", "4294967296", "992"},
+		{"GID outside range", "991", "4294967296"},
+		{"reserved UID", "4294967295", "992"},
+		{"reserved GID", "991", "4294967295"},
+		{"negative UID", "-1", "992"},
+		{"root GID", "991", "0"},
+	}
+	for _, record := range records {
+		t.Run(record.name, func(t *testing.T) {
+			passwd := "runscaler:x:" + record.uid + ":" + record.gid + "::/var/lib/runner:/usr/sbin/nologin"
+			if _, found, err := parseServiceAccount([]byte(passwd)); !found || err == nil {
+				t.Fatalf("expected invalid runscaler account, found=%v err=%v", found, err)
+			}
+		})
+	}
+}

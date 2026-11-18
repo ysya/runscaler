@@ -94,3 +94,23 @@ func TestEnsureServiceAccountCreatesOnlyTheDedicatedIdentity(t *testing.T) {
 		})
 	}
 }
+
+func TestEnsureServiceAccountRejectsOutOfRangeLookupGroup(t *testing.T) {
+	savedRead, savedLookup := readServiceIdentityFile, lookupServiceGroup
+	t.Cleanup(func() {
+		readServiceIdentityFile, lookupServiceGroup = savedRead, savedLookup
+	})
+	readServiceIdentityFile = func(path string) ([]byte, error) {
+		if path != "/etc/passwd" {
+			t.Fatalf("read %s after receiving an out-of-range group ID", path)
+		}
+		return nil, nil
+	}
+	lookupServiceGroup = func(name string) (*osuser.Group, error) {
+		return &osuser.Group{Name: name, Gid: "4294967296"}, nil
+	}
+
+	if _, err := ensureServiceAccount(context.Background()); err == nil {
+		t.Fatal("accepted an out-of-range group ID")
+	}
+}

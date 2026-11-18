@@ -99,7 +99,7 @@ func (p *SeatbeltProvider) Validate() error {
 	return nil
 }
 
-// Profile keeps the job's entire writable tree private. Tools outside macOS's
+// SeatbeltProfile keeps the job's entire writable tree private. Tools outside macOS's
 // system directories need explicit read-only allowlisting. No ambient HOME or
 // controller credentials are exposed to the job. userDirs are the job's own
 // per-user Darwin cache/temp directories (see seatbeltUserDirs); signals are
@@ -233,7 +233,7 @@ func (p *SeatbeltProvider) StartInstance(ctx context.Context, name, jit string) 
 		if strings.ToUpper(key) == "ANDROID_HOME" || strings.ToUpper(key) == "ANDROID_SDK_ROOT" {
 			if androidSource != "" && androidSource != value {
 				log.Close()
-				return "", fmt.Errorf("Android SDK roots must agree")
+				return "", fmt.Errorf("android SDK roots must agree")
 			}
 			androidSource = value
 		}

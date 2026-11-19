@@ -94,6 +94,8 @@ daemon-mode = "dind"
 # dind-cpu = 0                 # cores, 0 = unlimited
 # dind-pids-limit = 0          # 0 = unlimited
 # platform = "linux/amd64"     # applies to both runner and daemon images
+# registry-username = "env:REGISTRY_USER"   # private registry credentials for image pulls
+# registry-password = "env:REGISTRY_TOKEN"
 ```
 
 `docker.socket` always selects the outer daemon used for provisioning. In DinD
@@ -354,6 +356,18 @@ gh api repos/<owner>/<repo>/actions/runners/deprecations/<version>   # runtime_d
 
 The org-level endpoint (`orgs/<org>/actions/runners/deprecations/<version>`)
 needs the `admin:org` scope.
+
+## Private registries
+
+If `runner-image` (or `dind-image`) lives in a private registry, set `registry-username` and `registry-password` in `[docker]` or in a `[[scaleset]]` entry. Both accept `env:NAME`, which reads the credential from an environment variable so it stays out of the config file, the same way `token` does. The credentials are sent with the startup pull and with any pull of a missing image at job time. `registry-server` is optional; the daemon uses the image's own registry.
+
+```toml
+[docker]
+registry-username = "env:REGISTRY_USER"
+registry-password = "env:REGISTRY_TOKEN"
+```
+
+With neither key set, pulls are anonymous, as before. Setting only one, or naming a variable that is unset or empty, is a configuration error rather than a silent anonymous pull.
 
 ## Leaked runner registration sweep (opt-in)
 
@@ -630,6 +644,8 @@ pool-size = 2
 | `--dind-memory` | `[docker] dind-memory` | `0` (unlimited) | Memory in MB per daemon, separate from runner memory |
 | `--dind-cpu` | `[docker] dind-cpu` | `0` (unlimited) | CPU cores per daemon, separate from runner CPU |
 | `--dind-pids-limit` | `[docker] dind-pids-limit` | `0` (unlimited) | Processes and threads per daemon |
+| —                   | `[docker] registry-username`, `registry-password` | unset (anonymous pulls) | Credentials for pulling `runner-image` and `dind-image` from a private registry. Each accepts `env:NAME` to read an environment variable, and both are required together |
+| —                   | `[docker] registry-server` | unset | Optional registry host sent with the credentials; the daemon uses the image's own registry |
 | —                   | `[docker] workspace-root` | unset                              | Private Linux host directory for per-runner Docker socket proxies |
 | `--shared-volume`   | `[docker] shared-volume` |                                     | Shared Docker volume path (Docker provider)        |
 | `--tart-cpu`        | `[tart] cpu`         | `0` (image default)                     | CPU cores per VM (Tart provider)                   |

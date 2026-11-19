@@ -105,6 +105,9 @@ dind = true
 # shared-volume-name = "runner-shared"     # named volume backing shared-volume; distinct names isolate scalesets (or two runner processes)
 # memory = 0     # MB, 0 = unlimited (e.g. 8192 for 8GB)
 # cpu = 0        # cores, 0 = unlimited (e.g. 4)
+# registry-username = "env:REGISTRY_USER"   # credentials for pulling runner-image from a private registry;
+# registry-password = "env:REGISTRY_TOKEN"  # "env:NAME" reads an environment variable. Both or neither.
+# registry-server = ""                      # optional; the daemon uses the image's own registry
 # platform = ""  # force the container platform, e.g. "linux/amd64" on an arm64 host; "" = daemon default
 # pids-limit = 0 # max pids (processes + threads) per container; 0 = unlimited (e.g. 4096 to stop fork bombs)
 # network = ""   # pre-existing docker network to attach runners to; "" = default bridge (e.g. one created with icc disabled)

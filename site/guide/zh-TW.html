@@ -92,9 +92,11 @@
         <p>可以。在同一台主機設定多個規模集，主機支援時也能混用 Docker 與 Tart。它們共用管理程序的主機容量，並非叢集排程器。詳見<a href="https://github.com/ysya/runscaler/blob/main/docs/configuration.zh-TW.md">設定指南</a>。</p>
         <h3>快取與磁碟空間如何處理？</h3>
         <p>Docker 規模集可搭配支援的 runner 映像檔，選用主機本機的 Actions 快取接收器。明確共用的 volume 也能跨工作保留檔案。快取保留與磁碟清理需要設定；全新的 runner 不代表主機資料都會刪除。請閱讀<a href="https://github.com/ysya/runscaler/blob/main/docs/local-actions-cache.zh-TW.md">主機本機 Actions 快取</a>與<a href="https://github.com/ysya/runscaler/blob/main/docs/caching.zh-TW.md">快取管理</a>。</p>
-        <h3>Runscaler 免費嗎？</h3>
-        <p>依照 <a href="https://github.com/ysya/runscaler/blob/main/LICENSE">Runscaler Community License 1.0</a>，個人、非商業及企業內部使用皆可免費使用，包括為自家產品執行 CI/CD。販售 Runscaler，或將它用於對客戶提供的付費服務（例如主機代管或 CI/CD），須事先取得維護者的書面授權。即使 Runscaler 只在後台執行，或未向客戶另行收費，也適用此限制。先前以 <a href="https://github.com/ysya/runscaler/blob/v0.23.0/LICENSE">MIT 授權</a>發布的版本（包括 v0.23.0）繼續沿用原授權。</p>
+        <h3 id="license">Runscaler 免費嗎？</h3>
+        <p>依照 <a href="https://github.com/ysya/runscaler/blob/main/LICENSE">Sustainable Use License 1.0（SUL）</a>，個人、非商業及企業內部用途可免費使用，包括在自有或租用的主機上為自家專案跑 CI/CD。使用時須保留原有的版權和授權聲明。先前以 <a href="https://github.com/ysya/runscaler/blob/v0.23.0/LICENSE">MIT 授權</a>發布的版本（包括 v0.23.0）繼續沿用原授權。</p>
         <p>主機費用、GitHub 條款，以及 Tart 和 runner 映像檔的授權需另外考量。</p>
+        <h3>可以販售、代管或把 Runscaler 整合進付費服務嗎？</h3>
+        <p>SUL 允許以非商業目的免費散布。販售 Runscaler 本身或將它作為付費代管服務提供，需要另行取得授權。若不確定付費 CI/CD 或主機代管平台的 Provider 整合是否符合 SUL，請向維護者說明你的實際用法。</p>
         <h3>升級相容性如何？</h3>
         <p>專案仍在 1.0 前，次版本可能變更或移除介面。升級前請閱讀<a href="https://github.com/ysya/runscaler/releases">發版說明</a>與<a href="https://github.com/ysya/runscaler/blob/main/README.zh-TW.md#upgrade-requirements">升級前準備</a>。</p>
       </section>

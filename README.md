@@ -2,7 +2,7 @@
 
 [![Release](https://img.shields.io/github/v/release/ysya/runscaler)](https://github.com/ysya/runscaler/releases)
 [![Go Version](https://img.shields.io/github/go-mod/go-version/ysya/runscaler)](https://go.dev)
-[![License](https://img.shields.io/badge/license-Runscaler%20Community-blue)](LICENSE)
+[![License](https://img.shields.io/badge/license-SUL%201.0-blue)](LICENSE)
 [![Go Report Card](https://goreportcard.com/badge/github.com/ysya/runscaler)](https://goreportcard.com/report/github.com/ysya/runscaler)
 
 [Website](https://runscaler.ysya.dev/) · [Config builder](https://runscaler.ysya.dev/configure/) | [English](README.md) | [繁體中文](README.zh-TW.md)
@@ -245,14 +245,14 @@ config paths; `service install --config-path` takes precedence over
 
 ## License
 
-Runscaler uses the [Runscaler Community License 1.0](LICENSE), based on n8n's
-Sustainable Use License 1.0. Personal use, non-commercial use, and internal
-business use are free, including CI/CD for your own products.
+Runscaler uses the [Sustainable Use License 1.0 (SUL)](LICENSE). Personal use,
+non-commercial use, and internal business use are free, including CI/CD for
+your own products. Keep the original copyright and license notices.
 
-Selling Runscaler or using it to deliver a paid product or service to customers
-requires prior written permission from the maintainer. This covers paid hosting
-or CI/CD that runs Runscaler in the backend, even when customers never access it
-directly or pay for it separately.
+The SUL allows redistribution free of charge for non-commercial purposes.
+Selling Runscaler or offering it as a paid managed service requires a separate
+license. See the [licensing FAQ](https://runscaler.ysya.dev/guide/#license) for
+internal CI/CD, paid managed services, and provider integrations.
 
 Previously published MIT versions, including v0.23.0, remain under the
 [MIT License](https://github.com/ysya/runscaler/blob/v0.23.0/LICENSE).

@@ -8,7 +8,7 @@ The Docker default shares the host socket and grants jobs root-equivalent daemon
 
 Runscaler is pre-1.0. Minor releases may change or remove interfaces. Main-branch documentation describes current source. Consult the release notes for the version you install. Host costs, GitHub terms, and third-party tool and image licenses apply separately.
 
-The Runscaler Community License 1.0 allows free personal, non-commercial, and internal business use, including CI/CD for your own products. Selling Runscaler or using it in paid third-party offerings such as hosted CI/CD requires prior written permission, including backend-only use or when there is no separate fee. Previously published MIT versions, including v0.23.0, retain their original license.
+The Sustainable Use License 1.0 (SUL) allows free personal, non-commercial, and internal business use, including CI/CD for your own products. Keep the original copyright and license notices. Redistribution is allowed free of charge for non-commercial purposes. Selling Runscaler or offering it as a paid managed service requires a separate license. If you are unsure whether a provider integration in a paid product is covered, ask the maintainer about the specific use. Previously published MIT versions, including v0.23.0, retain their original license.
 
 ## Choosing a setup
 
@@ -35,5 +35,5 @@ The Runscaler Community License 1.0 allows free personal, non-commercial, and in
 
 - [Source repository](https://github.com/ysya/runscaler): Source code, issues, and contribution history.
 - [Releases](https://github.com/ysya/runscaler/releases): Versioned changes and downloadable binaries.
-- [Runscaler Community License 1.0](https://raw.githubusercontent.com/ysya/runscaler/main/LICENSE): Current license, based on n8n's Sustainable Use License 1.0.
+- [Sustainable Use License 1.0](https://raw.githubusercontent.com/ysya/runscaler/main/LICENSE): Current license, including the historical MIT notice.
 - [MIT License](https://raw.githubusercontent.com/ysya/runscaler/v0.23.0/LICENSE): Original license for previously published MIT versions.

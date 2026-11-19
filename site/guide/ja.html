@@ -92,12 +92,15 @@
         <p>はい。同じホスト上に複数のスケールセットを設定でき、ホストが対応していれば Docker と Tart を組み合わせることもできます。管理プロセスのホスト容量を共有しますが、クラスターのスケジューラーではありません。<a href="https://github.com/ysya/runscaler/blob/main/docs/configuration.md">設定ガイド</a>を確認してください。</p>
         <h3>キャッシュとディスク使用量はどう管理しますか？</h3>
         <p>Docker スケールセットでは、対応するランナーイメージを使い、ホスト内の Actions キャッシュ受信機能を有効にできます。明示的な共有ボリュームではジョブ間でファイルを保持できます。キャッシュの保持とディスクのクリーンアップは設定が必要です。新しいランナーを使ってもホスト上のすべてのデータが削除されるわけではありません。<a href="https://github.com/ysya/runscaler/blob/main/docs/local-actions-cache.md">ホスト内 Actions キャッシュ</a>と<a href="https://github.com/ysya/runscaler/blob/main/docs/caching.md">キャッシュガイド</a>を確認してください。</p>
-        <h3>無料ですか？ アップグレードの互換性は？</h3>
-        <p>Runscaler は MIT ライセンスです。ホストの費用、GitHub の利用条件、Tart とランナーイメージのライセンスは別途適用されます。バージョン 1.0 より前のため、マイナーリリースでもインターフェースを変更・削除する場合があります。更新前に<a href="https://github.com/ysya/runscaler/releases">リリースノート</a>と<a href="https://github.com/ysya/runscaler#upgrade-requirements">アップグレード要件</a>を確認してください。</p>
+        <h3>Runscaler は無料で使えますか？</h3>
+        <p><a href="https://github.com/ysya/runscaler/blob/main/LICENSE">Runscaler Community License 1.0</a> では、個人利用、非商用利用、社内利用は無料です。自社製品の CI/CD も含まれます。Runscaler を販売したり、顧客向けの有料ホスティングや CI/CD などに組み込んだりする場合は、事前にメンテナーの書面による許諾が必要です。バックエンドでのみ動作する場合や、Runscaler に対して個別に課金しない場合も対象です。v0.23.0 など、<a href="https://github.com/ysya/runscaler/blob/v0.23.0/LICENSE">MIT ライセンス</a>で公開済みのバージョンには、引き続き同ライセンスが適用されます。</p>
+        <p>ホストの費用、GitHub の利用条件、Tart とランナーイメージのライセンスは別途適用されます。</p>
+        <h3>アップグレードの互換性は？</h3>
+        <p>バージョン 1.0 より前のため、マイナーリリースでもインターフェースを変更・削除する場合があります。更新前に<a href="https://github.com/ysya/runscaler/releases">リリースノート</a>と<a href="https://github.com/ysya/runscaler#upgrade-requirements">アップグレード要件</a>を確認してください。</p>
       </section>
       <div class="guide-next"><p>自分のホストで試してみませんか？</p><a class="button button-primary" href="../configure/ja.html">設定ファイルを作成 ↗</a></div>
     </article>
   </main>
-  <footer class="site-footer"><div class="section-shell footer-inner"><a class="brand" href="../ja.html"><span class="brand-mark" aria-hidden="true">r<span>.</span></span><span>runscaler</span></a><p>自分のホストで、自分に合ったランナー運用を。</p><div><a href="https://github.com/ysya/runscaler">GitHub</a><a href="https://github.com/ysya/runscaler#documentation">ドキュメント</a><a href="https://github.com/ysya/runscaler/blob/main/LICENSE">MIT ライセンス</a></div></div></footer>
+  <footer class="site-footer"><div class="section-shell footer-inner"><a class="brand" href="../ja.html"><span class="brand-mark" aria-hidden="true">r<span>.</span></span><span>runscaler</span></a><p>自分のホストで、自分に合ったランナー運用を。</p><div><a href="https://github.com/ysya/runscaler">GitHub</a><a href="https://github.com/ysya/runscaler#documentation">ドキュメント</a><a href="https://github.com/ysya/runscaler/blob/main/LICENSE">ライセンス</a></div></div></footer>
 </body>
 </html>

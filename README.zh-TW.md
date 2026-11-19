@@ -244,4 +244,4 @@ Runscaler 採用 [Runscaler Community License 1.0](LICENSE)，以 n8n 的 Sustai
 
 販售 Runscaler，或將它用於對客戶提供的付費產品或服務，須事先取得維護者的書面授權。即使只在付費主機代管或 CI/CD 服務的後台執行，客戶無法直接操作或無須另付費，也適用此限制。
 
-先前以 MIT 發布的版本（包括 v0.23.0）繼續適用 [MIT 授權](LICENSE-MIT)。
+先前以 MIT 發布的版本（包括 v0.23.0）繼續適用 [MIT 授權](https://github.com/ysya/runscaler/blob/v0.23.0/LICENSE)。原始授權全文與版權聲明收錄於 `LICENSE` 的歷史授權附錄。

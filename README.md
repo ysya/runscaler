@@ -255,4 +255,6 @@ or CI/CD that runs Runscaler in the backend, even when customers never access it
 directly or pay for it separately.
 
 Previously published MIT versions, including v0.23.0, remain under the
-[MIT License](LICENSE-MIT).
+[MIT License](https://github.com/ysya/runscaler/blob/v0.23.0/LICENSE).
+The historical appendix in `LICENSE` includes the original MIT text and
+copyright notice.

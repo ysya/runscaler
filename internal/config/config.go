@@ -2,6 +2,8 @@ package config
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"image/color"
 	"io"
@@ -128,6 +130,14 @@ type DockerConfig struct {
 	CPU                int            `mapstructure:"cpu"`        // CPU cores (0 = unlimited)
 	PidsLimit          int64          `mapstructure:"pids-limit"` // Max pids (processes + threads) per container (0 = unlimited)
 	Platform           string         `mapstructure:"platform"`   // e.g. "linux/amd64" to force architecture
+
+	// Registry credentials for pulling runner-image (and dind-image) from a
+	// private registry. Username and password accept "env:NAME" to read an
+	// environment variable, like token. With neither set, pulls are anonymous.
+	// RegistryServer is optional; the daemon uses the image's own registry.
+	RegistryServer   string `mapstructure:"registry-server"`
+	RegistryUsername string `mapstructure:"registry-username"`
+	RegistryPassword string `mapstructure:"registry-password"`
 
 	// ActionsCacheURL selects an explicit cache receiver. NativeActionsCache
 	// fills an empty value from the manager's advertised URL.
@@ -559,6 +569,49 @@ func (ss *ScaleSetConfig) IsTartCacheCleanupEnabled() bool {
 	return DefaultTartCacheCleanup
 }
 
+// RegistryAuth returns the X-Registry-Auth value for image pulls: the
+// base64url-encoded JSON the Docker API expects, or "" when no credentials are
+// configured. Username and password are both required once either is set, and
+// an "env:NAME" value must name a variable that is set and not empty.
+func (d DockerConfig) RegistryAuth() (string, error) {
+	if d.RegistryUsername == "" && d.RegistryPassword == "" {
+		return "", nil
+	}
+	username, err := resolveEnvValue("docker.registry-username", d.RegistryUsername)
+	if err != nil {
+		return "", err
+	}
+	password, err := resolveEnvValue("docker.registry-password", d.RegistryPassword)
+	if err != nil {
+		return "", err
+	}
+	raw, err := json.Marshal(map[string]string{
+		"username":      username,
+		"password":      password,
+		"serveraddress": d.RegistryServer,
+	})
+	if err != nil {
+		return "", err
+	}
+	return base64.URLEncoding.EncodeToString(raw), nil
+}
+
+// resolveEnvValue returns value, or the environment variable it names when it
+// starts with "env:". An empty result is an error: credentials are required
+// together, and a missing variable should not silently become an anonymous pull.
+func resolveEnvValue(key, value string) (string, error) {
+	if name, ok := strings.CutPrefix(value, "env:"); ok {
+		value = os.Getenv(name)
+		if value == "" {
+			return "", fmt.Errorf("%s: environment variable %q is not set", key, name)
+		}
+	}
+	if value == "" {
+		return "", fmt.Errorf("%s is required when the other registry credential is set", key)
+	}
+	return value, nil
+}
+
 // resolveEnvToken resolves the token value from environment variables.
 // Supports two patterns:
 //   - token = "env:VARIABLE_NAME" — reads from the named env var
@@ -640,6 +693,9 @@ func (ss *ScaleSetConfig) ValidationErrors() []error {
 			if !filepath.IsAbs(root) || filepath.Clean(root) != root || root == "/" {
 				add(fmt.Errorf("docker.workspace-root must be a clean absolute host path other than /"))
 			}
+		}
+		if _, err := ss.Docker.RegistryAuth(); err != nil {
+			add(err)
 		}
 		if ss.Docker.Platform != "" {
 			parts := strings.Split(ss.Docker.Platform, "/")

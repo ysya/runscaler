@@ -95,7 +95,11 @@ func pullDockerRunnerImage(ctx context.Context, ss config.ScaleSetConfig, client
 	logger.Info("Pulling runner image", slog.String("image", ss.RunnerImage), slog.String("platform", ss.Docker.Platform))
 	pullCtx, cancel := context.WithTimeout(ctx, 30*time.Minute)
 	defer cancel()
-	options := dockerclient.ImagePullOptions{}
+	registryAuth, err := ss.Docker.RegistryAuth()
+	if err != nil {
+		return err
+	}
+	options := dockerclient.ImagePullOptions{RegistryAuth: registryAuth}
 	if ss.Docker.Platform != "" {
 		parts := strings.SplitN(ss.Docker.Platform, "/", 3)
 		platform := ocispec.Platform{OS: parts[0], Architecture: parts[1]}

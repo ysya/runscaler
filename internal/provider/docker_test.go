@@ -41,6 +41,9 @@ type mockDocker struct {
 	volumesRemoved []string
 	volumesCreated []dockerclient.VolumeCreateOptions
 
+	// Options of every ImagePull call, in order.
+	imagePullOptions []dockerclient.ImagePullOptions
+
 	// Optional overrides for ContainerWait. When unset, the wait succeeds
 	// immediately with status 0.
 	waitStatus           int64
@@ -74,8 +77,9 @@ func (m *mockDocker) ImageInspect(_ context.Context, _ string, options ...docker
 	}
 	return dockerclient.ImageInspectResult{}, nil
 }
-func (m *mockDocker) ImagePull(_ context.Context, _ string, _ dockerclient.ImagePullOptions) (dockerclient.ImagePullResponse, error) {
+func (m *mockDocker) ImagePull(_ context.Context, _ string, options dockerclient.ImagePullOptions) (dockerclient.ImagePullResponse, error) {
 	m.imagePulls++
+	m.imagePullOptions = append(m.imagePullOptions, options)
 	if m.imagePullErr != nil {
 		return nil, m.imagePullErr
 	}
@@ -255,6 +259,39 @@ func TestDockerProvider_StartInstance_PullsMissingImage(t *testing.T) {
 	}
 	if len(md.createCalls) != 1 {
 		t.Fatalf("container creates = %d, want 1", len(md.createCalls))
+	}
+}
+
+func TestDockerProvider_StartInstance_PullSendsRegistryCredentials(t *testing.T) {
+	b, md := newTestDockerProvider("", false)
+	md.imagePresent = false
+	b.registryAuth = "encoded-credentials"
+	if _, err := b.StartInstance(context.Background(), "runner-private-image", "jit"); err != nil {
+		t.Fatalf("StartInstance() error: %v", err)
+	}
+	if len(md.imagePullOptions) != 1 || md.imagePullOptions[0].RegistryAuth != "encoded-credentials" {
+		t.Fatalf("pull options = %+v, want one pull carrying the registry credentials", md.imagePullOptions)
+	}
+}
+
+func TestDockerProvider_StartInstance_PullIsAnonymousWithoutCredentials(t *testing.T) {
+	b, md := newTestDockerProvider("", false)
+	md.imagePresent = false
+	if _, err := b.StartInstance(context.Background(), "runner-public-image", "jit"); err != nil {
+		t.Fatalf("StartInstance() error: %v", err)
+	}
+	if len(md.imagePullOptions) != 1 || md.imagePullOptions[0].RegistryAuth != "" {
+		t.Fatalf("pull options = %+v, want an anonymous pull", md.imagePullOptions)
+	}
+}
+
+func TestNewDockerProvider_BuildsRegistryCredentialsFromConfig(t *testing.T) {
+	ss := config.ScaleSetConfig{RunnerImage: "ghcr.io/example/private:1"}
+	ss.Docker.RegistryUsername = "user"
+	ss.Docker.RegistryPassword = "secret"
+	p := NewDockerProvider(ss, &mockDocker{}, slog.New(slog.DiscardHandler))
+	if p.registryAuth == "" {
+		t.Fatal("registryAuth is empty, want credentials built from the config")
 	}
 }
 

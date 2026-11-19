@@ -49,6 +49,7 @@ type DockerProvider struct {
 	daemonMode            string
 	dindConfig            config.DockerConfig
 	workspaceRoot         string
+	registryAuth          string // X-Registry-Auth for image pulls; "" = anonymous
 	workspaceMu           sync.Mutex
 	workspaces            map[string]*runnerWorkspace
 	sharedVolume          string                    // container path of the shared volume ("" = disabled)
@@ -86,6 +87,7 @@ func NewDockerProviderWithCoordinator(ss config.ScaleSetConfig, client DockerAPI
 		daemonMode:       ss.DockerDaemonMode(),
 		dindConfig:       ss.Docker,
 		workspaceRoot:    ss.Docker.WorkspaceRoot,
+		registryAuth:     registryAuthOrEmpty(ss.Docker),
 		sharedVolume:     ss.Docker.SharedVolume,
 		sharedVolumeName: ss.SharedVolumeName(),
 		network:          ss.Docker.Network,
@@ -276,7 +278,7 @@ func (p *DockerProvider) pullDockerImage(ctx context.Context, image string) erro
 	p.logger.Info("Runner image is missing locally, pulling it", slog.String("image", image))
 	pullCtx, cancel := context.WithTimeout(ctx, 30*time.Minute)
 	defer cancel()
-	options := dockerclient.ImagePullOptions{}
+	options := dockerclient.ImagePullOptions{RegistryAuth: p.registryAuth}
 	if p.platform != nil {
 		options.Platforms = []ocispec.Platform{*p.platform}
 	}
@@ -451,4 +453,15 @@ func socketGroupID(path string) (int, error) {
 		return 0, fmt.Errorf("unsupported platform")
 	}
 	return int(stat.Gid), nil
+}
+
+// registryAuthOrEmpty returns the configured registry credential, or "" when
+// none is set. Config validation has already rejected unusable credentials, so
+// an error here is treated as anonymous rather than failing provider creation.
+func registryAuthOrEmpty(d config.DockerConfig) string {
+	auth, err := d.RegistryAuth()
+	if err != nil {
+		return ""
+	}
+	return auth
 }

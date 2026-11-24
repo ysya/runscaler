@@ -287,6 +287,9 @@ func (h *HealthServer) handleHealthz(w http.ResponseWriter, r *http.Request) {
 				JobsCompleted:  snap.JobsCompleted,
 				DesiredRunners: snap.DesiredRunners,
 			}
+			if live, ok := controller.(interface{ DesiredRunnerCount() int }); ok {
+				ms.DesiredRunners = live.DesiredRunnerCount()
+			}
 			if snap.Statistics != nil {
 				ms.AvailableJobs = snap.Statistics.TotalAvailableJobs
 				ms.AssignedJobs = snap.Statistics.TotalAssignedJobs

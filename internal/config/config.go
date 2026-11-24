@@ -75,7 +75,7 @@ type ScaleSetConfig struct {
 	ScaleSetName    string           `mapstructure:"name"`
 	Token           string           `mapstructure:"token"`
 	MaxRunners      int              `mapstructure:"max-runners"`
-	MinRunners      int              `mapstructure:"min-runners"`
+	MinRunners      RunnerMinimum    `mapstructure:"min-runners"`
 	Labels          []string         `mapstructure:"labels"`
 	RunnerGroup     string           `mapstructure:"runner-group"`
 	RunnerImage     string           `mapstructure:"runner-image"`
@@ -612,14 +612,14 @@ func (ss *ScaleSetConfig) ValidationErrors() []error {
 	for _, err := range ss.authenticationErrors() {
 		add(err)
 	}
-	if ss.MinRunners < 0 {
+	if ss.MinRunners.Fixed < 0 {
 		add(fmt.Errorf("min-runners must be >= 0"))
 	}
 	if ss.MaxRunners < 1 {
 		add(fmt.Errorf("max-runners must be >= 1"))
 	}
-	if ss.MinRunners > ss.MaxRunners {
-		add(fmt.Errorf("min-runners (%d) must be <= max-runners (%d)", ss.MinRunners, ss.MaxRunners))
+	if ss.MinRunners.Fixed > ss.MaxRunners {
+		add(fmt.Errorf("min-runners (%d) must be <= max-runners (%d)", ss.MinRunners.Fixed, ss.MaxRunners))
 	}
 	if ss.RunnerImage == "" {
 		add(fmt.Errorf("runner-image is required"))
@@ -774,7 +774,7 @@ func (c *Config) ValidateConcurrent(scaleSets []ScaleSetConfig) error {
 	}
 	totalMin := 0
 	for _, ss := range scaleSets {
-		totalMin += ss.MinRunners
+		totalMin += ss.MinRunners.Fixed
 	}
 	if c.Concurrent < totalMin {
 		return fmt.Errorf("concurrent (%d) must be >= the sum of min-runners (%d)", c.Concurrent, totalMin)

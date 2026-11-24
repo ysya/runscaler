@@ -77,7 +77,8 @@ function validURL(value, schemes, rootOnly = false) {
 function serialize(field, raw, lang) {
   if (raw === undefined || raw === null || String(raw).trim() === '') return null;
   const value = copy(raw);
-  if (field.type === 'number') {
+  if (field.type === 'number-or-auto' && value === 'auto') return quoteToml(value, lang);
+  if (field.type === 'number' || field.type === 'number-or-auto') {
     const number = Number(value);
     if (!Number.isSafeInteger(number) || (field.min !== undefined && number < field.min) || (field.max !== undefined && number > field.max)) {
       throw new Error(message(lang, `Invalid number: ${fieldName(field, lang)}`, `數值無效：${fieldName(field, lang)}`, `数値が無効です：${fieldName(field, lang)}`));
@@ -160,6 +161,11 @@ function emitLegacyCache(header, raw, lang, index) {
   });
 }
 
+function fixedMinimum(set) {
+  const value = copy(set['min-runners']);
+  return value === 'auto' ? 0 : Number(value);
+}
+
 function validateSet(scale, global, lang, index) {
   const set = scale.set ?? {};
   const provider = copy(set.provider) || 'docker';
@@ -174,9 +180,9 @@ function validateSet(scale, global, lang, index) {
   reject(provider !== 'docker' && provider !== 'tart', 'set', 'provider', index, lang, 'Invalid provider.', '執行環境無效。', 'プロバイダーが無効です。');
   reject(auth !== 'pat' && auth !== 'app', 'set', 'auth', index, lang, 'Invalid authentication.', '驗證方式無效。', '認証方式が無効です。');
   const max = Number(set['max-runners']);
-  const min = copy(set['min-runners']) === '' ? 0 : Number(set['min-runners']);
+  const min = fixedMinimum(set);
   reject(!Number.isSafeInteger(max) || max < 1, 'set', 'max-runners', index, lang, 'Maximum runners must be a positive whole number.', '最多 runner 數量須為正整數。', 'ランナー数の上限には正の整数を指定してください。');
-  reject(!Number.isSafeInteger(min) || min < 0 || min > max, 'set', 'min-runners', index, lang, 'Runner limits must be whole numbers with 0 ≤ minimum ≤ maximum.', 'Runner 數量須為整數，且 0 ≤ 下限 ≤ 上限。', 'ランナー数は整数で指定し、0 ≤ 下限 ≤ 上限にしてください。');
+  reject(!Number.isSafeInteger(min) || min < 0 || min > max, 'set', 'min-runners', index, lang, 'Enter auto or a whole number from 0 to the maximum runner count.', '請輸入 auto，或 0 到 runner 上限之間的整數。', 'auto または 0 からランナー数の上限までの整数を指定してください。');
   reject(!copy(set['runner-image']), 'set', 'runner-image', index, lang, 'Enter a runner image.', '請輸入 runner 映像檔。', 'ランナーイメージを入力してください。');
   if (auth === 'app') {
     let path;
@@ -263,7 +269,7 @@ export function generateFullConfig(state, lang = 'en') {
   reject(!targetFree, 'disk', 'target-free', 0, lang, 'Use a percentage (20%) or size (40GB).', '請輸入百分比（20%）或容量（40GB）。', '割合（20%）または容量（40GB）を入力してください。');
   reject(minFree.type !== targetFree.type, 'disk', 'target-free', 0, lang, 'Both disk thresholds must use percentages or both sizes.', '兩個磁碟門檻須同為百分比或同為容量。', 'ディスクのしきい値は両方とも割合、または両方とも容量で指定してください。');
   reject(minFree.value >= targetFree.value, 'disk', 'target-free', 0, lang, 'Cleanup target must be greater than the start threshold.', '清理目標須大於開始清理的門檻。', 'クリーンアップ後の目標は開始しきい値より大きくしてください。');
-  const minimum = scales.reduce((sum, scale) => sum + Number(scale.set['min-runners'] || 0), 0);
+  const minimum = scales.reduce((sum, scale) => sum + fixedMinimum(scale.set), 0);
   reject(Number(state.global?.concurrent || 0) > 0 && Number(state.global.concurrent) < minimum, 'global', 'concurrent', 0, lang, 'Host-wide concurrency must cover all warm runner minimums.', '主機同時執行上限須涵蓋所有常駐 runner 下限。', 'ホスト全体の同時実行数は、すべての待機ランナー数の下限の合計以上にしてください。');
 
   const globalLines = emitFields(state.global, groups.global, lang, 'global', 0, state.global?.['log-file-disabled'] ? ['log-file'] : []);

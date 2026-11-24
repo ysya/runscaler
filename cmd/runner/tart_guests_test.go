@@ -86,7 +86,7 @@ func TestApplyTartGuestLimits_CapsMacOSGuestsWithoutAnError(t *testing.T) {
 func TestApplyTartGuestLimits_RejectsWhatAppleCannotRun(t *testing.T) {
 	withMin := func(name string, n int) config.ScaleSetConfig {
 		ss := tartSet(name, "macos-image", 10)
-		ss.MinRunners = n
+		ss.MinRunners.Fixed = n
 		return ss
 	}
 	withPool := func(name string, n int) config.ScaleSetConfig {
@@ -124,9 +124,9 @@ func TestApplyTartGuestLimits_RejectsWhatAppleCannotRun(t *testing.T) {
 
 func TestApplyTartGuestLimits_LeavesLinuxAndUninspectedGuestsAlone(t *testing.T) {
 	linux := tartSet("linux", "linux-image", 6)
-	linux.MinRunners, linux.Tart.PoolSize = 4, 3
+	linux.MinRunners.Fixed, linux.Tart.PoolSize = 4, 3
 	unknown := tartSet("unknown", "not-pulled", 10)
-	unknown.MinRunners = 5
+	unknown.MinRunners.Fixed = 5
 	runtimes := tartRuntimes(map[string]provider.TartGuest{"linux": provider.TartGuestLinux}, linux, unknown)
 
 	if problems := applyTartGuestLimits(runtimes, slog.New(slog.DiscardHandler)); len(problems) != 0 {
@@ -194,7 +194,7 @@ func TestReportTartGuests(t *testing.T) {
 
 	out.Reset()
 	tooWarm := tartSet("mac", "macos-image", 2)
-	tooWarm.MinRunners = 3
+	tooWarm.MinRunners.Fixed = 3
 	err := reportTartGuests(context.Background(), &out, tartRuntimes(nil, tooWarm), present, detect, logger)
 	if err == nil || !strings.Contains(out.String(), `✗ scaleset[0] "mac": min-runners is 3`) {
 		t.Fatalf("error = %v, output %q", err, out.String())

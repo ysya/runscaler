@@ -182,8 +182,8 @@ func validateLocalConfig(cfg config.Config, out io.Writer) ([]config.ScaleSetCon
 		return nil, fmt.Errorf("validation failed")
 	}
 	for i, ss := range scaleSets {
-		fmt.Fprintf(out, "  ✓ scaleset[%d] %q — provider=%s url=%s max=%d min=%d\n",
-			i, ss.ScaleSetName, ss.Provider, ss.RegistrationURL, ss.MaxRunners, ss.MinRunners)
+		fmt.Fprintf(out, "  ✓ scaleset[%d] %q — provider=%s url=%s max=%d min=%v\n",
+			i, ss.ScaleSetName, ss.Provider, ss.RegistrationURL, ss.MaxRunners, ss.MinRunners.ConfigValue())
 	}
 	return scaleSets, nil
 }

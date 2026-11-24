@@ -48,6 +48,9 @@ type ScaleSetController struct {
 	logger          *slog.Logger
 	desiredMu       sync.Mutex
 	desiredRunners  int
+	autoMinRunners  bool
+	warmUntil       time.Time
+	warmTimer       *time.Timer
 	desiredRevision uint64
 	// pendingCompletions blocks scale-up between JobCompleted and the desired
 	// count callback that follows it in the same listener message. Without the
@@ -92,6 +95,13 @@ type ScaleSetController struct {
 
 // Option configures optional ScaleSetController behavior at construction time.
 type Option func(*ScaleSetController)
+
+const autoWarmPeriod = 5 * time.Minute
+
+// WithAutoMinRunners prepares one spare during demand and briefly after it ends.
+func WithAutoMinRunners() Option {
+	return func(s *ScaleSetController) { s.autoMinRunners = true }
+}
 
 // WithDiskChecker wires a pre-job-start disk-pressure check into the
 // ScaleSetController: startInstanceWithLease consults it before starting a
@@ -153,13 +163,25 @@ func NewScaleSetController(scaleSetID, minRunners, maxRunners int, p provider.In
 // Completed runners are removed directly; fresh lower demand also converges
 // surplus idle runners without preempting busy jobs.
 func (s *ScaleSetController) HandleDesiredRunnerCount(ctx context.Context, count int) (int, error) {
+	s.desiredMu.Lock()
 	if s.draining.Load() {
+		s.desiredMu.Unlock()
 		return s.instances.count(), nil
 	}
 	if err := ctx.Err(); err != nil {
+		s.desiredMu.Unlock()
 		return s.instances.count(), err
 	}
-	s.desiredMu.Lock()
+	// Only the transition to zero starts the window. An idle listener can
+	// replay the same statistics on every poll.
+	if s.autoMinRunners && count == 0 && s.desiredRunners > 0 {
+		s.warmUntil = time.Now().Add(autoWarmPeriod)
+		if s.warmTimer == nil {
+			s.warmTimer = time.AfterFunc(autoWarmPeriod, s.signalReconcile)
+		} else {
+			s.warmTimer.Reset(autoWarmPeriod)
+		}
+	}
 	s.desiredRunners = count
 	s.desiredRevision++
 	s.pendingCompletions = 0
@@ -169,7 +191,7 @@ func (s *ScaleSetController) HandleDesiredRunnerCount(ctx context.Context, count
 	// MessageHandler records this value as desired-runners. Reconciliation is
 	// asynchronous, so report the bounded target rather than a timing-dependent
 	// snapshot of instances that happen to be ready at callback return.
-	return s.targetRunnerCount(), nil
+	return s.DesiredRunnerCount(), nil
 }
 
 // HandleJobStarted marks a runner as busy when a job is assigned.
@@ -297,19 +319,22 @@ func (s *ScaleSetController) reconcileOne() bool {
 	return true
 }
 
-func (s *ScaleSetController) targetRunnerCount() int {
-	s.desiredMu.Lock()
-	desired := s.desiredRunners
-	s.desiredMu.Unlock()
-	return min(s.maxRunners, s.minRunners+desired)
+// DesiredRunnerCount reports the live target, including idle-window expiry
+// between listener messages.
+func (s *ScaleSetController) DesiredRunnerCount() int {
+	target, _ := s.scaleTarget()
+	return target
 }
 
 func (s *ScaleSetController) scaleTarget() (target int, canScale bool) {
 	s.desiredMu.Lock()
-	desired := s.desiredRunners
-	canScale = s.pendingCompletions == 0 && !s.demandStale
-	s.desiredMu.Unlock()
-	return min(s.maxRunners, s.minRunners+desired), canScale
+	defer s.desiredMu.Unlock()
+	desired := min(s.desiredRunners, s.maxRunners)
+	idle := s.minRunners
+	if s.autoMinRunners && (desired > 0 || time.Now().Before(s.warmUntil)) {
+		idle = 1
+	}
+	return desired + min(idle, s.maxRunners-desired), s.pendingCompletions == 0 && !s.demandStale
 }
 
 func (s *ScaleSetController) removeClaimedInstance(ctx context.Context, name, instanceID string) {
@@ -759,7 +784,17 @@ func (s *ScaleSetController) Shutdown(ctx context.Context) {
 }
 
 func (s *ScaleSetController) stopWork() {
-	s.stopOnce.Do(func() { s.cancelWork(); s.runtimeMu.Lock(); s.clearRetryLocked(); s.runtimeMu.Unlock() })
+	s.stopOnce.Do(func() {
+		s.cancelWork()
+		s.desiredMu.Lock()
+		if s.warmTimer != nil {
+			s.warmTimer.Stop()
+		}
+		s.desiredMu.Unlock()
+		s.runtimeMu.Lock()
+		s.clearRetryLocked()
+		s.runtimeMu.Unlock()
+	})
 }
 
 func (s *ScaleSetController) waitWorker(ctx context.Context) error {

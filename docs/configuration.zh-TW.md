@@ -411,7 +411,7 @@ pool-size = 2
 | `--provider` | `provider` | `docker` | 執行個體供應器（`docker` 或 `tart`） |
 | `--max-runners` | `max-runners` | `10` | 同時執行的 runner 數量上限 |
 | `--concurrent` | `concurrent` | `0`（`max-runners` 總和） | 主機上所有 runner 規模集合計的數量上限 |
-| `--min-runners` | `min-runners` | `0` | 保持預備狀態的 runner 數量下限 |
+| `--min-runners` | `min-runners` | `0` | 常駐待命數，或用 `auto` 自動預備一台 |
 | `--labels` | `labels` | `<name>` | runner 標籤（以逗號分隔） |
 | `--runner-group` | `runner-group` | `default` | runner 群組名稱 |
 | `--runner-image` | `runner-image` | `ghcr.io/actions/actions-runner:latest` | runner 映像檔（Docker 映像檔或 Tart VM 映像檔） |
@@ -445,6 +445,8 @@ pool-size = 2
 適用於整個程序的 `drain-timeout` 與進階調校設定鍵（清理、快取磁碟區、隔離）刻意設計為只能透過設定檔設定；完整清單請見 `config.example.toml`。
 
 與 GitLab Runner 相同，`concurrent` 限制管理程序內的 runner 總數，`max-runners` 則是各規模集的個別上限。控制器會在 JIT／供應器啟動前預留全域容量。Tart 預熱 VM 不持有此容量租約，因此數量會加在 `concurrent` 之外。系統會先預留各組 `min-runners` 下限所需的容量，再以先進先出（FIFO）順序分配剩餘容量。`concurrent = 0` 會使用套用 macOS 限制後的有效 `max-runners` 總和。
+
+設定 `min-runners = "auto"`（或使用 `--min-runners auto`）後，規模集會在有第一個 job 時才啟動 runner。有已分派的 job 時，會多準備一台給下一個 job。需求降為零後，會保留一台五分鐘，再縮回零。期間有新需求，就從下一次歸零時重新計時。每台 runner 仍只執行一個 job。備用 runner 計入規模集和全域上限，可能占用其他規模集需要的名額。自動模式預留的全域名額為零。填入整數可指定常駐待命數，預設為零。
 
 使用 `provider` TOML 設定鍵與 `--provider` 旗標選擇 Docker 或 Tart。
 

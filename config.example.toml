@@ -55,7 +55,7 @@ max-runners = 10
 # App configuration disables ambient RUNNER_TOKEN fallback.
 # Explicit token + App configuration is rejected.
 # max-runners = 10
-# min-runners = 0
+# min-runners = 0                 # or "auto": one spare during demand and for five idle minutes
 # labels = ["self-hosted", "linux"]
 
 # Leaked JIT runner registration sweep (organization scale sets only).

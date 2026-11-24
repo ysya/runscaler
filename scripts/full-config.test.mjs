@@ -366,3 +366,18 @@ test('generated multi-Tart TOML matches the Go-validated fixture', () => {
   const fixture = readFileSync(new URL('../testdata/site/multi-tart.toml', import.meta.url), 'utf8');
   assert.equal(generateFullConfig(state), fixture);
 });
+
+test('auto minimum emits a TOML string and reserves no fixed capacity', () => {
+  const state = base();
+  state.scaleSets[0].set['min-runners'] = 'auto';
+  const second = baseSet();
+  second.set.name = 'second';
+  second.set['min-runners'] = '2';
+  state.scaleSets.push(second);
+  state.global.concurrent = '2';
+  const toml = generateFullConfig(state);
+  assert.match(toml, /min-runners = "auto"/u);
+  assert.match(toml, /min-runners = 2/u);
+  state.global.concurrent = '1';
+  fieldError(state, 'global', 'concurrent');
+});

@@ -17,6 +17,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
+	"github.com/ysya/runscaler/internal/config"
 	runnerlock "github.com/ysya/runscaler/internal/lock"
 )
 
@@ -340,5 +341,40 @@ func TestWrongArgCountPrintsUsageAndErrorOnce(t *testing.T) {
 	assertFailedOnce(t, stderr, code, "accepts 1 arg(s), received 0")
 	if !strings.Contains(stderr, "Usage:") {
 		t.Errorf("a wrong argument count did not print usage:\n%s", stderr)
+	}
+}
+
+func TestRunMinRunnersFlag(t *testing.T) {
+	flags := runCommand.Flags()
+	flag := flags.Lookup("min-runners")
+	oldValue, oldChanged := flag.Value.String(), flag.Changed
+	t.Cleanup(func() {
+		if err := flag.Value.Set(oldValue); err != nil {
+			t.Error(err)
+		}
+		flag.Changed = oldChanged
+	})
+	v := viper.New()
+	if err := v.BindPFlag("min-runners", flag); err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct {
+		value string
+		want  config.RunnerMinimum
+	}{
+		{"auto", config.RunnerMinimum{Auto: true}},
+		{"3", config.RunnerMinimum{Fixed: 3}},
+		{"0", config.RunnerMinimum{}},
+	} {
+		if err := flags.Set("min-runners", tt.value); err != nil {
+			t.Fatal(err)
+		}
+		cfg, err := config.Load(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := cfg.ResolveScaleSets()[0].MinRunners; got != tt.want {
+			t.Errorf("--min-runners %s: got %+v, want %+v", tt.value, got, tt.want)
+		}
 	}
 }

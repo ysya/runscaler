@@ -49,7 +49,7 @@ func validScaleSet(name string, minRunners int) config.ScaleSetConfig {
 		RunnerImage:     config.DefaultRunnerImage,
 		RunnerGroup:     config.DefaultRunnerGroup,
 		MaxRunners:      5,
-		MinRunners:      minRunners,
+		MinRunners:      config.RunnerMinimum{Fixed: minRunners},
 		Provider:        config.DefaultProvider,
 		Docker:          config.DockerConfig{Socket: config.DefaultDockerSocket},
 	}

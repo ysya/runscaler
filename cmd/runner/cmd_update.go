@@ -17,6 +17,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/ysya/runscaler/internal/config"
 	"github.com/ysya/runscaler/internal/health"
 	"github.com/ysya/runscaler/internal/versioncheck"
 )
@@ -132,24 +133,20 @@ func runUpdate(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
-// printUpdateConfigNotices reports advisory migrations from the selected
+// printUpdateConfigNotices reports required migrations from the selected
 // service's config before any binary replacement. Binary-only updates have no
 // selected service and must not inspect an unrelated configuration.
 func printUpdateConfigNotices(cmd *cobra.Command, target *installationTarget) {
 	if target == nil || target.ConfigPath == "" {
 		return
 	}
-	cfg, err := loadConfigAtPath(cmd, target.ConfigPath)
-	if err != nil {
+	_, err := loadConfigAtPath(cmd, target.ConfigPath)
+	switch {
+	case errors.Is(err, config.ErrRemovedCacheSetting):
+		fmt.Fprintln(cmd.OutOrStdout(), err)
+		fmt.Fprintf(cmd.OutOrStdout(), "Validate before restarting. To roll back, restore the v0.24.0 binary and its saved configuration: %s\n", releaseNotesURL("v0.24.0"))
+	case err != nil:
 		fmt.Fprintln(cmd.OutOrStdout(), "Could not inspect the selected service config for migration notices; run runner validate before restarting it.")
-		return
-	}
-	if len(cfg.Deprecations) == 0 {
-		return
-	}
-	fmt.Fprintln(cmd.OutOrStdout(), "Configuration sunset notices:")
-	for _, notice := range cfg.Deprecations {
-		fmt.Fprintf(cmd.OutOrStdout(), "  ⚠ %s\n", notice)
 	}
 }
 

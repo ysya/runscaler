@@ -1,7 +1,5 @@
-// Package cachestore models the reclaimable storage runner manages on a
-// host — Docker images and build cache, named cache volumes, the shared
-// volume, and Tart's image cache — behind one interface so the disk guard
-// can reclaim from all of them without knowing their details.
+// Package cachestore models the host storage the disk guard can reclaim,
+// including Docker images and build cache, shared volumes, and Tart's image cache.
 package cachestore
 
 import (
@@ -33,7 +31,7 @@ const (
 	Tier1 Tier = iota + 1 // dangling images, stopped containers, buildx orphans
 	Tier2                 // build cache and image layers past their max-age
 	Tier3                 // shared-volume files past their max-age
-	Tier4                 // wipe cache volumes — next build starts cold
+	Tier4                 // wipe Docker build cache — next build starts cold
 )
 
 // TiersFor returns the tiers at which a store of the given kind may be
@@ -74,13 +72,6 @@ type CacheStore interface {
 	// reports the bytes freed. Tiers the store does not participate in are
 	// a no-op returning 0.
 	Reclaim(ctx context.Context, tier Tier) (uint64, error)
-	// Budget reports this store's own operator-configured retention cap,
-	// independent of the disk guard's tier ladder: bytes is the cap, and
-	// onExceed is "wipe" or "warn" ("" behaves as "warn") for what the
-	// guard does once usage exceeds it. A store with no such policy
-	// returns (0, ""); the guard treats a zero budget as "not configured"
-	// and never measures it for this purpose.
-	Budget() (bytes uint64, onExceed string)
 }
 
 // serialized wraps store so that no two callers ever run its Measure or

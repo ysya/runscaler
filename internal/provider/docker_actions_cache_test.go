@@ -15,18 +15,15 @@ import (
 
 func TestDockerProviderActionsCacheOptIn(t *testing.T) {
 	for _, tc := range []struct {
-		name, url string
-		targets   []string
+		name, url  string
+		sharedPath string
 	}{
 		{name: "disabled"},
 		{name: "enabled", url: "http://cache.example:3000/"},
-		{name: "enabled with ownership setup", url: "http://cache.example:3000/", targets: []string{"/cache/with space", "/cache/a'$(id)"}},
+		{name: "enabled with ownership setup", url: "http://cache.example:3000/", sharedPath: "/shared/with space/a'$(id)"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			dc := config.DockerConfig{ActionsCacheURL: tc.url}
-			for i, target := range tc.targets {
-				dc.CacheVolumes = append(dc.CacheVolumes, string(rune('a'+i))+"-cache:"+target)
-			}
+			dc := config.DockerConfig{ActionsCacheURL: tc.url, SharedVolume: tc.sharedPath}
 			p, client := newConfigDockerProvider(dc)
 			if _, err := p.StartInstance(context.Background(), "cache-test", "test-jit"); err != nil {
 				t.Fatal(err)
@@ -49,8 +46,8 @@ func TestDockerProviderActionsCacheOptIn(t *testing.T) {
 			if check < 0 {
 				t.Fatalf("listener not gated by checker success: %q", script)
 			}
-			for _, target := range tc.targets {
-				own := strings.Index(script, "fix_own "+shell.Quote(target)+";")
+			if tc.sharedPath != "" {
+				own := strings.Index(script, "fix_own "+shell.Quote(tc.sharedPath)+";")
 				if own < 0 || own >= check {
 					t.Fatalf("ownership setup must precede checker: %q", script)
 				}

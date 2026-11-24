@@ -19,14 +19,6 @@ type fakeStore struct {
 	path     string
 	disabled bool
 
-	// size, budget and onExceed back Measure/Budget for the budget-
-	// enforcement tests: Measure reports size, Budget reports (budget,
-	// onExceed) verbatim — mirroring how cacheVolumeStore carries
-	// BudgetBytes/OnExceed straight from its config (see volume.go).
-	size     uint64
-	budget   uint64
-	onExceed string
-
 	reclaimedTiers []cachestore.Tier
 	measureCalls   int
 }
@@ -38,7 +30,7 @@ func (f *fakeStore) Enabled() bool              { return !f.disabled }
 
 func (f *fakeStore) Measure(_ context.Context) (uint64, error) {
 	f.measureCalls++
-	return f.size, nil
+	return 0, nil
 }
 
 func (f *fakeStore) Reclaim(_ context.Context, tier cachestore.Tier) (uint64, error) {
@@ -46,16 +38,12 @@ func (f *fakeStore) Reclaim(_ context.Context, tier cachestore.Tier) (uint64, er
 	return 0, nil
 }
 
-func (f *fakeStore) Budget() (uint64, string) { return f.budget, f.onExceed }
-
 // blockingStore is a cachestore.CacheStore double whose Reclaim blocks
 // until the test releases it, used only by
 // TestGuard_SweepDoesNotRunConcurrently to hold a Sweep "in progress" for
 // as long as the test needs — deterministically, via channels, rather than
 // a sleep — so a second, concurrent Sweep call can be raced against it.
-// Budget() deliberately returns (0, "") so enforceBudgets skips this store
-// entirely (no Measure call to also coordinate); every entry/exit of
-// Reclaim is recorded under mu so the test can assert no two ever overlap.
+// Reclaim records entry and exit under mu so the test can detect overlap.
 type blockingStore struct {
 	name string
 	kind cachestore.StoreKind
@@ -75,7 +63,6 @@ func (b *blockingStore) Kind() cachestore.StoreKind              { return b.kind
 func (b *blockingStore) Path() string                            { return b.path }
 func (b *blockingStore) Enabled() bool                           { return true }
 func (b *blockingStore) Measure(context.Context) (uint64, error) { return 0, nil }
-func (b *blockingStore) Budget() (uint64, string)                { return 0, "" }
 
 func (b *blockingStore) Reclaim(_ context.Context, _ cachestore.Tier) (uint64, error) {
 	b.mu.Lock()

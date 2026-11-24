@@ -1,7 +1,7 @@
 // Package diskguard reclaims disk space from cachestore.CacheStore
 // instances under pressure: it groups stores by the filesystem their Path()
 // resolves to, reads point-in-time capacity via StatFor, and walks
-// cachestore's tier ladder (or a store's own configured budget) filesystem
+// cachestore's tier ladder filesystem
 // by filesystem until TargetFree is met or every allowed tier has run.
 // Threshold parsing (percentages and absolute sizes) lives in the leaf
 // package internal/bytesize, imported by both this package and
@@ -28,23 +28,11 @@ type Config struct {
 	MaxTier             cachestore.Tier
 }
 
-// Guard decides when to reclaim disk space, from which cachestore.CacheStore
-// stores, in what order, and when to stop. It runs two independent
-// mechanisms on every Sweep: a per-store budget check (enforceBudgets —
-// runs regardless of disk pressure, unbounded by MaxTier), and a
-// disk-pressure tier ladder (sweepFilesystem — runs only when a
-// filesystem's free space has dropped below MinFree, and never reclaims
-// past MaxTier).
-//
-// Neither mechanism consults a store's Enabled(). Enabled() means "run this
-// store's own routine periodic cleanup", not "never touch this even under disk
-// pressure" — the periodic sweepers in cmd/runner gate on it, but the
-// guard reclaims from every configured store regardless, because refusing
-// to touch a store the operator merely left off its routine schedule would
-// leave the guard unable to reclaim anything on a stock config (prune and
-// buildx-cleanup default off since v0.4). A host whose disk this guard must
-// never touch at all should set `[disk] guard = false`, not rely on a
-// per-store Enabled() it was never designed to satisfy.
+// Guard reclaims from a filesystem when free space falls below MinFree.
+// It walks the store kinds' tiers in order up to MaxTier, stopping at
+// TargetFree. Each store's Enabled flag controls its own periodic sweeper.
+// The disk guard considers all configured stores, including ones with
+// disabled periodic cleanup.
 type Guard struct {
 	cfg    Config
 	stores []cachestore.CacheStore
@@ -102,9 +90,8 @@ func (g *Guard) statByFilesystem() map[string]filesystemGroup {
 	return groups
 }
 
-// Sweep runs the budget-enforcement pass and then the disk-pressure tier
-// ladder, filesystem by filesystem. It always returns nil: every failure
-// mode below (a store's statfs, Measure, or Reclaim call failing) is
+// Sweep runs the disk-pressure tier ladder filesystem by filesystem. It
+// always returns nil: every failure (a statfs or Reclaim call failing) is
 // logged and skipped rather than propagated, so one misbehaving store or
 // filesystem never stops the sweep from doing what it can for the rest.
 //
@@ -145,11 +132,6 @@ func (g *Guard) Sweep(ctx context.Context) error {
 		return nil
 	}
 	defer g.sweepMu.Unlock()
-
-	// Budget enforcement is a separate concern from the tier ladder below:
-	// it runs on every sweep regardless of disk pressure and is not bounded
-	// by MaxTier. See enforceBudgets' doc comment.
-	g.enforceBudgets(ctx)
 
 	for _, grp := range g.statByFilesystem() {
 		g.sweepFilesystem(ctx, grp)
@@ -218,67 +200,6 @@ func (g *Guard) warnShortfall(path string, st FSStat, targetBytes uint64) {
 		// meeting the target, so this subtraction cannot underflow.
 		slog.Uint64("shortfall_bytes", targetBytes-st.FreeBytes),
 	)
-}
-
-// enforceBudgets checks every store's own configured budget and acts on
-// it, independent of disk pressure, unbounded by MaxTier, and regardless of
-// Enabled() (see Guard's doc comment): it is the store's own retention
-// policy taking effect, not the guard's disk-pressure escalation (that is
-// sweepFilesystem, above). "Unbounded by MaxTier" only means the tier
-// ceiling does not apply here — the wipe path below is still gated by
-// TiersFor, the same kind-based safety rule every tier-ladder Reclaim call
-// goes through. It calls Measure, so — unlike the rest of Sweep — it is
-// never run from NeedsReclaim, which must stay on the cheap statfs-only
-// path.
-func (g *Guard) enforceBudgets(ctx context.Context) {
-	for _, s := range g.stores {
-		budget, onExceed := s.Budget()
-		if budget == 0 {
-			continue // no budget configured for this store
-		}
-
-		used, err := s.Measure(ctx)
-		if err != nil {
-			g.logger.Warn("Disk guard: measure failed, skipping budget check",
-				slog.String("store", s.Name()), slog.Any("error", err))
-			continue
-		}
-		if used <= budget {
-			continue
-		}
-
-		if onExceed == "wipe" {
-			// StoreKind exists precisely to make it structurally impossible
-			// to reclaim a store's data at a tier that would destroy
-			// something live (see store.go's StoreKind doc comment); every
-			// tier-ladder Reclaim call above is gated by it via TiersFor,
-			// and this call site must not be the one exception. Without
-			// this check, a future KindScratch store that grows a budget
-			// would have its un-expired, in-flight handoff data wiped
-			// wholesale the first time it went over budget.
-			if !slices.Contains(cachestore.TiersFor(s.Kind()), cachestore.Tier4) {
-				g.logger.Warn("Disk guard: store exceeds its configured budget but its kind forbids a wholesale wipe, skipping",
-					slog.String("store", s.Name()), slog.Any("kind", s.Kind()),
-					slog.Uint64("used_bytes", used), slog.Uint64("budget_bytes", budget))
-				continue
-			}
-			if _, err := s.Reclaim(ctx, cachestore.Tier4); err != nil {
-				g.logger.Warn("Disk guard: budget wipe failed",
-					slog.String("store", s.Name()), slog.Uint64("used_bytes", used),
-					slog.Uint64("budget_bytes", budget), slog.Any("error", err))
-			}
-			continue
-		}
-
-		// "warn" (and the default "") never deletes data — fine-grained
-		// eviction under the cap is left to the store's own tooling (e.g.
-		// ccache's own max_size), the same way the docker-build-cache and
-		// tart stores' Tier2 trims already handle their own BudgetGB.
-		g.logger.Warn("Disk guard: store exceeds its configured budget",
-			slog.String("store", s.Name()), slog.Uint64("used_bytes", used),
-			slog.Uint64("budget_bytes", budget),
-			slog.String("note", "fine-grained eviction is the tool's own responsibility"))
-	}
 }
 
 // NeedsReclaim reports whether any store's filesystem is currently below

@@ -124,11 +124,10 @@ resources discoverable by startup reconciliation and `runner doctor --fix`.
 The runner uses a private Unix socket and shares the daemon's network namespace,
 so published inner service ports are reachable through runner localhost. The
 workspace and runner externals are mounted at the same paths in both containers.
-Explicit `shared-volume` and cache-volume mounts are mirrored at matching paths
-and retain their existing persistence and retention policies. These files remain
-shared across jobs. Other nested bind-mount source paths refer to the daemon
-container's filesystem. In DinD mode, shared/cache paths must not overlap one
-another or equal, contain, or sit below `/var/run`, `/run`, `/var/lib/docker`,
+An explicit `shared-volume` persists across jobs and is mounted at the same path
+in both containers. Other nested bind-mount source paths refer to the daemon
+container's filesystem. In DinD mode the shared path must not equal, contain,
+or sit below `/var/run`, `/run`, `/var/lib/docker`,
 `/home/runner/_work`, or `/home/runner/externals`.
 
 `workspace-root` is only for host-socket mode and cannot be combined with `dind` or `none`. DinD already shares a private per-job workspace without a host socket proxy. Its `network` may select a named network, but cannot use `host` or `container:<id>`.
@@ -411,15 +410,13 @@ is logged and left for the next sweep.
 
 For the built-in Go receiver, set `[scaleset.docker] native-actions-cache = true`.
 The manager uses `[actions-cache].advertise-url` for that scale set. The default
-is false, and an inherited true value can be overridden with false. The existing
-`actions-cache-url` remains available for an explicit endpoint, including an
-external receiver. An inherited or explicit URL alongside `native-actions-cache = true` must
-equal the global advertised URL. Opt in per scale set with the unified
-`actions-runner` image after accepting its architecture-specific cache behavior.
-Pin an immutable digest during canary validation.
-When an old explicit URL points to the built-in receiver, Runscaler emits an
-advisory sunset warning. Remove that duplicate URL after enabling the new
-switch; external receiver URLs are not deprecated.
+is false. Set it to false on a scale set to override an inherited true value.
+For native mode, omit `actions-cache-url`. If `[docker]` supplies an external URL,
+set `actions-cache-url = ""` in `[scaleset.docker]` to clear it for this set. A URL
+matching the enabled native receiver's advertised URL fails validation even
+with `native-actions-cache = true`. To use an external receiver, set its
+distinct `actions-cache-url` with native mode disabled for that set.
+Use the unified `actions-runner` image and pin an immutable digest during canary validation.
 A stock runner or the bare fork base image is insufficient: the final variant
 must provide Runscaler's verified capability checker before accepting work.
 
@@ -440,21 +437,16 @@ runner-image = "ghcr.io/ysya/actions-runner:latest"
 [scaleset.docker]
 platform = "linux/amd64"
 native-actions-cache = true
-# cache-volumes = [] # only if overriding inherited mounts
-# cache = []         # only if overriding inherited mounts
 ```
 
-Keep the service/data outside runner-owned resources and generic wipeable cache
-mounts. Read [service setup, supported clients and recovery](local-actions-cache.md).
-For rollback, drain and disable affected opt-in sets before reverting settings;
-simply disabling the native cache opt-in and resuming unchanged actions enables GitHub
-caching again. An empty override is configuration behavior, not a local-only
-rollback procedure.
+Keep the receiver's data outside job mounts. For rollback, drain affected
+scale sets before restoring the prior endpoint and config. Disabling native
+caching and resuming unchanged cache actions can send payloads to GitHub.
+See [service setup, supported clients and recovery](local-actions-cache.md).
 
-`cache-volumes` and `[[docker.cache]]` are deprecated for new Docker
-deployments. They continue to mount and enforce their existing budgets until
-removed from the config. See the [migration steps](caching.md#migration-to-actions-cache)
-before switching workflows or deleting old Docker volumes.
+When upgrading from v0.24.0 or earlier, remove `cache-volumes` and `cache`
+from global and per-scale-set Docker settings, including empty overrides.
+See [migration to Actions cache](caching.md#migration-to-actions-cache).
 
 ### Native Go receiver (opt-in)
 
@@ -488,8 +480,7 @@ global receiver to be enabled; the scale set gets its advertised URL automatical
 Other scale sets retain their configured endpoint. The text and JSON forms of
 `runner status` report native readiness, completed entries and bytes when enabled;
 the text view also compares usage with the shared retention target. `runner cache`
-provides more detailed storage information. Empty `cache-volumes = []` and
-`cache = []` overrides are only needed when inherited mounts must be disabled.
+provides more detailed storage information.
 
 ## GitHub App Authentication
 
@@ -658,7 +649,7 @@ pool-size = 2
 | `--health-address`  | `health-address`      | `127.0.0.1`                             | Health check listen address                       |
 | `--health-port`     | `health-port`        | `8080`                                  | Health check HTTP port (0 to disable)             |
 
-Process-wide `drain-timeout` and advanced tuning keys (cleanup, cache volumes,
+Process-wide `drain-timeout` and advanced tuning keys (cleanup, Actions cache,
 isolation) are config-file only by design — see `config.example.toml` for the
 full list.
 

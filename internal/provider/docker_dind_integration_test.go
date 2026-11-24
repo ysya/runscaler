@@ -78,24 +78,18 @@ func TestDinDDockerIntegration(t *testing.T) {
 		}
 	})
 	sharedName := "runscaler-dind-test-shared-" + uuid.NewString()
-	cacheName := "runscaler-dind-test-cache-" + uuid.NewString()
-	for _, name := range []string{sharedName, cacheName} {
-		if _, err := client.VolumeCreate(ctx, dockerclient.VolumeCreateOptions{Name: name}); err != nil {
-			t.Fatal(err)
-		}
+	if _, err := client.VolumeCreate(ctx, dockerclient.VolumeCreateOptions{Name: sharedName}); err != nil {
+		t.Fatal(err)
 	}
 	t.Cleanup(func() {
 		cleanup, done := context.WithTimeout(context.Background(), 30*time.Second)
 		defer done()
-		for _, name := range []string{sharedName, cacheName} {
-			if _, err := client.VolumeRemove(cleanup, name, dockerclient.VolumeRemoveOptions{}); err != nil {
-				t.Errorf("remove test-only persistent store: %v", err)
-			}
+		if _, err := client.VolumeRemove(cleanup, sharedName, dockerclient.VolumeRemoveOptions{}); err != nil {
+			t.Errorf("remove test-only shared volume: %v", err)
 		}
 	})
 	p := NewDockerProvider(config.ScaleSetConfig{RunnerImage: image, Docker: config.DockerConfig{
 		DaemonMode: "dind", SharedVolume: "/shared", SharedVolumeName: sharedName,
-		CacheVolumes: []string{cacheName + ":/home/runner/.cache"},
 	}}, client, slog.New(slog.DiscardHandler))
 	groups := map[string]bool{}
 	t.Cleanup(func() {
@@ -178,10 +172,10 @@ func TestDinDDockerIntegration(t *testing.T) {
 		}
 		must("", "exec", id, "docker", "pull", "busybox:1.37")
 		if i == 0 {
-			must("", "exec", id, "sh", "-c", "printf shared-ok > /shared/probe; printf cache-ok > /home/runner/.cache/probe")
+			must("", "exec", id, "sh", "-c", "printf shared-ok > /shared/probe")
 		}
-		if got := must("", "exec", id, "docker", "run", "--rm", "-v", "/shared:/shared", "-v", "/home/runner/.cache:/cache", "busybox:1.37", "sh", "-c", "cat /shared/probe /cache/probe"); got != "shared-okcache-ok" {
-			t.Fatalf("persistent store mirroring=%q", got)
+		if got := must("", "exec", id, "docker", "run", "--rm", "-v", "/shared:/shared", "busybox:1.37", "cat", "/shared/probe"); got != "shared-ok" {
+			t.Fatalf("shared volume mirroring=%q", got)
 		}
 		must("", "exec", id, "docker", "network", "create", "same-name")
 		must("", "exec", id, "docker", "volume", "create", "same-name")
@@ -231,10 +225,8 @@ func TestDinDDockerIntegration(t *testing.T) {
 	for group := range groups {
 		assertGone(group)
 	}
-	for _, name := range []string{sharedName, cacheName} {
-		if _, err := client.VolumeInspect(ctx, name, dockerclient.VolumeInspectOptions{}); err != nil {
-			t.Fatalf("persistent store removed with job: %v", err)
-		}
+	if _, err := client.VolumeInspect(ctx, sharedName, dockerclient.VolumeInspectOptions{}); err != nil {
+		t.Fatalf("shared volume removed with job: %v", err)
 	}
 	t.Log("daemon-exit supervision, cleanup, and missing-runner recovery verified")
 	// A forced not-ready health response exercises timeout and independent
@@ -276,7 +268,7 @@ func TestDinDDockerIntegration(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertGone(orphan)
-	t.Log("persistent store preservation, startup cancellation/timeout rollback, and volume-only recovery verified; all test groups empty")
+	t.Log("shared volume preservation, startup cancellation/timeout rollback, and volume-only recovery verified; all test groups empty")
 }
 
 type dinDNeverReady struct {

@@ -323,64 +323,6 @@ func TestTartCacheStores(t *testing.T) {
 	})
 }
 
-func TestCacheVolumeStoresFor(t *testing.T) {
-	t.Run("dedups by volume name across scalesets, first path wins", func(t *testing.T) {
-		sets := []config.ScaleSetConfig{
-			{RunnerImage: "img-a", Docker: config.DockerConfig{CacheVolumes: []string{"gradle-cache:/home/runner/.gradle"}}},
-			{RunnerImage: "img-b", Docker: config.DockerConfig{CacheVolumes: []string{"gradle-cache:/root/.gradle", "pnpm:/home/runner/.pnpm"}}},
-		}
-		stores := cacheVolumeStoresFor(sets, nil, "/root")
-		if len(stores) != 2 {
-			t.Fatalf("stores = %d, want 2 (gradle-cache deduped, pnpm added)", len(stores))
-		}
-		names := map[string]bool{}
-		for _, s := range stores {
-			names[s.Name()] = true
-		}
-		if !names["cache-volume:gradle-cache"] || !names["cache-volume:pnpm"] {
-			t.Errorf("store names = %v, want cache-volume:gradle-cache and cache-volume:pnpm", names)
-		}
-	})
-
-	t.Run("tart scalesets never contribute a cache-volume store", func(t *testing.T) {
-		sets := []config.ScaleSetConfig{{Provider: "tart"}}
-		if stores := cacheVolumeStoresFor(sets, nil, "/root"); len(stores) != 0 {
-			t.Errorf("stores = %d, want 0 for a Tart scaleset", len(stores))
-		}
-	})
-
-	// TestLoad_DockerCacheLongForm (internal/config) already pins that TOML
-	// [[docker.cache]] decodes into DockerConfig.Cache; this pins the next
-	// link in the chain — that a parsed long-form budget/on-exceed actually
-	// reaches the constructed cachestore.CacheStore's Budget(), which is
-	// what internal/diskguard.Guard.enforceBudgets reads. Without this,
-	// on-exceed = "wipe" would parse and validate cleanly but never fire.
-	t.Run("long-form budget and on-exceed reach the constructed store", func(t *testing.T) {
-		sets := []config.ScaleSetConfig{
-			{RunnerImage: "img-a", Docker: config.DockerConfig{
-				CacheVolumes: []string{"gradle-cache:/home/runner/.gradle"},
-				Cache: []config.CacheVolumeSpec{
-					{Name: "ccache", Path: "/home/runner/.ccache", Budget: "20GB", OnExceed: "wipe"},
-				},
-			}},
-		}
-		stores := cacheVolumeStoresFor(sets, nil, "/root")
-		if len(stores) != 2 {
-			t.Fatalf("stores = %d, want 2", len(stores))
-		}
-		byName := make(map[string]cachestore.CacheStore, len(stores))
-		for _, s := range stores {
-			byName[s.Name()] = s
-		}
-		if budget, onExceed := byName["cache-volume:ccache"].Budget(); budget != 20*1024*1024*1024 || onExceed != "wipe" {
-			t.Errorf("ccache Budget() = (%d, %q), want (20GiB, \"wipe\")", budget, onExceed)
-		}
-		if budget, onExceed := byName["cache-volume:gradle-cache"].Budget(); budget != 0 || onExceed != "" {
-			t.Errorf("gradle-cache (short form) Budget() = (%d, %q), want (0, \"\")", budget, onExceed)
-		}
-	})
-}
-
 func TestDockerSocketStoresFlatten(t *testing.T) {
 	t.Run("zero value (nil client) flattens to nil, not a slice of nil stores", func(t *testing.T) {
 		var s dockerSocketStores

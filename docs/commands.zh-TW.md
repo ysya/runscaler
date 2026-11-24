@@ -31,10 +31,10 @@ runner status --json
 runner status --no-color
 ```
 
-`runner update --check` 也會讀取選定服務的設定，在更換 binary 前顯示不阻斷操作的
-sunset 提醒。使用 `--binary-path` 而未選服務時，無法檢查其他服務設定。
-破壞相容變更請查看目標版本的 release notes 與[升級前準備](../README.zh-TW.md#upgrade-requirements)。
-舊版 binary 無法偵測其發布後才新增的提醒。
+`runner update --check` 會檢查選定服務的設定。遇到已移除的快取設定時，會列出遷移錯誤與供回復使用的 v0.24.0 連結。使用
+`--binary-path` 時沒有選定服務可供檢查。舊更新器只認得該版本已知的設定，
+請先閱讀目標版本的[升級前準備](../README.zh-TW.md#upgrade-requirements)，
+並以新執行檔驗證設定後再重啟服務。
 
 `/healthz`（以及 `status --json`）中各 runner 規模集的選用 `runtime` 物件，
 會回報啟動嘗試次數、失敗次數、連續失敗次數、上次嘗試與成功啟動時間、
@@ -152,8 +152,7 @@ Doctor 會使用各個已設定 runner 規模集的 App 或 PAT 憑證探測 Git
 
 `--fix` 旗標會取得與 `runner run` 相同的全機鎖定，因此只要目前仍有 runner 執行個體
 正在執行，就會拒絕移除資源。
-啟動時的資源清理或 `doctor --fix` 都不會移除共用磁碟區與快取磁碟區：
-這些磁碟區原本就會保留至程序結束之後，而且可能仍包含執行中工作流程的後續工作所需的資料。
+啟動時的資源清理與 `doctor --fix` 都會保留已設定的共用磁碟區，讓進行中工作流程的後續工作能讀取交接檔案。
 
 一般 runner 刪除，以及這兩個修復路徑，都會先停止父 runner，再清除透過
 `--network container:<runner-id-or-name>` 或

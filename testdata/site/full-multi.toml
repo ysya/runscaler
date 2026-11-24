@@ -41,15 +41,9 @@ cooldown = "5m"
 
 [scaleset.docker]
 dind = false
+shared-volume = "/shared"
 shared-volume-max-age = "168h"
 native-actions-cache = true
-cache-volumes = ["gradle:/home/runner/.gradle"]
-
-[[scaleset.docker.cache]]
-name = "pip"
-path = "/home/runner/.cache/pip"
-budget = "20GB"
-on-exceed = "warn"
 
 [[scaleset]]
 url = "https://github.com/example-org"

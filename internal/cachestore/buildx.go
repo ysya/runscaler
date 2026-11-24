@@ -84,10 +84,6 @@ func (s *buildxStore) Reclaim(ctx context.Context, tier Tier) (uint64, error) {
 	return 0, nil
 }
 
-// Budget reports no cap: orphaned builders are already-abandoned garbage
-// (see NewBuildxStore), not a retained cache with a size policy to enforce.
-func (s *buildxStore) Budget() (uint64, string) { return 0, "" }
-
 // buildxBuilderPrefix is the name prefix Docker gives to BuildKit builder
 // containers and their state volumes (e.g. buildx_buildkit_builder-<uuid>0).
 const buildxBuilderPrefix = "buildx_buildkit_"

@@ -101,7 +101,7 @@ daemon-mode = "dind"
 
 每個 runner 都會取得新的 daemon，包括 `min-runners` 保留的閒置預備執行個體。啟動流程會在 `dind-startup-timeout` 內等待 `docker info` 確認就緒，再啟動 runner；daemon 故障時，也會停止其 runner。工作完成或取消後，會移除該 daemon、內部容器、映像檔、網路、daemon 建立的具名磁碟區、建置快取與執行個體的暫存儲存空間，不會把 daemon 重複用於下一個工作。啟動或清理中斷時，帶有歸屬標籤的殘留資源可由啟動時清理或 `runner doctor --fix` 回收。
 
-runner 使用私人 Unix socket，並與 daemon 共用網路命名空間，因此內部服務發布的連接埠可透過 runner 的 localhost 存取。工作目錄與 runner externals 會以相同路徑掛載至兩個容器。明確設定的 `shared-volume` 與快取磁碟區也會鏡像掛載至相同路徑，保留原本的持久保存與保留政策；其中的檔案仍會跨工作共用。其他內部 bind mount 的來源路徑則指向 daemon 容器的檔案系統。DinD 模式下，共用／快取路徑不得互相重疊，也不得等於、包含或位於 `/var/run`、`/run`、`/var/lib/docker`、`/home/runner/_work`、`/home/runner/externals` 之下。
+runner 使用私人 Unix socket，並與 daemon 共用網路命名空間，因此內部服務發布的連接埠可透過 runner 的 localhost 存取。工作目錄與 runner externals 會以相同路徑掛載至兩個容器。明確設定的 `shared-volume` 也會掛載至兩個容器的相同路徑，其中的檔案可跨工作共用。其他內部 bind mount 的來源路徑則指向 daemon 容器的檔案系統。DinD 模式下，共用磁碟區路徑不得等於、包含或位於 `/var/run`、`/run`、`/var/lib/docker`、`/home/runner/_work`、`/home/runner/externals` 之下。
 
 `workspace-root` 僅適用於主機 socket 模式，不能與 `dind` 或 `none` 搭配。DinD 已共用私人工作目錄，不需要主機 socket 代理。`network` 可選擇具名網路，但不能使用 `host` 或 `container:<id>`。
 
@@ -231,14 +231,13 @@ gh api repos/<owner>/<repo>/actions/runners/deprecations/<version>   # runtime_d
 
 使用內建 Go 接收器時，在 `[scaleset.docker]` 設定 `native-actions-cache = true`；
 管理程序會自動採用 `[actions-cache].advertise-url`。預設為 false，也可以在 scale set
-用 false 覆寫繼承的 true。既有的 `actions-cache-url` 仍可指定外部接收器等明確端點；
-若與 `native-actions-cache = true` 同時設定或繼承，URL 必須與全域 advertise URL 相同。
-建議逐一 scale set 啟用，並先針對實際架構完成快取驗收；canary 驗證期間請固定
-映像 digest。統一的 `actions-runner` 映像可支援官方與本機快取，單純 fork base image
-仍不夠；最終映像必須提供
-Runscaler 的 capability checker，先驗證能力再接收工作。
-舊的明確 URL 若指向內建接收器，Runscaler 會顯示不阻斷執行的 sunset 警告；
-啟用新開關後可移除重複的 URL。外部接收器 URL 不列入淘汰範圍。
+用 false 覆寫繼承的 true。原生模式請省略 `actions-cache-url`。若 `[docker]`
+設有預設外部 URL，可以在 `[scaleset.docker]` 指定 `actions-cache-url = ""` 以清除繼承值。
+若它與已啟用的原生接收器的 `advertise-url` 相同，即使已設定
+`native-actions-cache = true`，仍會驗證失敗。若使用外部接收器，請在該規模集
+關閉原生模式，並指定不同的 `actions-cache-url`。
+請使用統一的 `actions-runner` 映像，並在測試規模集固定映像 digest。
+最終映像須具備 Runscaler 的 capability checker，能在接受工作前確認快取能力。
 
 端點必須是有 host 與結尾實際斜線的完整 HTTP(S) URL，不能有帳密、query 或 fragment。
 驗證錯誤不會回顯輸入的敏感值，也不會自動修正或正規化 URL。實際 runner 與旁系
@@ -256,19 +255,14 @@ runner-image = "ghcr.io/ysya/actions-runner:latest"
 [scaleset.docker]
 platform = "linux/amd64"
 native-actions-cache = true
-# cache-volumes = [] # 只有需要關閉繼承的掛載時才設定
-# cache = []         # 只有需要關閉繼承的掛載時才設定
 ```
 
-服務與資料不可歸屬於 runner，也不可放進一般可清空的快取掛載。
-詳見[服務設定、client 範圍與回復方式](local-actions-cache.zh-TW.md)。
-回復時先 drain 並停用受影響的 opt-in scale set，再還原設定；直接關閉原生快取開關並恢復
-原 cache action 會重新使用 GitHub cache。空字串覆寫是設定語意，不是保證資料只留
-本機的回復程序。
+接收器資料應放在工作掛載範圍之外。回復時先排空受影響的規模集，再還原先前的端點和設定。
+若關閉原生快取後直接執行原有的快取 action，資料可能會傳至 GitHub。
+詳見[服務設定、支援的 client 與回復方式](local-actions-cache.zh-TW.md)。
 
-`cache-volumes` 與 `[[docker.cache]]` 已開始 sunset；現有設定仍照常掛載並執行
-原本的容量政策，直到從設定移除為止。切換 workflow 或處理舊 Docker volume 前，
-請先依照[遷移步驟](caching.zh-TW.md#遷移至-actions-cache)驗收。
+從 v0.24.0 或更早版本升級時，請從全域及各規模集的 Docker 設定移除
+`cache-volumes` 與 `cache`，包括空覆寫。詳見[遷移至 Actions cache](caching.zh-TW.md#遷移至-actions-cache)。
 
 <a id="native-go-receiver-opt-in"></a>
 
@@ -298,7 +292,6 @@ GitHub token issuer／JWKS 與 Results 上游；可信任的 HTTPS issuer 可同
 接收器；scale set 會自動取得 advertise URL。其他 scale set 保留原有端點。
 啟用後，文字版與 JSON 版 `runner status` 會回報原生快取的就緒狀態、項目數與容量；
 文字版也會顯示相對於共用保留目標的用量。`runner cache` 可查看更詳細的儲存資訊。
-只有需要關閉繼承的掛載時，才需設定空的 `cache-volumes = []` 與 `cache = []`。
 
 ## GitHub App 驗證
 
@@ -448,7 +441,7 @@ pool-size = 2
 | `--health-address` | `health-address` | `127.0.0.1` | 健康檢查的接聽位址 |
 | `--health-port` | `health-port` | `8080` | 健康檢查的 HTTP 連接埠（0 表示停用） |
 
-適用於整個程序的 `drain-timeout` 與進階調校設定鍵（清理、快取磁碟區、隔離）刻意設計為只能透過設定檔設定；完整清單請見 `config.example.toml`。
+適用於整個程序的 `drain-timeout` 與進階調校設定鍵（清理、Actions 快取、隔離）刻意設計為只能透過設定檔設定；完整清單請見 `config.example.toml`。
 
 與 GitLab Runner 相同，`concurrent` 限制管理程序內的 runner 總數，`max-runners` 則是各規模集的個別上限。控制器會在 JIT／供應器啟動前預留全域容量。Tart 預熱 VM 不持有此容量租約，因此數量會加在 `concurrent` 之外。系統會先預留各組 `min-runners` 下限所需的容量，再以先進先出（FIFO）順序分配剩餘容量。`concurrent = 0` 會使用套用 macOS 限制後的有效 `max-runners` 總和。
 

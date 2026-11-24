@@ -392,7 +392,7 @@ token = "token-b"
 }
 
 // TestLoad_DockerContainerKeysInheritanceAndOverride pins that the container
-// isolation keys (network, pids-limit, shared-volume-name, cache-volumes)
+// isolation keys (network, pids-limit, shared-volume-name)
 // flow through the map-level merge with zero per-key code: they inherit from
 // the top-level table into [[scaleset]] entries, and explicit empty values in
 // an entry override non-empty defaults.
@@ -402,7 +402,6 @@ func TestLoad_DockerContainerKeysInheritanceAndOverride(t *testing.T) {
 network = "runners"
 pids-limit = 4096
 shared-volume-name = "team-shared"
-cache-volumes = ["gradle-cache:/home/runner/.gradle", "pnpm-store:/home/runner/.local/share/pnpm/store"]
 
 [[scaleset]]
 url = "https://github.com/org-a"
@@ -411,7 +410,6 @@ token = "token-a"
 
 [scaleset.docker]
 network = ""
-cache-volumes = []
 
 [[scaleset]]
 url = "https://github.com/org-b"
@@ -421,9 +419,6 @@ token = "token-b"
 	// First entry: explicit empty values win over the non-empty defaults...
 	if sets[0].Docker.Network != "" {
 		t.Errorf("sets[0] network = %q, want \"\" (explicit override)", sets[0].Docker.Network)
-	}
-	if len(sets[0].Docker.CacheVolumes) != 0 {
-		t.Errorf("sets[0] cache-volumes = %q, want none (explicit override)", sets[0].Docker.CacheVolumes)
 	}
 	// ...while untouched keys still inherit.
 	if sets[0].Docker.PidsLimit != 4096 {
@@ -442,58 +437,7 @@ token = "token-b"
 	if got := sets[1].SharedVolumeName(); got != "team-shared" {
 		t.Errorf("sets[1] shared-volume-name = %q, want team-shared (inherited)", got)
 	}
-	wantCaches := []string{"gradle-cache:/home/runner/.gradle", "pnpm-store:/home/runner/.local/share/pnpm/store"}
-	if len(sets[1].Docker.CacheVolumes) != len(wantCaches) {
-		t.Fatalf("sets[1] cache-volumes = %q, want %q (inherited)", sets[1].Docker.CacheVolumes, wantCaches)
-	}
-	for i, want := range wantCaches {
-		if sets[1].Docker.CacheVolumes[i] != want {
-			t.Errorf("sets[1] cache-volumes[%d] = %q, want %q (inherited)", i, sets[1].Docker.CacheVolumes[i], want)
-		}
-	}
-}
 
-// TestLoad_DockerCacheLongForm pins the [[docker.cache]] long form
-// (TestLoad_DockerContainerKeysInheritanceAndOverride covers the
-// cache-volumes short form): it decodes through the same map-merge pipeline
-// as every other [docker] key (inherited by a [[scaleset]] that does not
-// override it), and ParseCacheVolumes resolves its budget/on-exceed
-// end-to-end from TOML.
-func TestLoad_DockerCacheLongForm(t *testing.T) {
-	sets := resolveTOML(t, `
-[docker]
-cache-volumes = ["gradle-cache:/home/runner/.gradle"]
-
-[[docker.cache]]
-name = "ccache"
-path = "/home/runner/.ccache"
-budget = "20GB"
-on-exceed = "wipe"
-
-[[scaleset]]
-url = "https://github.com/org-a"
-name = "runners-a"
-token = "token-a"
-`)
-	mounts, err := sets[0].Docker.ParseCacheVolumes()
-	if err != nil {
-		t.Fatalf("ParseCacheVolumes: %v", err)
-	}
-	if len(mounts) != 2 {
-		t.Fatalf("mounts = %+v, want 2", mounts)
-	}
-	var ccache *CacheVolumeMount
-	for i := range mounts {
-		if mounts[i].Volume == "ccache" {
-			ccache = &mounts[i]
-		}
-	}
-	if ccache == nil {
-		t.Fatal("ccache mount not found")
-	}
-	if ccache.Path != "/home/runner/.ccache" || ccache.BudgetBytes != 20*1024*1024*1024 || ccache.OnExceed != "wipe" {
-		t.Errorf("ccache mount = %+v, want path/budget/on-exceed from the long form", ccache)
-	}
 }
 
 func TestLoad_IdentityKeysNotInherited(t *testing.T) {
@@ -607,71 +551,6 @@ nested-bad = 3
 		if cfg.Warnings[i] != w {
 			t.Errorf("Warnings[%d] = %q, want %q", i, cfg.Warnings[i], w)
 		}
-	}
-}
-
-func TestLoad_CacheVolumeSunsetWarnings(t *testing.T) {
-	tests := []struct {
-		name string
-		toml string
-		want []string
-	}{
-		{
-			name: "single scale set short form",
-			toml: `[docker]
-cache-volumes = ["gradle-cache:/home/runner/.gradle"]`,
-			want: []string{`docker.cache-volumes is deprecated; migrate tool caches to workflow Actions cache before removing this volume mount`},
-		},
-		{
-			name: "inherited and explicit long form",
-			toml: `[docker]
-cache-volumes = ["gradle-cache:/home/runner/.gradle"]
-
-[[scaleset]]
-url = "https://github.com/org"
-name = "runner-a"
-token = "private-test-token"
-[scaleset.docker]
-cache-volumes = []
-[[scaleset.docker.cache]]
-name = "ccache"
-path = "/home/runner/.ccache"
-budget = "20GB"`,
-			want: []string{
-				`docker.cache-volumes is deprecated; migrate tool caches to workflow Actions cache before removing this volume mount`,
-				`scaleset[0]: docker.cache is deprecated; migrate tool caches to workflow Actions cache before removing this volume mount`,
-			},
-		},
-		{
-			name: "empty overrides",
-			toml: `[docker]
-cache-volumes = []
-cache = []
-
-[[scaleset]]
-url = "https://github.com/org"
-name = "runner-a"
-token = "private-test-token"
-[scaleset.docker]
-cache-volumes = []
-cache = []`,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cfg := loadTOML(t, tt.toml)
-			if !slices.Equal(cfg.Deprecations, tt.want) {
-				t.Errorf("Deprecations = %q, want %q", cfg.Deprecations, tt.want)
-			}
-			if len(cfg.Warnings) != 0 {
-				t.Errorf("deprecations must not block validation: Warnings = %q", cfg.Warnings)
-			}
-			for _, warning := range cfg.Deprecations {
-				if strings.Contains(warning, "private-test-token") {
-					t.Errorf("warning includes config value: %q", warning)
-				}
-			}
-		})
 	}
 }
 
@@ -1253,11 +1132,11 @@ advertise-url = "http://192.168.50.10:3001/"
 	}
 }
 
-func TestLoad_NativeActionsCacheURLSunsetWarnings(t *testing.T) {
+func TestLoadRejectsExplicitNativeCacheURL(t *testing.T) {
 	tests := []struct {
 		name string
 		toml string
-		want []string
+		want string
 	}{
 		{
 			name: "single legacy native endpoint",
@@ -1266,7 +1145,7 @@ enabled = true
 advertise-url = "http://192.168.50.10:3001/"
 [docker]
 actions-cache-url = "http://192.168.50.10:3001/"`,
-			want: []string{`docker.actions-cache-url is deprecated when it points to [actions-cache].advertise-url; use docker.native-actions-cache = true and remove the duplicate URL before a future breaking release`},
+			want: "docker.actions-cache-url",
 		},
 		{
 			name: "inherited native endpoint but external override remains supported",
@@ -1285,7 +1164,7 @@ url = "https://github.com/org"
 token = "test-only"
 [scaleset.docker]
 actions-cache-url = "https://cache.example/"`,
-			want: []string{`scaleset[0]: docker.actions-cache-url is deprecated when it points to [actions-cache].advertise-url; use docker.native-actions-cache = true and remove the duplicate URL before a future breaking release`},
+			want: "scaleset[0]",
 		},
 		{
 			name: "new native opt-in",
@@ -1303,7 +1182,7 @@ advertise-url = "http://192.168.50.10:3001/"
 [docker]
 native-actions-cache = true
 actions-cache-url = "http://192.168.50.10:3001/"`,
-			want: []string{`docker.actions-cache-url is deprecated when it points to [actions-cache].advertise-url; use docker.native-actions-cache = true and remove the duplicate URL before a future breaking release`},
+			want: "docker.actions-cache-url",
 		},
 		{
 			name: "external endpoint",
@@ -1311,6 +1190,24 @@ actions-cache-url = "http://192.168.50.10:3001/"`,
 enabled = true
 advertise-url = "http://192.168.50.10:3001/"
 [docker]
+actions-cache-url = "https://cache.example/"`,
+		},
+		{
+			name: "receiver disabled",
+			toml: `[actions-cache]
+advertise-url = "https://cache.example/"
+[docker]
+actions-cache-url = "https://cache.example/"`,
+		},
+		{
+			name: "only effective overrides use external receivers",
+			toml: `[actions-cache]
+enabled = true
+advertise-url = "https://native.example/"
+[docker]
+actions-cache-url = "https://native.example/"
+[[scaleset]]
+[scaleset.docker]
 actions-cache-url = "https://cache.example/"`,
 		},
 		{
@@ -1325,12 +1222,20 @@ actions-cache-url = "http://192.168.50.10:3001/"`,
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg := loadTOML(t, tt.toml)
-			if !slices.Equal(cfg.Deprecations, tt.want) {
-				t.Errorf("Deprecations = %q, want %q", cfg.Deprecations, tt.want)
+			v := viper.New()
+			v.SetConfigType("toml")
+			if err := v.ReadConfig(strings.NewReader(tt.toml)); err != nil {
+				t.Fatal(err)
 			}
-			if len(cfg.Warnings) != 0 {
-				t.Errorf("sunset notices must remain advisory: %q", cfg.Warnings)
+			_, err := Load(v)
+			if tt.want == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.want) || !strings.Contains(err.Error(), "native-actions-cache = true") {
+				t.Fatalf("Load error = %v, want migration for %q", err, tt.want)
 			}
 		})
 	}

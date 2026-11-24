@@ -40,8 +40,7 @@ max-runners = 10
 #
 # Placed here, before [disk]/[docker]/[tart] below, on purpose: TOML has no
 # way to "close" a table other than opening the next one, so bare keys like
-# these must never directly follow an active table — see the note above
-# [[docker.cache]] for the same rule applied inside [docker].
+# these must come before the first table.
 
 # url = "https://github.com/your-org"
 # name = "my-runners"
@@ -83,7 +82,7 @@ max-runners = 10
 # min-free = "10%"     # free-space floor that triggers reclamation: a percentage of the filesystem, or a size like "20GB"
 # target-free = "20%"  # free-space level reclamation aims to restore before stopping; must be greater than min-free
 # interval = "1h"      # how often the periodic check runs
-# max-tier = 3         # highest reclaim tier allowed (1-4); tier 4 wipes cache volumes, so it needs explicit opt-in
+# max-tier = 3         # highest reclaim tier allowed (1-4); tier 4 prunes all unused Docker build cache
 
 [docker]
 # readiness = true                     # custom images without the runner marker may explicitly disable it
@@ -98,9 +97,10 @@ dind = true
 # dind-cpu = 0               # daemon CPU cores; 0 = unlimited
 # dind-pids-limit = 0        # daemon processes/threads; 0 = unlimited
 # DinD uses Linux images and the standard /home/runner layout. It cannot use
-# workspace-root, host/container network namespaces, or overlapping cache mounts.
+# workspace-root, host/container network namespaces, or a shared-volume path
+# overlapping a reserved DinD mount.
 # native-actions-cache = false # use the manager's [actions-cache] receiver when true
-# actions-cache-url = "" # explicit external receiver; matching the native URL is deprecated
+# actions-cache-url = "" # external receiver only; omit when using native-actions-cache
 # shared-volume = "/shared"
 # shared-volume-name = "runner-shared"     # named volume backing shared-volume; distinct names isolate scalesets (or two runner processes)
 # memory = 0     # MB, 0 = unlimited (e.g. 8192 for 8GB)
@@ -108,13 +108,6 @@ dind = true
 # platform = ""  # force the container platform, e.g. "linux/amd64" on an arm64 host; "" = daemon default
 # pids-limit = 0 # max pids (processes + threads) per container; 0 = unlimited (e.g. 4096 to stop fork bombs)
 # network = ""   # pre-existing docker network to attach runners to; "" = default bridge (e.g. one created with icc disabled)
-# Deprecated for new deployments: migrate tool caches to workflow Actions
-# cache and configure the native receiver's shared byte/idle limits below.
-# Existing cache volumes remain supported until removed from the config.
-# cache-volumes = [                        # legacy named volumes mounted at tool cache paths
-#   "gradle-cache:/home/runner/.gradle",
-#   "pnpm-store:/home/runner/.local/share/pnpm/store",
-# ]
 # shared-volume-max-age = "168h"           # delete shared-volume files older than this; unset = never reclaimed
 # shared-volume-cleanup-interval = "6h"    # how often to run the cleanup sweep
 # buildx-cleanup = true                    # daemon-wide; opt in only when dedicated to runners
@@ -125,20 +118,6 @@ dind = true
 # prune-ttl = "24h"                        # remove stopped containers and dangling images older than this
 # build-cache-max-age = "168h"             # prune build cache entries not used within this window
 # build-cache-budget = 0                   # cap daemon build cache to N GB (LRU-evicted down to the cap); 0 = no cap
-
-# Deprecated long form of cache-volumes, for an entry that needs a per-volume
-# budget. The native Actions cache uses one shared byte/idle retention policy.
-# A name also listed in cache-volumes above is replaced entirely by its
-# [[docker.cache]] entry, not merged field by field. Keep this the LAST
-# [docker] entry in the file: TOML has no way to "close" a table other than
-# opening the next one, so every bare key below an array-of-tables header
-# belongs to that array entry, not back to [docker] — see [tart] right
-# after this for where the table actually ends.
-# [[docker.cache]]
-# name = "ccache"
-# path = "/home/runner/.ccache"
-# budget = "20GB"                          # absolute size only (no percentages); enforced independently of disk pressure
-# on-exceed = "warn"                       # warn (default: log only, leave data for the tool's own LRU) | wipe (delete everything)
 
 # [tart]
 # Guest OS is detected from the runner image at startup.
@@ -195,7 +174,6 @@ dind = true
 # --- Host-local Actions cache (Linux amd64/arm64, opt-in) ---
 # The unified actions-runner image supports both GitHub and native local cache.
 # Pin its accepted index digest instead of latest for a canary rollout.
-# Do not put the cache service's data volume in cache-volumes or [[docker.cache]].
 # [[scaleset]]
 # url = "https://github.com/<owner>"
 # name = "runscaler-local-cache-canary"
@@ -206,13 +184,10 @@ dind = true
 # [scaleset.docker]
 # platform = "linux/amd64" # or linux/arm64
 # native-actions-cache = true # uses [actions-cache].advertise-url below
-# cache-volumes = [] # only if overriding inherited language-cache mounts
-# cache = []         # only if overriding inherited [[docker.cache]] mounts
 
 # Native Go receiver: global settings, not inherited by scale sets. Configure
 # a private listener, the unified runner image above, and workflow cache
-# steps before removing legacy cache-volume mounts. The byte limit is shared
-# across all cached entries; it is not a per-tool limit or hard disk quota.
+# steps to save and restore tool caches. The byte limit applies across all entries.
 # [actions-cache]
 # enabled = true
 # listen-address = "172.18.0.1:32500"

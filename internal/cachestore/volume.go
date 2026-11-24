@@ -113,9 +113,7 @@ func readContainerStdout(ctx context.Context, client DockerAPI, containerID stri
 	return stdout.String(), nil
 }
 
-// duCommand measures mountPath's usage in bytes. Both stores' Measure run
-// exactly this inside a container with the volume mounted at mountPath, and
-// Reclaim runs it before and after a delete to compute bytes freed.
+// duCommand measures the mounted shared volume before and after a reclaim.
 func duCommand(mountPath string) string {
 	return "du -sb " + shell.Quote(mountPath)
 }
@@ -276,87 +274,3 @@ func (s *sharedVolumeStore) Reclaim(ctx context.Context, tier Tier) (uint64, err
 	}
 	return freed, nil
 }
-
-// Budget reports no cap: this store's un-expired contents are live
-// handoff data (see NewSharedVolumeStore), not a cache with a retention
-// budget — SharedVolumeConfig carries no such field.
-func (s *sharedVolumeStore) Budget() (uint64, string) { return 0, "" }
-
-// --- Cache-volume store: persistent tool caches (Tier4 wipe only) ---
-
-// CacheVolumeConfig configures one persistent cache-volume store (e.g.
-// ccache, a Gradle cache). One store is constructed per configured cache
-// volume mount. BudgetBytes and OnExceed are not consumed by this store's
-// own Reclaim: Budget() hands them to the disk guard, whose independent
-// budget-enforcement pass is what acts on them (see CacheStore.Budget in
-// store.go).
-type CacheVolumeConfig struct {
-	VolumeName  string
-	MountPath   string
-	HelperImage string
-	RootDir     string
-	BudgetBytes uint64
-	OnExceed    string
-}
-
-type cacheVolumeStore struct {
-	client DockerAPI
-	cfg    CacheVolumeConfig
-}
-
-// NewCacheVolumeStore reclaims one persistent named cache volume (ccache, a
-// package manager cache, etc.). It is KindCache — regenerable, only costing
-// time on the next build — so it participates in Tier4 (see TiersFor);
-// unlike the daemon's own build cache, it has no age metadata to trim
-// safely by, so Tier2 is always a no-op here (see Reclaim).
-func NewCacheVolumeStore(client DockerAPI, cfg CacheVolumeConfig) CacheStore {
-	return serialize(&cacheVolumeStore{client: client, cfg: cfg})
-}
-
-func (s *cacheVolumeStore) Name() string    { return "cache-volume:" + s.cfg.VolumeName }
-func (s *cacheVolumeStore) Kind() StoreKind { return KindCache }
-func (s *cacheVolumeStore) Path() string    { return s.cfg.RootDir }
-
-// Enabled requires a configured mount path, matching the "empty path means
-// unconfigured" convention the shared-volume store's own Enabled follows.
-func (s *cacheVolumeStore) Enabled() bool { return s.cfg.MountPath != "" }
-
-// Measure runs `du -sb` on the mounted volume and parses the byte count.
-func (s *cacheVolumeStore) Measure(ctx context.Context) (uint64, error) {
-	stdout, err := runVolumeHelper(ctx, s.client, s.cfg.HelperImage, s.cfg.VolumeName, s.cfg.MountPath, duCommand(s.cfg.MountPath))
-	if err != nil {
-		return 0, fmt.Errorf("measure cache volume: %w", err)
-	}
-	sizes, err := parseDuSizes(stdout, 1)
-	if err != nil {
-		return 0, fmt.Errorf("parse cache volume du output: %w", err)
-	}
-	return sizes[0], nil
-}
-
-// Reclaim acts only at Tier4, deleting everything under the mount — a full
-// wipe, not an age-based trim: a cache volume carries no per-file
-// eviction-safe age signal the way the shared volume's mtime does, so
-// Tier2 is always a no-op and the guard's emergency tier is the only path
-// in. The volume itself is never removed, only its contents — the next
-// build finds it again, just empty, so no re-creation is needed.
-func (s *cacheVolumeStore) Reclaim(ctx context.Context, tier Tier) (uint64, error) {
-	if tier != Tier4 || !s.Enabled() {
-		return 0, nil
-	}
-
-	deleteScript := fmt.Sprintf("find %s -mindepth 1 -delete 2>/dev/null || true", shell.Quote(s.cfg.MountPath))
-	freed, err := reclaimAndMeasureFreed(ctx, s.client, s.cfg.HelperImage, s.cfg.VolumeName, s.cfg.MountPath, deleteScript)
-	if err != nil {
-		return 0, fmt.Errorf("reclaim cache volume: %w", err)
-	}
-	return freed, nil
-}
-
-// Budget reports cfg.BudgetBytes/cfg.OnExceed verbatim for the disk guard's
-// independent budget-enforcement pass to act on. Unlike the Docker build
-// cache and Tart stores, this store has no tool-native "trim to budget"
-// mechanism of its own (Reclaim only ever does a full Tier4 wipe), so there
-// is no other consumer of this cap to entangle with — the guard's own
-// enforcement is the only one.
-func (s *cacheVolumeStore) Budget() (uint64, string) { return s.cfg.BudgetBytes, s.cfg.OnExceed }

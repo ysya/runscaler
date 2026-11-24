@@ -46,7 +46,6 @@ type dockerSocketStores struct {
 	buildxInterval time.Duration
 
 	sharedVolume []sharedVolumeSweepTarget
-	cacheVolume  []cachestore.CacheStore
 }
 
 // flatten returns every store in s as one slice, for the disk guard (which
@@ -57,12 +56,11 @@ func (s dockerSocketStores) flatten() []cachestore.CacheStore {
 	if s.garbage == nil {
 		return nil // client was nil; see dockerCacheStoresForSocket
 	}
-	stores := make([]cachestore.CacheStore, 0, 3+len(s.sharedVolume)+len(s.cacheVolume))
+	stores := make([]cachestore.CacheStore, 0, 3+len(s.sharedVolume))
 	stores = append(stores, s.garbage, s.buildCache, s.buildx)
 	for _, t := range s.sharedVolume {
 		stores = append(stores, t.store)
 	}
-	stores = append(stores, s.cacheVolume...)
 	return stores
 }
 
@@ -70,8 +68,7 @@ func (s dockerSocketStores) flatten() []cachestore.CacheStore {
 // socket's scale sets: the garbage and build-cache stores (always — a
 // disabled prune setting is carried as Enabled()==false rather than the
 // store not existing, so the disk guard can still name it in a shortfall
-// warning), the buildx store, one store per unique shared-volume name, and
-// one store per unique cache-volume name.
+// warning), the buildx store, and one store per unique shared-volume name.
 func dockerCacheStoresForSocket(sets []config.ScaleSetConfig, client *dockerclient.Client, logger *slog.Logger) dockerSocketStores {
 	if client == nil {
 		return dockerSocketStores{}
@@ -97,7 +94,6 @@ func dockerCacheStoresForSocket(sets []config.ScaleSetConfig, client *dockerclie
 		buildxCfg:      buildxCfg,
 		buildxInterval: buildxInterval,
 		sharedVolume:   sharedVolumeSweepTargetsFor(sets, client, rootDir, logger),
-		cacheVolume:    cacheVolumeStoresFor(sets, client, rootDir),
 	}
 }
 
@@ -267,55 +263,6 @@ func sharedVolumeSweepTargetsFor(sets []config.ScaleSetConfig, client *dockercli
 		})
 	}
 	return targets
-}
-
-// cacheVolumeStoresFor builds one cache-volume store per unique cache
-// volume name referenced across sets (the same volume may be named by more
-// than one scaleset sharing this socket — see DockerConfig.CacheVolumes'
-// doc comment on shared-vs-isolated caches). There is no periodic sweeper
-// to match settings against: cache volumes are never removed at exit and
-// never swept by any TTL (same doc comment), so the disk guard's Tier4 is
-// their only reclaim path. MountPath only
-// matters inside the throwaway helper container this store's Measure/Reclaim
-// run `du`/`find` in (see cachestore's runVolumeHelper) — never to the
-// runner containers that mount the volume — so the first scaleset to name a
-// given volume picks that path arbitrarily; ParseCacheVolumes errors are
-// ignored here the same way NewDockerProvider ignores them, since
-// ScaleSetConfig.Validate already surfaced them before startup.
-//
-// BudgetBytes/OnExceed pass straight through from the parsed mount
-// (m.BudgetBytes/m.OnExceed): 0/"" for a short-form (cache-volumes) entry or
-// a long-form ([[docker.cache]]) one with no budget set, matching
-// cachestore.CacheStore.Budget's "a store with no such policy returns
-// (0, \"\")" contract — the disk guard's enforceBudgets skips a zero budget
-// entirely, so no extra "is this configured" branch is needed here.
-func cacheVolumeStoresFor(sets []config.ScaleSetConfig, client *dockerclient.Client, rootDir string) []cachestore.CacheStore {
-	seen := make(map[string]bool)
-	var stores []cachestore.CacheStore
-	for _, ss := range sets {
-		if ss.IsTart() {
-			continue
-		}
-		mounts, err := ss.Docker.ParseCacheVolumes()
-		if err != nil {
-			continue
-		}
-		for _, m := range mounts {
-			if seen[m.Volume] {
-				continue
-			}
-			seen[m.Volume] = true
-			stores = append(stores, cachestore.NewCacheVolumeStore(client, cachestore.CacheVolumeConfig{
-				VolumeName:  m.Volume,
-				MountPath:   m.Path,
-				HelperImage: ss.RunnerImage,
-				RootDir:     rootDir,
-				BudgetBytes: m.BudgetBytes,
-				OnExceed:    m.OnExceed,
-			}))
-		}
-	}
-	return stores
 }
 
 // tartCacheSweepTarget pairs a Tart-cache store with the settings its own

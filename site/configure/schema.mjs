@@ -64,9 +64,7 @@ export const dockerFields = [
   field('build-cache-max-age', 'duration', 'Docker build cache max age', 'Docker build cache 最長保留時間', 'Docker ビルドキャッシュの保持期間'),
   field('build-cache-budget', 'number', 'Docker build cache budget (GB)', 'Docker build cache 容量上限（GB）', 'Docker ビルドキャッシュの容量上限（GB）', { min: 0 }),
   field('actions-cache-url', 'url', 'External Actions cache URL', '外部 Actions 快取網址', '外部 Actions キャッシュの URL', { helpEn: 'Requires a cache-capable runner image; URL must end with /.', helpZh: '需要支援快取的 runner 映像檔；網址須以 / 結尾。', helpJa: 'キャッシュ対応のランナーイメージが必要です。URL の末尾は / にしてください。' }),
-  field('native-actions-cache', 'bool', 'Use manager native Actions cache', '使用管理程序內建 Actions 快取', '管理プロセス内蔵の Actions キャッシュを使用', { helpEn: 'Also enable and configure the global native receiver.', helpZh: '還需啟用並設定全域內建接收端。', helpJa: 'グローバル設定の内蔵キャッシュ受信機能も有効にして設定してください。' }),
-  field('cache-volumes', 'lines', 'Legacy cache volumes (name:/container/path per line)', '舊版 cache volumes（每行 name:/容器路徑）', '旧形式のキャッシュボリューム（1 行に 名前:/コンテナ内のパス）', { legacy: true }),
-  field('cache', 'cache', 'Legacy budgeted cache volumes (name | path | budget | on-exceed)', '舊版有容量上限的 cache volumes（名稱 | 路徑 | 上限 | 超限處理）', '容量制限付きの旧形式キャッシュ（名前 | パス | 容量上限 | 超過時の処理）', { legacy: true, helpEn: 'One entry per line. Example: gradle | /home/runner/.gradle | 20GB | warn (or wipe)', helpZh: '每行一筆。例如：gradle | /home/runner/.gradle | 20GB | warn（或 wipe）', helpJa: '1 行に 1 件入力します。例：gradle | /home/runner/.gradle | 20GB | warn（または wipe）' }),
+  field('native-actions-cache', 'bool', 'Use manager native Actions cache', '使用管理程序內建 Actions 快取', '管理プロセス内蔵の Actions キャッシュを使用', { helpEn: 'Enable the global native receiver and leave the external Actions cache URL blank.', helpZh: '請啟用全域內建接收端，並將外部 Actions 快取網址留白。', helpJa: 'グローバル設定の内蔵キャッシュ受信機能を有効にし、外部 Actions キャッシュの URL は空欄にしてください。' }),
 ];
 
 export const tartFields = [
@@ -113,7 +111,7 @@ export const diskFields = [
   field('min-free', 'text', 'Start cleanup below free space', '低於此剩餘空間時開始清理', 'クリーンアップを開始する空き容量', { placeholder: '10%' }),
   field('target-free', 'text', 'Cleanup target free space', '清理目標剩餘空間', 'クリーンアップ後の目標空き容量', { placeholder: '20%' }),
   field('interval', 'duration', 'Disk check interval', '磁碟檢查間隔', 'ディスクの確認間隔', { placeholder: '1h' }),
-  field('max-tier', 'number', 'Maximum cleanup tier (1–4)', '最高清理等級（1–4）', 'クリーンアップの最大レベル（1～4）', { min: 1, max: 4, helpEn: 'Tier 4 can wipe legacy cache volumes.', helpZh: '第 4 級可能清空舊版 cache volume。', helpJa: 'レベル 4 では旧形式のキャッシュボリュームを空にする場合があります。' }),
+  field('max-tier', 'number', 'Maximum cleanup tier (1–4)', '最高清理等級（1–4）', 'クリーンアップの最大レベル（1～4）', { min: 1, max: 4, helpEn: 'Tier 4 can remove all unused build cache on the Docker daemon.', helpZh: '第 4 級可能清除 Docker daemon 上所有未使用的建置快取。', helpJa: 'レベル 4 では Docker デーモン上の未使用のビルドキャッシュがすべて削除される場合があります。' }),
 ];
 
 export const diagnosticsFields = [

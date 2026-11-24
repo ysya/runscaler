@@ -108,7 +108,7 @@ const (
 	DefaultDiskTargetFree = "20%"
 	// DefaultDiskGuardInterval is the period between guard sweeps.
 	DefaultDiskGuardInterval = time.Hour
-	// DefaultDiskMaxTier stops short of wiping cache volumes — that makes
+	// DefaultDiskMaxTier stops short of pruning the entire Docker build cache — that makes
 	// the next build cold, so it requires an explicit opt-in.
 	DefaultDiskMaxTier = 3
 

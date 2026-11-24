@@ -30,7 +30,7 @@ const runnerOwnerLabel = "runscaler.runner-id"
 // to it, then removes the runner itself. Keep the stopped runner's metadata
 // until child cleanup succeeds so name-based ownership survives a retry.
 // Anonymous volumes and explicitly owned temporary named volumes are reclaimed;
-// shared/cache volumes, images, and daemon build caches are preserved.
+// persistent volumes, images, and daemon build caches are preserved.
 func RemoveRunnerContainer(ctx context.Context, client RunnerCleanupAPI, instanceID string, logger *slog.Logger) error {
 	if err := ctx.Err(); err != nil {
 		return err

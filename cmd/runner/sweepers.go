@@ -118,17 +118,7 @@ func startBuildxCleanup(ctx context.Context, stores dockerSocketStores, logger *
 // This is opt-in because the target daemon may also contain non-runner
 // workloads. No-op when prune is not enabled for this socket.
 //
-// build-cache-budget only takes effect through dockerBuildCacheStore.Reclaim
-// (Tier2) — the only place BudgetGB is consumed (see that store's Budget()
-// doc comment on why it is deliberately not surfaced to the disk guard's
-// separate, statfs-triggered budget-enforcement pass too, which would
-// otherwise double-drive the same number). Reclaim(Tier2) is reached two
-// ways: this sweep (only when prune is enabled here) and the disk guard's
-// own tier ladder under disk pressure, which runs regardless of whether
-// prune is enabled (see store.go's Enabled doc comment), as long as
-// max-tier >= 2 (the default is 3). So: with prune disabled, a configured
-// build-cache-budget is enforced only once the guard's tier ladder reaches
-// Tier2 under real disk pressure, not on this sweep's own schedule.
+// Tier2 applies the build-cache budget on this sweep or under disk pressure.
 func startDockerPrune(ctx context.Context, stores dockerSocketStores, logger *slog.Logger) {
 	if !stores.garbage.Enabled() {
 		return

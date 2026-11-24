@@ -14,13 +14,11 @@ import (
 // buildCacheRows / diskStatusesFor without a real Docker daemon or Tart
 // installation. measureFn defaults to returning (0, nil) when nil.
 type fakeCacheStore struct {
-	name        string
-	kind        cachestore.StoreKind
-	path        string
-	enabled     bool
-	measureFn   func(context.Context) (uint64, error)
-	budgetBytes uint64
-	onExceed    string
+	name      string
+	kind      cachestore.StoreKind
+	path      string
+	enabled   bool
+	measureFn func(context.Context) (uint64, error)
 
 	// reclaimed, when non-nil, receives every tier Reclaim is called with.
 	// A channel rather than a counter because the periodic sweepers call
@@ -33,7 +31,6 @@ func (f *fakeCacheStore) Name() string               { return f.name }
 func (f *fakeCacheStore) Kind() cachestore.StoreKind { return f.kind }
 func (f *fakeCacheStore) Path() string               { return f.path }
 func (f *fakeCacheStore) Enabled() bool              { return f.enabled }
-func (f *fakeCacheStore) Budget() (uint64, string)   { return f.budgetBytes, f.onExceed }
 func (f *fakeCacheStore) Reclaim(_ context.Context, tier cachestore.Tier) (uint64, error) {
 	if f.reclaimed != nil {
 		f.reclaimed <- tier
@@ -51,13 +48,13 @@ func (f *fakeCacheStore) Measure(ctx context.Context) (uint64, error) {
 
 func TestFormatCacheTable(t *testing.T) {
 	rows := []cacheRow{
-		{Store: "ccache", Filesystem: "/", SizeBytes: 19 * 1024 * 1024 * 1024,
-			FSFreePercent: 38, Policy: "budget=20GB on-exceed=warn"},
+		{Store: "native-actions-cache", Filesystem: "/", SizeBytes: 19 * 1024 * 1024 * 1024,
+			FSFreePercent: 38, Policy: "budget=20GB idle=7d"},
 		{Store: "runner-shared", Filesystem: "/", SizeBytes: 3 * 1024 * 1024 * 1024,
 			FSFreePercent: 38, Policy: "max-age=72h"},
 	}
 	out := formatCacheTable(rows)
-	for _, want := range []string{"ccache", "19.0 GiB", "38%", "budget=20GB", "runner-shared"} {
+	for _, want := range []string{"native-actions-cache", "19.0 GiB", "38%", "budget=20GB", "runner-shared"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("table output missing %q:\n%s", want, out)
 		}
@@ -197,28 +194,6 @@ func TestIsUnmeasurableZeroRecognizesRealBuildxStore(t *testing.T) {
 		t.Errorf("isUnmeasurableZero(%q, 0) = false, want true — hardcodedZeroMeasureStores in cmd_cache.go "+
 			"must stay in sync with cachestore.NewBuildxStore's real Name() (see cachestore/buildx.go's Name doc comment)",
 			store.Name())
-	}
-}
-
-func TestBuildCacheRowsPolicyFromBudget(t *testing.T) {
-	tests := []struct {
-		name        string
-		budgetBytes uint64
-		onExceed    string
-		want        string
-	}{
-		{"no budget configured", 0, "", ""},
-		{"budget with explicit on-exceed", 20 * 1024 * 1024 * 1024, "wipe", "budget=20.0 GiB on-exceed=wipe"},
-		{"budget with default on-exceed", 1024 * 1024 * 1024, "", "budget=1.0 GiB on-exceed=warn"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			s := &fakeCacheStore{name: "s", path: "/", budgetBytes: tt.budgetBytes, onExceed: tt.onExceed}
-			rows := buildCacheRows([]cachestore.CacheStore{s})
-			if rows[0].Policy != tt.want {
-				t.Errorf("Policy = %q, want %q", rows[0].Policy, tt.want)
-			}
-		})
 	}
 }
 

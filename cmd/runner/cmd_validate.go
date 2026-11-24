@@ -159,9 +159,6 @@ func validateLocalConfig(cfg config.Config, out io.Writer) ([]config.ScaleSetCon
 		fmt.Fprintf(out, "  ✗ config: %s\n", w)
 		problemCount++
 	}
-	for _, d := range cfg.Deprecations {
-		fmt.Fprintf(out, "  ⚠ config: %s\n", d)
-	}
 	for _, err := range cfg.GlobalValidationErrors() {
 		fmt.Fprintf(out, "  ✗ global config: %s\n", err)
 		problemCount++

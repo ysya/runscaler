@@ -15,7 +15,7 @@ import (
 
 // fakeDockerAPI implements provider.DockerAPI for cachestore's own tests.
 // It is the one shared double for every Docker-backed store in this package
-// (garbage, build-cache, shared-volume, cache-volume, buildx), so each
+// (garbage, build-cache, shared-volume, buildx), so each
 // store's test file relies on these field names.
 type fakeDockerAPI struct {
 	rootDir   string // Info() 回傳的 DockerRootDir
@@ -56,8 +56,8 @@ type fakeDockerAPI struct {
 	// containerLogsStdout is the canned stdout ContainerLogs() returns,
 	// framed as a single stdcopy stdout frame (see stdcopyStdoutFrame) so
 	// callers exercise the same demultiplexing path (stdcopy.StdCopy)
-	// production code uses against a real daemon. The shared-volume and
-	// cache-volume stores parse this to read `du -sb` output.
+	// production code uses against a real daemon. The shared-volume
+	// store parses this to read `du -sb` output.
 	containerLogsStdout string
 
 	// containerList and volumeList are the canned results ContainerList and
@@ -73,8 +73,7 @@ type fakeDockerAPI struct {
 func (f *fakeDockerAPI) ContainerCreate(_ context.Context, options dockerclient.ContainerCreateOptions) (dockerclient.ContainerCreateResult, error) {
 	f.createdContainers++
 	f.createCalls = append(f.createCalls, options)
-	// Helper containers (runVolumeHelper, used by the shared-volume and
-	// cache-volume stores) run `sh -c <script>`. Capture the script when
+	// The shared-volume helper runs `sh -c <script>`. Capture the script when
 	// present so those tests can assert on it.
 	if options.Config != nil && len(options.Config.Cmd) == 3 &&
 		options.Config.Cmd[0] == "sh" && options.Config.Cmd[1] == "-c" {
@@ -197,11 +196,10 @@ func newBlockingStore() *blockingStore {
 	return &blockingStore{entered: make(chan struct{}), release: make(chan struct{})}
 }
 
-func (b *blockingStore) Name() string             { return "blocking" }
-func (b *blockingStore) Kind() StoreKind          { return KindCache }
-func (b *blockingStore) Path() string             { return "/" }
-func (b *blockingStore) Enabled() bool            { return true }
-func (b *blockingStore) Budget() (uint64, string) { return 0, "" }
+func (b *blockingStore) Name() string    { return "blocking" }
+func (b *blockingStore) Kind() StoreKind { return KindCache }
+func (b *blockingStore) Path() string    { return "/" }
+func (b *blockingStore) Enabled() bool   { return true }
 
 func (b *blockingStore) block() {
 	b.mu.Lock()

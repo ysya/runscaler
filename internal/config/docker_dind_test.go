@@ -95,43 +95,19 @@ func TestDinDReservedMountValidation(t *testing.T) {
 			if p == "" {
 				p = "/"
 			}
-			for _, source := range []string{"shared", "cache"} {
-				t.Run(source+p, func(t *testing.T) {
-					ss := validScaleSetConfig()
-					ss.Docker.DaemonMode = "dind"
-					if source == "shared" {
-						ss.Docker.SharedVolume = p
-					} else {
-						ss.Docker.CacheVolumes = []string{"cache:" + p}
-					}
-					if err := ss.Validate(); err == nil {
-						t.Fatalf("accepted managed path overlap %q", p)
-					}
-				})
-			}
-		}
-	}
-	for _, tt := range []struct {
-		shared string
-		cache  []string
-	}{
-		{"/cache", []string{"one:/cache/nested"}}, {"/cache/nested", []string{"one:/cache"}},
-		{"", []string{"one:/cache", "two:/cache/nested"}},
-	} {
-		ss := validScaleSetConfig()
-		ss.Docker = DockerConfig{DaemonMode: "dind", SharedVolume: tt.shared, CacheVolumes: tt.cache}
-		if err := ss.Validate(); err == nil {
-			t.Fatalf("accepted overlapping shared/cache mounts %+v", tt)
-		}
-		ss.Docker.DaemonMode = "host"
-		if err := ss.Validate(); err != nil {
-			t.Fatalf("changed legacy mount semantics: %v", err)
+			t.Run(p, func(t *testing.T) {
+				ss := validScaleSetConfig()
+				ss.Docker = DockerConfig{DaemonMode: "dind", SharedVolume: p}
+				if err := ss.Validate(); err == nil {
+					t.Fatalf("accepted managed path overlap %q", p)
+				}
+			})
 		}
 	}
 	ss := validScaleSetConfig()
-	ss.Docker = DockerConfig{DaemonMode: "dind", SharedVolume: "/shared", CacheVolumes: []string{"one:/cache", "two:/cache-other"}}
+	ss.Docker = DockerConfig{DaemonMode: "dind", SharedVolume: "/shared"}
 	if err := ss.Validate(); err != nil {
-		t.Fatalf("distinct paths rejected: %v", err)
+		t.Fatalf("valid shared path rejected: %v", err)
 	}
 }
 

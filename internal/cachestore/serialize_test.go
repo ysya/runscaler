@@ -156,7 +156,6 @@ func TestConstructorsReturnSerializedStores(t *testing.T) {
 		"docker-build-cache": NewDockerBuildCacheStore(fake, DockerBuildCacheConfig{}),
 		"buildx":             NewBuildxStore(fake, BuildxConfig{}),
 		"shared-volume":      NewSharedVolumeStore(fake, SharedVolumeConfig{MountPath: "/shared", MaxAge: time.Hour}),
-		"cache-volume":       NewCacheVolumeStore(fake, CacheVolumeConfig{MountPath: "/cache"}),
 		"tart":               NewTartStore(nil, TartConfig{Home: "/Volumes/A"}),
 	}
 	for name, s := range stores {

@@ -53,7 +53,7 @@ function showFieldError(error) {
 }
 
 function renderField(field, group, index, values) {
-  const wrapper = element('div', `tool-field${field.legacy ? ' legacy-field' : ''}`);
+  const wrapper = element('div', 'tool-field');
   wrapper.dataset.visible = field.visible || '';
   const id = `${group}-${index}-${field.key}`;
   const label = element('label', '', t(field.en, field.zh, field.ja));
@@ -71,9 +71,9 @@ function renderField(field, group, index, values) {
       option.value = value;
       input.append(option);
     }
-  } else if (field.type === 'lines' || field.type === 'cache') {
+  } else if (field.type === 'lines') {
     input = element('textarea');
-    input.rows = field.type === 'cache' ? 3 : 2;
+    input.rows = 2;
   } else {
     input = element('input');
     input.type = field.type === 'number' ? 'number' : field.type === 'url' ? 'url' : 'text';
@@ -91,7 +91,6 @@ function renderField(field, group, index, values) {
   if (field.placeholder) input.placeholder = field.placeholder;
   wrapper.append(input);
   if (field.helpEn || field.helpZh) wrapper.append(element('p', 'field-help', t(field.helpEn, field.helpZh, field.helpJa)));
-  if (field.legacy) wrapper.append(element('p', 'legacy-note', t('Sunset: supported for existing configs; prefer workflow Actions cache for new deployments.', '已淘汰：僅為現有設定保留；新部署建議使用工作流程 Actions 快取。', '廃止予定：既存の設定向けに対応しています。新しい環境ではワークフローの Actions キャッシュを推奨します。')));
   if (field.key === 'log-file') {
     const disable = element('label', 'inline-check');
     const check = element('input');
@@ -139,7 +138,7 @@ function renderSets() {
     const basics = element('div', 'field-grid');
     appendFields(basics, groups.set, 'set', index, scale.set);
     card.append(basics);
-    const docker = details(t('Docker options and cache', 'Docker 選項與快取', 'Docker のオプションとキャッシュ'), t('Includes external and native Actions cache, Docker cleanup, and sunset cache volumes.', '包含外部及內建 Actions 快取、Docker 清理與已淘汰的 cache volume。', '外部・内蔵 Actions キャッシュ、Docker のクリーンアップ、廃止予定のキャッシュボリュームを設定します。'), 'docker', index, scale.docker, groups.docker, oldOpen[index * 3] ?? false);
+    const docker = details(t('Docker options and cache', 'Docker 選項與快取', 'Docker のオプションとキャッシュ'), t('Configure shared volumes, Docker cleanup, and native or external Actions cache.', '設定共用 volume、Docker 清理，以及內建或外部 Actions 快取。', '共有ボリューム、Docker のクリーンアップ、内蔵または外部の Actions キャッシュを設定します。'), 'docker', index, scale.docker, groups.docker, oldOpen[index * 3] ?? false);
     docker.dataset.provider = 'docker';
     const tart = details(t('Tart options and cache', 'Tart 選項與快取', 'Tart のオプションとキャッシュ'), t('VM resources, network, warm pool, and OCI/IPSW cache retention.', 'VM 資源、網路、預熱池與 OCI/IPSW 快取保留策略。', 'VM のリソース、ネットワーク、ウォームプール、OCI/IPSW キャッシュの保持を設定します。'), 'tart', index, scale.tart, groups.tart, oldOpen[index * 3 + 1] ?? false);
     tart.dataset.provider = 'tart';

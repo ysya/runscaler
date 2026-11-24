@@ -82,7 +82,7 @@ See [Host-local Actions cache](docs/local-actions-cache.md) for both modes.
 - **Tart networking** — shared NAT by default, with optional host-interface bridging
 - **VM warm pool** — pre-boot Tart VMs for instant job pickup (~2s vs ~30s cold boot)
 - **Native Actions cache (Docker opt-in)** — built-in cache-v2 receiver with host-local retention and status visibility
-- **Shared work volume** — optional named Docker volume for explicit cross-job file handoff; legacy cache-volume mounts remain during sunset
+- **Shared work volume** — optional named Docker volume for explicit cross-job file handoff
 - **Multi-org support** — manage multiple scale sets from a single process, mixing Docker and Tart providers
 - **Self-healing capacity** — replace containers/VMs that exit before GitHub reports job completion
 - **Safe restarts** — SIGTERM/SIGQUIT stop new work and wait for in-flight jobs; startup reclaims containers/VMs left by hard kills
@@ -190,28 +190,29 @@ Details for each command are in [docs/commands.md](docs/commands.md).
 
 ## Upgrade requirements
 
-`runner init` is removed. Existing config files and installed services keep
-working; create new config files with the [config builder](https://runscaler.ysya.dev/configure/)
-and add credentials on the host.
+**Breaking cache changes after v0.24.0.** Update affected configurations before
+restarting the service.
 
-**Actions cache setting sunset (no removal in this release):** Docker scale sets
-using the built-in Go receiver should set `native-actions-cache = true` and
-remove `actions-cache-url` when it equals `[actions-cache].advertise-url`.
-The manager derives that URL automatically. The old native URL setting still
-works for now, but `runner validate`, startup logs and `runner update --check`
-warn about it before a future breaking removal. Explicit URLs for external
-receivers remain supported. Keep `advertise-url`: it is the address that runner
-and BuildKit containers must be able to reach. Migrate while jobs are drained,
-validate the config, then restart the selected service. This setting change does
-not move or delete cached data. Older binaries cannot report a sunset introduced
-after they were built; read the target release notes before updating.
-Legacy `docker.cache-volumes` and `[[docker.cache]]` mounts are also in their
-sunset period. They remain active with their existing budgets; migrate workflows
-to Actions cache and verify warm hits before removing those mounts or data.
-Track the earliest removal reviews and their acceptance gates in
-[issue #41](https://github.com/ysya/runscaler/issues/41): v0.22.0 for the native
-URL alias, v0.24.0 for legacy cache volumes. Neither version removes a setting
-automatically; defer the change if the migration gates are unmet.
+- Remove `docker.cache-volumes`, `[[docker.cache]]` and their per-scale-set forms
+  from the TOML, including empty `cache-volumes = []` and `cache = []` overrides.
+  These keys now fail validation. Move tool caches into workflow cache steps and
+  verify a cold save and a warm restore on separate runners. Keep the old Docker
+  volumes for rollback. See [migration to Actions cache](docs/caching.md#migration-to-actions-cache).
+- For the built-in receiver, keep `[actions-cache].advertise-url`, set
+  `native-actions-cache = true` for the Docker scale set, and remove the matching
+  `actions-cache-url`. The duplicate URL fails validation even with the switch
+  enabled. For an external receiver, use its distinct `actions-cache-url` with
+  native caching disabled for that set. `shared-volume` still supports file
+  handoff between jobs.
+
+Back up the previous binary and config. Validate the edited file with
+`/path/to/new/runner validate --config /absolute/path/config.toml` before
+draining and restarting the service. To roll back, drain the affected jobs and
+restore the previous binary, config and workflow revision together. The last
+release that accepts the retired keys is [v0.24.0](https://github.com/ysya/runscaler/releases/tag/v0.24.0).
+
+`runner init` is removed. Create new config files with the
+[config builder](https://runscaler.ysya.dev/configure/) and add credentials on the host.
 
 The historical rename transition is retired. Releases contain only `runner-*`
 archives. The `migrate` command, implicit root `runner --config` startup,

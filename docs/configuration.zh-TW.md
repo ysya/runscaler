@@ -91,6 +91,12 @@ daemon-mode = "dind"
 # platform = "linux/amd64"     # applies to both runner and daemon images
 ```
 
+**私有 registry 映像檔。** 請用執行 Runscaler 的帳號執行 `docker login <registry>`。
+啟動或補拉本機缺少的 runner、DinD 映像檔時，Runscaler 會依該映像檔的 registry，
+從 `$DOCKER_CONFIG/config.json` 或預設的 `$HOME/.docker/config.json` 查找憑證。
+沒有已儲存憑證的 registry 會使用匿名下載。若以系統服務執行，請設定服務帳號的 Docker 登入資料。
+若使用 credential helper，服務的 `PATH` 須能找到它，服務帳號也須能存取其憑證儲存區。
+
 `docker.socket` 一律選擇用於建立資源的外層 daemon；DinD 模式不會把它的 socket 掛載至工作使用的任何容器。daemon 映像檔預設為 `docker:29-dind`，啟動時會在各設定的外層 daemon 準備 runner 與 daemon 映像檔。DinD 支援 Linux 映像檔與標準的 `/home/runner` 安裝配置；`platform` 必須同時受到兩個映像檔支援。daemon 的限制與 runner 的 `memory`、`cpu`、`pids-limit` 分開套用，規劃容量時須包含兩個容器及 daemon 內執行的工作負載。
 
 每個 runner 都會取得新的 daemon，包括 `min-runners` 保留的閒置預備執行個體。啟動流程會在 `dind-startup-timeout` 內等待 `docker info` 確認就緒，再啟動 runner；daemon 故障時，也會停止其 runner。工作完成或取消後，會移除該 daemon、內部容器、映像檔、網路、daemon 建立的具名磁碟區、建置快取與執行個體的暫存儲存空間，不會把 daemon 重複用於下一個工作。啟動或清理中斷時，帶有歸屬標籤的殘留資源可由啟動時清理或 `runner doctor --fix` 回收。

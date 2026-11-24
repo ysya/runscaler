@@ -63,6 +63,7 @@ func (m *coordinatedImageDocker) ImagePull(ctx context.Context, _ string, _ dock
 }
 
 func TestDockerImagePullCoordinatorSharesPullAcrossScaleSets(t *testing.T) {
+	isolatedDockerConfig(t)
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	client := &coordinatedImageDocker{

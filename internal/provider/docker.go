@@ -276,11 +276,7 @@ func (p *DockerProvider) pullDockerImage(ctx context.Context, image string) erro
 	p.logger.Info("Runner image is missing locally, pulling it", slog.String("image", image))
 	pullCtx, cancel := context.WithTimeout(ctx, 30*time.Minute)
 	defer cancel()
-	options := dockerclient.ImagePullOptions{}
-	if p.platform != nil {
-		options.Platforms = []ocispec.Platform{*p.platform}
-	}
-	response, err := p.dockerClient.ImagePull(pullCtx, image, options)
+	response, err := PullDockerImage(pullCtx, p.dockerClient, image, p.platform)
 	if err != nil {
 		return fmt.Errorf("failed to pull runner image %s: %w", image, err)
 	}

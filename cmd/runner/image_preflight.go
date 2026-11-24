@@ -95,16 +95,15 @@ func pullDockerRunnerImage(ctx context.Context, ss config.ScaleSetConfig, client
 	logger.Info("Pulling runner image", slog.String("image", ss.RunnerImage), slog.String("platform", ss.Docker.Platform))
 	pullCtx, cancel := context.WithTimeout(ctx, 30*time.Minute)
 	defer cancel()
-	options := dockerclient.ImagePullOptions{}
+	var platform *ocispec.Platform
 	if ss.Docker.Platform != "" {
 		parts := strings.SplitN(ss.Docker.Platform, "/", 3)
-		platform := ocispec.Platform{OS: parts[0], Architecture: parts[1]}
+		platform = &ocispec.Platform{OS: parts[0], Architecture: parts[1]}
 		if len(parts) == 3 {
 			platform.Variant = parts[2]
 		}
-		options.Platforms = []ocispec.Platform{platform}
 	}
-	pull, err := clients[ss.Docker.Socket].ImagePull(pullCtx, ss.RunnerImage, options)
+	pull, err := provider.PullDockerImage(pullCtx, clients[ss.Docker.Socket], ss.RunnerImage, platform)
 	if err != nil {
 		return fmt.Errorf("failed to pull runner image %s: %w", ss.RunnerImage, err)
 	}

@@ -245,6 +245,7 @@ func assertFixOwnCmd(t *testing.T, cmd []string, targets ...string) {
 }
 
 func TestDockerProvider_StartInstance_PullsMissingImage(t *testing.T) {
+	isolatedDockerConfig(t)
 	b, md := newTestDockerProvider("", false)
 	md.imagePresent = false
 	if _, err := b.StartInstance(context.Background(), "runner-missing-image", "jit"); err != nil {
@@ -259,6 +260,7 @@ func TestDockerProvider_StartInstance_PullsMissingImage(t *testing.T) {
 }
 
 func TestDockerProvider_StartInstance_ReturnsPullFailure(t *testing.T) {
+	isolatedDockerConfig(t)
 	b, md := newTestDockerProvider("", false)
 	md.imagePresent = false
 	md.imagePullErr = errors.New("registry unavailable")
@@ -271,6 +273,7 @@ func TestDockerProvider_StartInstance_ReturnsPullFailure(t *testing.T) {
 }
 
 func TestDockerProvider_StartInstance_PullsMissingConfiguredPlatform(t *testing.T) {
+	isolatedDockerConfig(t)
 	p, md := newTestDockerProvider("", false)
 	p.platform = &ocispec.Platform{OS: "linux", Architecture: "arm64"}
 	md.imagePlatformMissing = true
@@ -283,6 +286,7 @@ func TestDockerProvider_StartInstance_PullsMissingConfiguredPlatform(t *testing.
 }
 
 func TestDockerProvider_StartInstance_ReturnsPullStreamError(t *testing.T) {
+	isolatedDockerConfig(t)
 	p, md := newTestDockerProvider("", false)
 	md.imagePresent = false
 	streamErr := errors.New("registry denied")

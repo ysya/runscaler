@@ -96,6 +96,15 @@ daemon-mode = "dind"
 # platform = "linux/amd64"     # applies to both runner and daemon images
 ```
 
+**Private registry images.** Run `docker login <registry>` as the account running
+Runscaler. At startup and whenever a local runner or DinD image is missing,
+Runscaler looks up credentials for that image's registry in
+`$DOCKER_CONFIG/config.json` or, by default, `$HOME/.docker/config.json`.
+A registry with no saved credentials is pulled anonymously. For a system service,
+configure the service account's Docker login. If using a credential helper, make
+the helper available on the service's `PATH` and its credential store accessible
+to that account.
+
 `docker.socket` always selects the outer daemon used for provisioning. In DinD
 mode its socket is never mounted into either job container. The default daemon
 image is `docker:29-dind`; the runner and daemon images are prepared on each

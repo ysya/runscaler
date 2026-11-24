@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -12,6 +14,7 @@ import (
 	"time"
 
 	cerrdefs "github.com/containerd/errdefs"
+	"github.com/moby/moby/api/pkg/authconfig"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/mount"
 	"github.com/moby/moby/api/types/volume"
@@ -35,6 +38,7 @@ type dinDFake struct {
 	initExit int64
 	images   map[string]bool
 	pulls    []string
+	pullAuth map[string]string
 }
 
 func (m *dinDFake) ImageInspect(ctx context.Context, image string, options ...dockerclient.ImageInspectOption) (dockerclient.ImageInspectResult, error) {
@@ -56,11 +60,13 @@ func (m *dinDFake) ImagePull(ctx context.Context, image string, options dockercl
 		return m.mockDocker.ImagePull(ctx, image, options)
 	}
 	m.pulls = append(m.pulls, image)
+	m.pullAuth[image] = options.RegistryAuth
 	m.images[image] = true
 	return mockImagePullResponse{Reader: strings.NewReader("{}")}, ctx.Err()
 }
 
 func TestDinDRepairsPrunedDaemonImageAcrossScaleSets(t *testing.T) {
+	isolatedDockerConfig(t)
 	m := newDinDFake()
 	m.images = map[string]bool{"runner:test": true}
 	p1, p2 := newDinDTestProvider(m), newDinDTestProvider(m)
@@ -111,7 +117,7 @@ func TestDinDPreservesNativeActionsCacheGuard(t *testing.T) {
 }
 
 func newDinDFake() *dinDFake {
-	return &dinDFake{mockDocker: &mockDocker{imagePresent: true}, objects: map[string]dockerclient.ContainerCreateOptions{}, stores: map[string]volume.Volume{}, stopped: map[string]bool{}, exits: map[string]chan struct{}{}}
+	return &dinDFake{pullAuth: map[string]string{}, mockDocker: &mockDocker{imagePresent: true}, objects: map[string]dockerclient.ContainerCreateOptions{}, stores: map[string]volume.Volume{}, stopped: map[string]bool{}, exits: map[string]chan struct{}{}}
 }
 
 func (m *dinDFake) ContainerCreate(ctx context.Context, o dockerclient.ContainerCreateOptions) (dockerclient.ContainerCreateResult, error) {
@@ -660,5 +666,29 @@ func TestDockerWaitCancellationConsumesDecodedResult(t *testing.T) {
 				t.Fatal("decoded SDK wait result was abandoned on cancellation")
 			}
 		})
+	}
+}
+
+func TestDinDRepullUsesCurrentRegistryLogin(t *testing.T) {
+	dir := isolatedDockerConfig(t)
+	m := newDinDFake()
+	p := newDinDTestProvider(m)
+	p.runnerImage = "ghcr.io/example/runner:latest"
+	for _, token := range []string{"first", "rotated"} {
+		config := `{"auths":{"ghcr.io":{"identitytoken":"` + token + `"}}}`
+		if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(config), 0600); err != nil {
+			t.Fatal(err)
+		}
+		m.images = map[string]bool{}
+		if _, err := p.StartInstance(t.Context(), token, "jit"); err != nil {
+			t.Fatal(err)
+		}
+		auth, err := authconfig.Decode(m.pullAuth[p.runnerImage])
+		if err != nil || auth.IdentityToken != token || auth.ServerAddress != "ghcr.io" {
+			t.Fatal("runner pull did not receive the current identity token")
+		}
+		if header, pulled := m.pullAuth["docker:29-dind"]; !pulled || header != "" {
+			t.Fatal("expected an anonymous pull for the pruned DinD image")
+		}
 	}
 }

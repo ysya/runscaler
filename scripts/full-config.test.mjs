@@ -26,8 +26,7 @@ for (const [group, key, value] of [
   ['set', 'url', 'http://github.com/example-org'],
   ['set', 'name', 'bad\nname'],
   ['set', 'name', '\ud800'],
-  ['docker', 'cache-volumes', 'cache:relative/path'],
-  ['docker', 'cache', 'cache'],
+  ['docker', 'shared-volume', 'relative/path'],
   ['docker', 'actions-cache-url', 'not-a-url'],
   ['retry', 'initial', '-1s'],
   ['tart', 'dns', 'not-an-ip'],
@@ -104,11 +103,8 @@ for (const [name, patch, key] of [
   ['reserved path ancestor', { 'shared-volume': '/var' }, 'shared-volume'],
   ['reserved path descendant', { 'shared-volume': '/var/lib/docker/buildkit' }, 'shared-volume'],
   ['runner home ancestor', { 'shared-volume': '/home/runner' }, 'shared-volume'],
-  ['reserved short cache', { 'cache-volumes': 'build:/home/runner/_work/cache' }, 'cache-volumes'],
-  ['reserved long cache', { cache: 'build | /home/runner/externals | 20GB' }, 'cache'],
-  ['shared and cache overlap', { 'shared-volume': '/shared', 'cache-volumes': 'build:/shared/nested' }, 'cache-volumes'],
-  ['cache paths overlap', { 'cache-volumes': 'one:/cache\ntwo:/cache/nested' }, 'cache-volumes'],
-  ['long and short cache overlap', { 'cache-volumes': 'one:/cache', cache: 'two | /cache/nested | 20GB' }, 'cache'],
+  ['runner work directory', { 'shared-volume': '/home/runner/_work/cache' }, 'shared-volume'],
+  ['runner externals', { 'shared-volume': '/home/runner/externals' }, 'shared-volume'],
 ]) {
   test(`private Docker daemon rejects ${name}`, () => {
     const state = base();
@@ -128,8 +124,6 @@ test('private Docker validation preserves overrides and path boundaries', () => 
   state.scaleSets[0].docker = {
     'daemon-mode': 'dind', platform: 'linux/arm64', network: 'private-builds',
     'dind-startup-timeout': '2m', 'shared-volume': '/var/lib/docker-cache',
-    'cache-volumes': 'overridden:/run\nsibling:/run-cache',
-    cache: 'overridden | /cache | 20GB',
   };
   assert.doesNotThrow(() => generateFullConfig(state));
   state.scaleSets[0].docker = { 'daemon-mode': 'host', dind: 'false', 'workspace-root': '/tmp/runner-proxies' };
@@ -190,15 +184,49 @@ test('multi-scale-set config keeps global and nested tables in their proper scop
   assert.doesNotMatch(toml.split('[[scaleset]]')[0], /^url =/mu);
 });
 
-test('native and legacy caches, disk guard, retry and diagnostics serialize correctly', () => {
+test('native cache, shared volume, disk guard, retry and diagnostics serialize correctly', () => {
   const state = base();
   state.actionsCache = { enabled: 'true', 'listen-address': '172.18.0.1:32500', 'advertise-url': 'http://cache.internal:32500/', 'data-dir': '/var/lib/runner/native-actions-cache', 'max-size-bytes': '53687091200', 'max-idle-days': '30' };
-  state.scaleSets[0].docker = { dind: 'false', 'native-actions-cache': 'true', 'cache-volumes': 'gradle:/home/runner/.gradle', cache: 'pip | /home/runner/.cache/pip | 20GB | warn', 'shared-volume-max-age': '168h' };
+  state.scaleSets[0].docker = { dind: 'false', 'native-actions-cache': 'true', 'shared-volume': '/shared', 'shared-volume-max-age': '168h' };
   state.scaleSets[0].retry = { initial: '5s', max: '1m', 'cooldown-after': '5', cooldown: '5m' };
   state.disk = { guard: 'true', 'min-free': '10%', 'target-free': '20%', interval: '1h', 'max-tier': '4' };
   state.diagnostics = { enabled: 'true', 'capture-logs': 'true' };
   const toml = generateFullConfig(state);
-  for (const fragment of ['[actions-cache]', 'native-actions-cache = true', 'cache-volumes = ["gradle:/home/runner/.gradle"]', '[[docker.cache]]', 'budget = "20GB"', '[disk]', 'max-tier = 4', '[diagnostics]', '[retry]']) assert.ok(toml.includes(fragment), fragment);
+  for (const fragment of ['[actions-cache]', 'native-actions-cache = true', 'shared-volume = "/shared"', 'shared-volume-max-age = "168h"', '[disk]', 'max-tier = 4', '[diagnostics]', '[retry]']) assert.ok(toml.includes(fragment), fragment);
+});
+
+test('removed Docker cache volumes have no form fields or TOML output', () => {
+  const state = base();
+  for (const key of ['cache-volumes', 'cache']) {
+    assert.ok(!groups.docker.some(field => field.key === key), key);
+  }
+  state.scaleSets[0].docker = { 'cache-volumes': 'build:/cache', cache: 'pip | /pip | 20GB' };
+  assert.doesNotMatch(generateFullConfig(state), /cache-volumes|docker\.cache/u);
+});
+
+test('Docker scale sets select either the native receiver or an external URL', () => {
+  const state = base();
+  const nativeURL = 'http://cache.example:32500/';
+  const externalURL = 'https://external.example/cache/';
+  state.actionsCache = { enabled: 'true', 'listen-address': '172.18.0.1:32500', 'advertise-url': nativeURL, 'data-dir': '/var/lib/runner/cache', 'max-size-bytes': '1024' };
+  state.scaleSets[0].docker = { 'native-actions-cache': 'true' };
+  const second = baseSet();
+  second.set.name = 'external';
+  state.scaleSets.push(second);
+  second.docker = { 'actions-cache-url': nativeURL };
+  fieldError(state, 'docker', 'actions-cache-url', 1);
+  second.docker['native-actions-cache'] = 'true';
+  fieldError(state, 'docker', 'actions-cache-url', 1);
+  second.docker['actions-cache-url'] = externalURL;
+  fieldError(state, 'docker', 'actions-cache-url', 1);
+  second.docker['native-actions-cache'] = 'false';
+  const toml = generateFullConfig(state);
+  assert.match(toml, /^native-actions-cache = true$/mu);
+  assert.ok(toml.includes(`actions-cache-url = "${externalURL}"`));
+  assert.ok(!toml.includes(`actions-cache-url = "${nativeURL}"`));
+  state.actionsCache.enabled = 'false';
+  state.scaleSets[0].docker = { 'actions-cache-url': nativeURL };
+  assert.ok(generateFullConfig(state).includes(`actions-cache-url = "${nativeURL}"`));
 });
 
 test('local credential references and explicit file-log disable serialize without secrets', () => {
@@ -274,11 +302,8 @@ test('Docker and Tart errors identify editable fields', () => {
   state.scaleSets[0].docker.platform = 'linux';
   fieldError(state, 'docker', 'platform');
   state.scaleSets[0].docker.platform = '';
-  state.scaleSets[0].docker['cache-volumes'] = 'gradle:relative/path';
-  fieldError(state, 'docker', 'cache-volumes');
-  state.scaleSets[0].docker['cache-volumes'] = '';
-  state.scaleSets[0].docker.cache = 'gradle | /home/runner/.gradle | 10% | warn';
-  fieldError(state, 'docker', 'cache');
+  state.scaleSets[0].docker['shared-volume-name'] = 'bad/name';
+  fieldError(state, 'docker', 'shared-volume-name');
   state.scaleSets[0].set.provider = 'tart';
   state.scaleSets[0].set['max-runners'] = '2';
   state.scaleSets[0].tart.dns = 'not-an-ip';
@@ -342,7 +367,7 @@ test('generated mixed-provider TOML matches the Go-validated fixture', () => {
   state.actionsCache = { enabled: 'true', 'listen-address': '172.18.0.1:32500', 'advertise-url': 'http://cache.internal:32500/', 'data-dir': '/var/lib/runner/native-actions-cache', 'max-size-bytes': '53687091200', 'max-idle-days': '30' };
   state.disk = { guard: 'true', 'min-free': '10%', 'target-free': '20%', interval: '1h', 'max-tier': '3' };
   state.diagnostics = { enabled: 'true', 'capture-logs': 'true' };
-  state.scaleSets[0].docker = { dind: 'false', 'shared-volume-max-age': '168h', 'native-actions-cache': 'true', 'cache-volumes': 'gradle:/home/runner/.gradle', cache: 'pip | /home/runner/.cache/pip | 20GB | warn' };
+  state.scaleSets[0].docker = { dind: 'false', 'shared-volume-max-age': '168h', 'native-actions-cache': 'true', 'shared-volume': '/shared' };
   state.scaleSets[0].retry = { initial: '5s', max: '1m', 'cooldown-after': '5', cooldown: '5m' };
   const tart = baseSet();
   tart.set = { ...tart.set, name: 'macos-runners', provider: 'tart', 'max-runners': '2', 'runner-image': 'ghcr.io/cirruslabs/macos-golden-gate-xcode:latest', auth: 'app', 'client-id': 'Iv1.example', 'installation-id': '123', 'app-key-source': 'env', 'key-env': 'RUNNER_APP_KEY' };

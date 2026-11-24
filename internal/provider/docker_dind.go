@@ -14,17 +14,6 @@ import (
 	dockerclient "github.com/moby/moby/client"
 )
 
-func (p *DockerProvider) persistentMounts() []mount.Mount {
-	var mounts []mount.Mount
-	if p.sharedVolume != "" {
-		mounts = append(mounts, mount.Mount{Type: mount.TypeVolume, Source: p.sharedVolumeName, Target: p.sharedVolume})
-	}
-	for _, v := range p.cacheVolumes {
-		mounts = append(mounts, mount.Mount{Type: mount.TypeVolume, Source: v.Volume, Target: v.Path})
-	}
-	return mounts
-}
-
 func (p *DockerProvider) startDinDInstance(ctx context.Context, name, jit string) (runnerID string, retErr error) {
 	client := p.dockerClient
 	ctx, cancel := context.WithTimeout(ctx, p.dindConfig.EffectiveDinDStartupTimeout())
@@ -86,11 +75,15 @@ func (p *DockerProvider) startDinDInstance(ctx context.Context, name, jit string
 	externals := vm("externals", "/home/runner/externals")
 	externals.ReadOnly = true
 	daemonMounts := []mount.Mount{vm("data", "/var/lib/docker"), socket, work, externals}
-	for _, m := range p.persistentMounts() {
-		// Only the runner image may seed a fresh tool cache. Mounting the
-		// daemon image first must not copy its unrelated files into that cache.
-		m.VolumeOptions = &mount.VolumeOptions{NoCopy: true}
-		daemonMounts = append(daemonMounts, m)
+	runnerMounts := []mount.Mount{socket, work}
+	var targets []string
+	if p.sharedVolume != "" {
+		shared := p.sharedVolumeMount()
+		runnerMounts = append(runnerMounts, shared)
+		targets = append(targets, shared.Target)
+		// The daemon starts first. Only the runner image may seed the shared volume.
+		shared.VolumeOptions = &mount.VolumeOptions{NoCopy: true}
+		daemonMounts = append(daemonMounts, shared)
 	}
 	limits := container.Resources{Memory: int64(p.dindConfig.DinDMemory) * 1024 * 1024, NanoCPUs: int64(p.dindConfig.DinDCPU) * 1_000_000_000}
 	if p.dindConfig.DinDPidsLimit > 0 {
@@ -122,11 +115,6 @@ func (p *DockerProvider) startDinDInstance(ctx context.Context, name, jit string
 	}
 	if err = waitDinDReady(ctx, client, daemon.ID); err != nil {
 		return "", err
-	}
-	runnerMounts := append([]mount.Mount{socket, work}, p.persistentMounts()...)
-	var targets []string
-	for _, m := range p.persistentMounts() {
-		targets = append(targets, m.Target)
 	}
 	env := append(p.buildContainerEnv(jit), "DOCKER_HOST=unix:///var/run/docker.sock")
 	labels := dindLabels(instance, "runner")

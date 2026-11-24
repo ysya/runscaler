@@ -31,9 +31,8 @@ job. Its label is `managed-by=runscaler-cache`, never `managed-by=runner` or
 `runscaler.runner-id`. The external volume `runscaler-actions-cache-data` stores
 filesystem payloads and SQLite together under `/app/.data`.
 
-Do not mount this data into jobs or put it in `cache-volumes` / `[[docker.cache]]`.
-Those stores have separate retention/wipe semantics. Let the server evict its
-own entries: 30 days unused and an explicit absolute byte budget. In this pinned
+Keep this data outside job mounts. The server evicts its own entries using a
+30-day idle window and an explicit absolute byte budget. In this pinned
 release the absolute budget takes precedence over the filesystem percentage
 setting; they are not simultaneous limits. Eviction is not a hard filesystem
 quota and temporary uploads can exceed the budget. Reserve host disk headroom
@@ -98,7 +97,8 @@ the restored checksum from both client paths.
 ## Runner opt-in and image
 
 For the native receiver, set `native-actions-cache = true` on the selected Docker
-scale set and configure the global `[actions-cache].advertise-url`. Use a verified
+scale set and configure the global `[actions-cache].advertise-url`. Omit
+`docker.actions-cache-url` for that set. Use a verified
 `actions-runner` image by immutable digest for a canary; see
 [configuration](configuration.md#host-local-actions-cache-opt-in) and
 [image construction/maintenance](../images/actions-runner/README.md#build-and-verification).
@@ -130,8 +130,7 @@ payload transfers.
 
 BuildKit uses `type=gha,version=2` with a distinct scope per image/platform.
 Changing this endpoint does not redirect existing registry/S3 cache declarations
-or persist mutable `RUN --mount=type=cache` contents automatically. During canary,
-disable overlapping shared writable language-cache mounts without deleting them.
+or persist mutable `RUN --mount=type=cache` contents automatically.
 
 Artifacts remain on GitHub and pass through the local Results endpoint. A
 service outage can therefore affect artifact actions too. Do not promise every
@@ -183,8 +182,8 @@ that service and its data available for rollback. Add a
 canary scale set with only a unique label and one-runner maximum, so generic
 organization jobs cannot match it. Verify signed save/restore, artifact
 passthrough and sibling BuildKit upload/download on provider-managed runners
-before draining and switching the selected existing scale set. Disable
-overlapping shared writable language-cache mounts without deleting their data.
+before draining and switching the selected existing scale set. If migrating from
+volume mounts, follow the [workflow migration steps](caching.md#migration-to-actions-cache).
 Live capacity and production disk performance need their own observations.
 
 Rollback stops canary dispatch and drains work. For migration from an existing

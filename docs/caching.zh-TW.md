@@ -17,7 +17,7 @@
 | 類型 | 消失後的影響 | 範例 |
 | --- | --- | --- |
 | **垃圾資料** | 沒有影響，已經沒有任何參照 | 懸空映像檔、已停止的容器、孤立的 buildx 建置器、已過期的共用磁碟區檔案 |
-| **快取** | 下次建置或工作稍微變慢，但不會出錯 | Docker 層快取／建置快取、快取磁碟區、Tart 的 OCI/IPSW 映像檔快取 |
+| **快取** | 下次建置或工作稍微變慢，但不會出錯 | Docker 層快取／建置快取、Tart 的 OCI/IPSW 映像檔快取 |
 | **暫存資料** | 進行中的工作流程執行會失敗 | 共用磁碟區內尚未過期的內容 |
 
 這項區分可避免把建置快取與工作之間傳遞的資料混為一談：只要快取妨礙可用空間，就可以回收；暫存資料在任何層級都不能回收，無論磁碟空間多麼吃緊。共用磁碟區是唯一會隨資料存放時間而兼具兩種類型的儲存區：工作流程進行期間，它是暫存資料（同一次執行中，後續工作可能仍會讀取先前工作寫入的內容）；檔案超過 `shared-volume-max-age` 後，就變成垃圾資料。因此，runner 不再於程序結束時刪除共用磁碟區：同一次工作流程執行的兩個工作之間，即使重新啟動（包括自行更新），也不再導致後續工作失敗；回收完全交由 `shared-volume-max-age` 與防護機制的第 3 層處理。
@@ -46,11 +46,11 @@ max-tier    = 3      # highest tier the guard may reclaim at (1-4)
 | 1 | 懸空映像檔、已停止的容器、孤立的 buildx 建置器 | 垃圾資料 |
 | 2 | 超過最長存放時間的建置快取與映像檔層 | 快取 |
 | 3 | 超過最長存放時間的共用磁碟區檔案 | 暫存資料（僅限已過期部分） |
-| 4 | 完整清空快取磁碟區 | 快取 |
+| 4 | Docker daemon 上所有未使用的建置快取 | 快取 |
 
-`max-tier` 預設為 **3**：會自動回收垃圾資料並依存放時間清理，但清空快取磁碟區（第 4 層）會讓下次建置變成冷啟動，因此必須明確啟用。
+`max-tier` 預設為 **3**。只有在主機可以清理 Docker daemon 上所有未使用的建置快取時，才設為 4。防護機制會在較低層級無法達到剩餘空間目標時執行這項清理。
 
-防護機制也會在每次清理時，強制執行各儲存區自身設定的容量上限（見下文），無論該儲存區所在的檔案系統是否空間吃緊；此外，每次啟動 runner 前，會立即檢查可用空間，只執行一次低成本的 `statfs`，而非完整清理。如果該檔案系統已低於 `min-free`，會先同步回收空間。這能避免工作在建置途中填滿磁碟，拖垮整部主機；此時回收失敗只會記錄日誌，不會造成致命錯誤，因為拒絕啟動工作比磁碟已滿更糟。
+防護機制也會在每次啟動 runner 前檢查可用空間。若低於 `min-free`，便會先嘗試回收空間，再啟動 runner。回收失敗時會記錄日誌。
 
 <a id="store-retention-settings"></a>
 
@@ -61,30 +61,6 @@ max-tier    = 3      # highest tier the guard may reclaim at (1-4)
 **Docker 層快取／建置快取（自動）。** 設定 `dind = true` 時，工作會直接與主機的常駐程式通訊，因此 `docker pull`／`docker build` 的層快取由所有工作共用，重新啟動後仍會保留。在 runner 專用的常駐程式上，可以主動啟用執行期間的 prune 清理來限制容量成長；關於 `prune`、`prune-ttl`、`build-cache-max-age`、`build-cache-budget`，請參閱上方的[設定檔（TOML）](configuration.zh-TW.md#config-file-toml)。
 
 > **BuildKit 提示：** `docker/setup-buildx-action` 會為每個工作建立用完即丟的建置器，其快取會隨工作結束而消失（`buildx-cleanup` 會回收殘留資料）。若要真正跨工作重複使用建置快取，請使用常駐程式內建的 BuildKit 建置（單純使用 `docker build`，或搭配 `driver: docker` 的 buildx），讓快取存放在 `build-cache-*` 保留設定管理的位置。
-
-**快取磁碟區（`cache-volumes`、`[[docker.cache]]`）。** 具名磁碟區會掛載至每個 runner 容器中工具的預設快取路徑，工作流程無須任何修改即可使用已備妥的快取：
-
-```toml
-[docker]
-cache-volumes = [
-  "gradle-cache:/home/runner/.gradle",
-  "pnpm-store:/home/runner/.local/share/pnpm/store",
-]
-
-# Long form, for an entry that needs a size budget. A name in both forms
-# resolves entirely from its [[docker.cache]] entry, not merged field by field.
-[[docker.cache]]
-name      = "ccache"
-path      = "/home/runner/.ccache"
-budget    = "20GB"
-on-exceed = "warn"   # warn (default): log only, leave eviction to the tool's own LRU | wipe: delete everything over budget
-```
-
-新 Docker 部署不再建議使用這兩個設定；現有設定仍會照常運作。簡短格式會建立持久磁碟區，且永遠不會因任何 TTL 而被清理。不同 runner 規模集使用相同磁碟區名稱即可共用快取；使用不同名稱則可隔離。完整格式另外提供選填的 `budget`，其限制不受磁碟空間壓力影響；防護機制每次清理都會檢查，無論 `max-tier` 為何，或檔案系統是否真的空間吃緊。這裡不會局部淘汰資料：一旦超出容量上限，`wipe` 就會刪除磁碟區的全部內容。細緻的 LRU 淘汰刻意交由工具本身處理（例如 ccache 自己的 `max_size`）；無論是以內容定址的 pnpm 儲存區，還是 Gradle 的 `modules-2` 中繼資料索引，都可能因通用的逐檔清理而損壞。
-
-### 遷移至 Actions cache
-
-先設定並驗證[原生 cache-v2 接收器](configuration.zh-TW.md#native-go-receiver-opt-in)及可使用本機快取的 runner 映像，確保工作流程不會默默改用 GitHub 雲端快取。將每個工具快取磁碟區改為在 workflow 使用明確的 `actions/cache` 步驟，或使用已支援快取的 setup action，並設定合適的路徑與 key（參閱 [GitHub 相依快取指南](https://docs.github.com/en/actions/concepts/workflows-and-actions/dependency-caching)）。Buildx 可用 [`type=gha`](https://docs.docker.com/build/cache/backends/gha/) 匯出與匯入；Docker 映像、建置器狀態與磁碟防護仍由主機另外管理。原生接收器的 `max-size-bytes` 與 `max-idle-days` 是所有項目共用的保留策略，不等同逐磁碟區限額，也不是檔案系統的硬性配額。逐卷的 `budget` 與 `on-exceed` 沒有直接對應設定；接收器會先淘汰閒置項目，再依全域最近使用時間淘汰。舊磁碟區資料不會自動轉換：先預期首次冷啟動，確認新 runner 的熱快取命中，再從設定移除舊掛載。舊 Docker volume 的保留或刪除應另行決定。空的 `cache-volumes = []` 或 `cache = []` 覆寫值仍可用來關閉繼承的掛載，不會顯示棄用提示。
 
 **共用磁碟區（`shared-volume`、`shared-volume-max-age`）。** 這是掛載至每個 runner 相同路徑的一般用途磁碟區（透過 `$SHARED_DIR` 提供），供工作流程明確在同一次執行的工作之間傳遞檔案：
 
@@ -103,6 +79,17 @@ shared-volume-cleanup-interval = "6h"
 
 **啟用開關只控制例行清理。** `prune`（涵蓋懸空映像檔／已停止容器儲存區與建置快取儲存區）、`buildx-cleanup` 和 `cache-cleanup` 各自開啟或關閉該儲存區自己的*週期性、定時*清理，但不會讓儲存區免受磁碟防護機制管理。`prune` 與 `buildx-cleanup` 預設關閉，因為共用常駐程式可能執行不屬於 runner 的工作負載；但實際磁碟空間吃緊時，防護機制仍會回收這些儲存區，不受開關影響。這是必要的：`prune` 與 `buildx-cleanup` 都預設關閉，而 `max-tier` 預設為 3；如果防護機制也遵守這些開關，那麼在只使用 Docker 的主機上，它雖然預設啟用，卻完全無法回收任何資料，直到管理者另外明確啟用例行清理為止。如果某顆磁碟確實不該由 runner 管理，例如常駐程式與無關的工作負載共用，正確的開關是 `[disk] guard = false`，可將該主機的磁碟完全排除於防護機制的管理之外。個別儲存區的開關從來就不是為了表達這個意思而設計的。
 
+## 遷移至 Actions cache
+
+v0.24.0 之後的版本會拒絕 `[docker]` 與 `[scaleset.docker]` 中的 `cache-volumes` 及 `cache`。這也包含 `[[docker.cache]]`、`[[scaleset.docker.cache]]`，以及 `cache-volumes = []`、`cache = []` 等空覆寫。請在仍能使用舊版時完成遷移。
+
+1. 備份目前的執行檔、設定與工作流程版本，記下各具名磁碟區及工具使用的掛載路徑。保留舊 Docker 磁碟區供回復，Runscaler 不會轉換或刪除其中的檔案。
+2. 決定各工作流程要使用的接收器。使用[原生接收器](configuration.zh-TW.md#native-go-receiver-opt-in)時，啟用全域 `[actions-cache]`，在測試用 Docker 規模集設定 `native-actions-cache = true`，並省略 `actions-cache-url`。若明確指定的 URL 和已啟用接收器的 `advertise-url` 相同，即使啟用原生快取仍會驗證失敗。若使用外部接收器，請指定其不同的 URL，並關閉測試規模集的原生快取。兩種本機接收器都需要[支援快取的 runner 映像](local-actions-cache.zh-TW.md)。
+3. 依照各工具的快取路徑與相依套件設計 key，將掛載改為工作流程的 `actions/cache` 步驟，或使用已支援快取的 setup action。Buildx 可用 `type=gha,version=2` 匯入與匯出建置層。原生接收器的 `max-size-bytes` 與 `max-idle-days` 由所有項目共用，沒有對應逐磁碟區 `budget` 或 `on-exceed` 的設定。[GitHub 相依快取指南](https://docs.github.com/en/actions/concepts/workflows-and-actions/dependency-caching) · [Buildx GHA 後端](https://docs.docker.com/build/cache/backends/gha/)
+4. 在測試規模集用兩個沒有舊掛載的全新 runner 各執行一次工作流程。第一次使用新 key，確認未命中且成功寫入指定接收器。第二次沿用相同 key，確認命中且成功還原。通過後，從服務設定移除所有舊鍵，以新版執行檔驗證設定，再排空受影響的工作並切換服務。
+
+需要回復時，先停止派發並排空受影響規模集的工作，還原原本的工作流程版本、執行檔，以及指向舊磁碟區的設定。以舊執行檔驗證後恢復服務，另行保留接收器的資料。既有工作流程仍可使用 `shared-volume` 傳遞檔案。
+
 <a id="visibility"></a>
 
 ## 檢視空間使用情況
@@ -113,11 +100,10 @@ shared-volume-cleanup-interval = "6h"
 $ runner cache
 STORE               FILESYSTEM  SIZE     FS FREE  POLICY
 docker-build-cache  /           12.4 GB  38%
-ccache              /           18.1 GB  38%      budget=20.0 GiB on-exceed=warn
 runner-shared       /           3.3 GB   38%
 tart-cache          /Volumes/…  142 GB   58%
 ```
 
 加上 `--json` 即可供指令碼使用。測量可能耗費較多資源，部分儲存區會透過短暫執行的輔助容器遍歷磁碟區，因此絕不會在頻繁執行的關鍵路徑上進行。若需要可安全輪詢的低成本資訊，`/healthz` 的 `disk` 區段會以單純的 `statfs` 回報各檔案系統的可用空間百分比，絕不會實際測量儲存區大小。
 
-**每個工作獨立的 Docker 快取。** 使用 `daemon-mode = "dind"` 時，內部映像層、BuildKit 狀態與 daemon 建立的磁碟區都屬於單一 runner，會隨它一起移除。預備中的閒置 runner 也各自擁有快取，不會重複用於下一個工作。外層 daemon 的 prune 設定與磁碟用量計算仍只處理外層 daemon；系統不會增加內部 daemon 的 prune 排程或共用 Docker 快取。明確設定的共用／快取檔案系統磁碟區仍會持久保存，並以相同路徑掛載至 runner 與 sidecar，供內部 bind mount 使用。
+**每個工作獨立的 Docker 快取。** 使用 `daemon-mode = "dind"` 時，內部映像層、BuildKit 狀態與 daemon 建立的磁碟區都屬於單一 runner，會隨它一起移除。預備中的閒置 runner 也各自擁有快取，不會重複用於下一個工作。外層 daemon 的 prune 設定與磁碟用量計算仍只處理外層 daemon；系統不會增加內部 daemon 的 prune 排程或共用 Docker 快取。明確設定的 `shared-volume` 會跨工作保留，並以相同路徑掛載至 runner 與 sidecar，供內部 bind mount 使用。

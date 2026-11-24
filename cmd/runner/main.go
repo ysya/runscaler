@@ -313,13 +313,9 @@ func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) e
 		}
 	}
 
-	// A self-updated deployment with an older config must keep starting.
-	// Strict warnings fail `runner validate`; deprecations remain advisory.
+	// Unknown config keys are warnings at startup and errors in runner validate.
 	for _, w := range cfg.Warnings {
 		logger.Warn(w)
-	}
-	for _, d := range cfg.Deprecations {
-		logger.Warn(d)
 	}
 	warnOutdatedService(logger, cfg.EffectiveDrainTimeout())
 
@@ -597,8 +593,8 @@ func runManager(ctx context.Context, cfg config.Config, drain <-chan struct{}) e
 
 	// Nothing is reclaimed here at exit, by design. Every store has a
 	// lifecycle that outlives this process: the shared volume holds handoff
-	// data for runs still in flight across a restart, and images, build
-	// cache and cache volumes belong to the daemon or to the next job.
+	// data for runs still in flight across a restart, and images and build
+	// cache belong to the daemon.
 	// Reclamation belongs to the periodic sweepers and the disk guard
 	// above, which is also what keeps a self-update from deleting anything
 	// a workflow is mid-way through using.
@@ -871,7 +867,7 @@ func scaleSetProblems(cfg config.Config, scaleSets []config.ScaleSetConfig) []er
 				problems = append(problems, fmt.Errorf("scaleset[%d] %q: docker.native-actions-cache requires actions-cache.enabled", i, scaleSets[i].ScaleSetName))
 			}
 			if scaleSets[i].Docker.ActionsCacheURL != cfg.ActionsCache.AdvertiseURL {
-				problems = append(problems, fmt.Errorf("scaleset[%d] %q: docker.native-actions-cache requires docker.actions-cache-url to match actions-cache.advertise-url", i, scaleSets[i].ScaleSetName))
+				problems = append(problems, fmt.Errorf("scaleset[%d] %q: docker.native-actions-cache uses actions-cache.advertise-url; remove docker.actions-cache-url or disable native-actions-cache to select an external receiver", i, scaleSets[i].ScaleSetName))
 			}
 		}
 	}

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"maps"
 	"reflect"
@@ -20,9 +21,19 @@ var globalOnlyKeys = []string{"log-level", "log-format", "log-file", "health-por
 // inherited from the top level.
 var identityKeys = []string{"url", "name", "token", "github-app", "labels", "min-runners"}
 
+// ErrRemovedCacheSetting identifies migration errors safe to display during updates.
+var ErrRemovedCacheSetting = errors.New("removed cache configuration")
+
 // Retired spellings are errors rather than ignored keys: silently dropping a
 // provider or retention setting could run jobs with different behavior.
 func rejectRetiredKeys(settings map[string]any) error {
+	docker, _ := settings["docker"].(map[string]any)
+	for _, key := range []string{"cache-volumes", "cache"} {
+		if _, exists := docker[key]; exists {
+			return fmt.Errorf("%w: docker.%s has been removed; remove this key and migrate tool caches to workflow Actions cache", ErrRemovedCacheSetting, key)
+		}
+	}
+
 	for _, key := range []struct{ table, old, current string }{
 		{"", "backend", "provider"},
 		{"docker", "shared-volume-ttl", "shared-volume-max-age"},
@@ -52,7 +63,6 @@ func rejectRetiredKeys(settings map[string]any) error {
 //
 // Unknown keys and mixed single/multi-mode keys go into Config.Warnings;
 // validation treats them as errors while older deployments can still start.
-// Sunset notices go into Config.Deprecations so they never block validation.
 func Load(v *viper.Viper) (Config, error) {
 	settings := v.AllSettings()
 	// AllSettings drops empty tables while flattening configuration. Preserve
@@ -78,7 +88,6 @@ func Load(v *viper.Viper) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	deprecations := cacheVolumeSunsetWarnings(cfg.Defaults.Docker, settings, "")
 
 	var scaleSetWarnings []string
 
@@ -99,8 +108,6 @@ func Load(v *viper.Viper) (Config, error) {
 			if err != nil {
 				return Config{}, fmt.Errorf("scaleset[%d]: %w", i, err)
 			}
-			deprecations = append(deprecations,
-				cacheVolumeSunsetWarnings(ss.Docker, entry, fmt.Sprintf("scaleset[%d]: ", i))...)
 			for _, key := range unused {
 				// Unknown keys inherited from the top level are already
 				// reported by the top-level decode; only report keys this
@@ -129,48 +136,34 @@ func Load(v *viper.Viper) (Config, error) {
 	warnings = append(warnings, scaleSetWarnings...)
 
 	cfg.Warnings = warnings
-	cfg.Deprecations = append(deprecations, nativeActionsCacheURLSunsetWarnings(cfg)...)
+	if err := cfg.rejectNativeCacheURLAlias(); err != nil {
+		return Config{}, err
+	}
 	if cfg.HealthAddress == "" {
 		cfg.HealthAddress = DefaultHealthAddress
 	}
 	return cfg, nil
 }
 
-func cacheVolumeSunsetWarnings(docker DockerConfig, source map[string]any, prefix string) []string {
-	var warnings []string
-	for _, field := range []struct {
-		key  string
-		used bool
-	}{
-		{"cache-volumes", len(docker.CacheVolumes) > 0},
-		{"cache", len(docker.Cache) > 0},
-	} {
-		if field.used && hasKeyPath(source, "docker."+field.key) {
-			warnings = append(warnings, prefix+"docker."+field.key+
-				" is deprecated; migrate tool caches to workflow Actions cache before removing this volume mount")
-		}
-	}
-	return warnings
-}
-
-func nativeActionsCacheURLSunsetWarnings(cfg Config) []string {
-	if !cfg.ActionsCache.Enabled || cfg.ActionsCache.AdvertiseURL == "" {
+// Check effective Docker settings before ResolveScaleSets fills in the native URL.
+func (c *Config) rejectNativeCacheURLAlias() error {
+	if !c.ActionsCache.Enabled || c.ActionsCache.AdvertiseURL == "" {
 		return nil
 	}
-	warning := "docker.actions-cache-url is deprecated when it points to [actions-cache].advertise-url; use docker.native-actions-cache = true and remove the duplicate URL before a future breaking release"
-	if len(cfg.ScaleSets) == 0 {
-		if (cfg.Defaults.Provider == "" || cfg.Defaults.Provider == DefaultProvider) && cfg.Defaults.Docker.ActionsCacheURL == cfg.ActionsCache.AdvertiseURL {
-			return []string{warning}
-		}
-		return nil
+	sets := c.ScaleSets
+	if len(sets) == 0 {
+		sets = []ScaleSetConfig{c.Defaults}
 	}
-	var warnings []string
-	for i, ss := range cfg.ScaleSets {
-		if ss.Provider == DefaultProvider && ss.Docker.ActionsCacheURL == cfg.ActionsCache.AdvertiseURL {
-			warnings = append(warnings, fmt.Sprintf("scaleset[%d]: %s", i, warning))
+	for i, ss := range sets {
+		if (ss.Provider == "" || ss.Provider == DefaultProvider) && ss.Docker.ActionsCacheURL == c.ActionsCache.AdvertiseURL {
+			err := fmt.Errorf("%w: docker.actions-cache-url points to the built-in receiver; remove this URL and set docker.native-actions-cache = true", ErrRemovedCacheSetting)
+			if len(c.ScaleSets) > 0 {
+				return fmt.Errorf("scaleset[%d]: %w", i, err)
+			}
+			return err
 		}
 	}
-	return warnings
+	return nil
 }
 
 // popScaleSets removes the "scaleset" key from settings and returns its

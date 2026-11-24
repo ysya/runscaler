@@ -36,7 +36,7 @@ func (dc DockerConfig) EffectiveDinDStartupTimeout() time.Duration {
 	return DefaultDinDStartupTimeout
 }
 
-func (ss *ScaleSetConfig) validateDockerDaemon(mounts []CacheVolumeMount) error {
+func (ss *ScaleSetConfig) validateDockerDaemon() error {
 	switch ss.DockerDaemonMode() {
 	case "host", "dind", "none":
 	default:
@@ -58,22 +58,10 @@ func (ss *ScaleSetConfig) validateDockerDaemon(mounts []CacheVolumeMount) error 
 	if dc.Platform != "" && !strings.HasPrefix(dc.Platform, "linux/") {
 		return fmt.Errorf("docker dind requires a linux platform")
 	}
-	paths := make([]string, 0, len(mounts)+1)
-	if dc.SharedVolume != "" {
-		paths = append(paths, dc.SharedVolume)
-	}
-	for _, mount := range mounts {
-		paths = append(paths, mount.Path)
-	}
-	for i, p := range paths {
+	if p := dc.SharedVolume; p != "" {
 		for _, reserved := range []string{"/var/run", "/run", "/var/lib/docker", "/home/runner/_work", "/home/runner/externals"} {
 			if dockerPathsOverlap(p, reserved) {
 				return fmt.Errorf("docker dind mount %q overlaps reserved path %q", p, reserved)
-			}
-		}
-		for _, other := range paths[:i] {
-			if dockerPathsOverlap(p, other) {
-				return fmt.Errorf("docker dind mount %q overlaps shared/cache path %q", p, other)
 			}
 		}
 	}

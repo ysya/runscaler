@@ -43,8 +43,6 @@ main { overflow: visible; }
 .set-details summary, .tool-card > details summary { color: #225f49; cursor: pointer; font-size: 13px; font-weight: 750; }
 .set-details .field-grid, .tool-card > details .field-grid { margin-top: 18px; }
 .details-help { margin: 10px 0 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
-.legacy-field { padding: 10px; border: 1px solid #e9d4a0; border-radius: 7px; background: #fffbef; }
-.legacy-note { margin: 6px 0 0; color: #866326; font-size: 11px; line-height: 1.5; }
 .section-warning { margin: 18px 0 0; padding: 12px 14px; border-left: 3px solid #cf9f52; color: #684e30; background: #fcf5e8; font-size: 12px; line-height: 1.6; }
 .section-warning a, .output-note a { text-underline-offset: 3px; }
 .tool-output { top: 22px; min-width: 0; }

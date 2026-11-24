@@ -66,7 +66,7 @@ func removeOrphanTartVMs(ctx context.Context, runner provider.CommandRunner, orp
 // resources could belong to another live runner process.
 //
 // Reconciliation reclaims anonymous, explicitly runner-owned temporary, and
-// private workspace volumes. Shared/cache volumes outlive the process and may
+// private workspace volumes. Shared volumes outlive the process and may
 // hold data needed by a later job in an in-flight workflow run.
 func reconcileOrphans(ctx context.Context, dockerClients map[string]*dockerclient.Client, tartHomes []string, logger *slog.Logger, workspaceRoots ...string) {
 	workspacesSafeToRemove := len(dockerClients) > 0

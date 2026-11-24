@@ -26,8 +26,7 @@ runner 映像、client、重啟與斷線結果；詳細執行證據保存在私�
 也不可加入 `runscaler.runner-id`。外部 named volume
 `runscaler-actions-cache-data` 將 SQLite 與檔案 payload 一起保存在 `/app/.data`。
 
-不可掛入 job，也不可登記在 `cache-volumes` 或 `[[docker.cache]]`；這些儲存區
-有各自的回收／清空規則。讓 server 自行管理：閒置 30 天、明確的絕對容量預算。
+資料應放在工作掛載範圍之外。伺服器依 30 天的閒置期限與指定的絕對容量預算自行回收項目。
 固定版本中，絕對容量預算會優先於檔案系統百分比設定，兩者不會同時套用。
 清理門檻不是硬性磁碟配額，暫存上傳可能超過預算；主機必須保留空間，
 需要硬性上限時應使用獨立檔案系統或 quota。不要分開刪 SQLite 或 payload 檔案。
@@ -80,7 +79,7 @@ docker compose --env-file deploy/local-cache/.env -f deploy/local-cache/compose.
 ## Runner 選用與映像
 
 使用原生接收器時，只在選定的 Docker scale set 設定 `native-actions-cache = true`，
-並設定全域 `[actions-cache].advertise-url`。使用已驗證的統一 `actions-runner`
+並設定全域 `[actions-cache].advertise-url`。該規模集請省略 `docker.actions-cache-url`。使用已驗證的統一 `actions-runner`
 映像；canary 驗證時固定 digest。詳見[設定](configuration.zh-TW.md)與
 [映像建置及維護](../images/actions-runner/README.md#build-and-verification)。
 單純使用官方 runner base image 不會提供已修補的元件或已安裝的 capability checker。
@@ -105,8 +104,7 @@ metadata，並非完整離線 Cargo 支援。工具鏈及套件來源下載與�
 
 BuildKit 使用 `type=gha,version=2`，每個 image／platform 分別設 scope。
 本機端點不會自動導向既有 registry／S3 cache，也不會自動保存
-`RUN --mount=type=cache` 的可變快取內容。Canary 先停用重疊的共用可寫語言快取掛載，
-保留原資料。
+`RUN --mount=type=cache` 的可變快取內容。
 
 Artifact 仍儲存在 GitHub，經過本機 Results 端點轉送；服務故障因此也可能影響
 artifact action。不可保證所有 cache／action 錯誤都不會造成 job 失敗，也不可自動
@@ -147,8 +145,7 @@ v10 是單向遷移：比 v9.10 更舊的資料庫會被刪除並清空 storage�
 與資料供回復使用。新增只帶獨立 label、最多一個 runner 的 canary scale set，
 避免一般組織工作被派入。
 在 provider 管理的 runner 上驗證簽名保存／還原、artifact 轉送及旁系 BuildKit
-上傳／下載後，再排空並切換選定的現有 scale set。停用重疊的共用可寫語言快取
-掛載並保留其資料。正式容量與磁碟效能仍需另行觀察。
+上傳／下載後，再排空並切換選定的現有 scale set。若原本使用工具快取磁碟區，請依照[工作流程遷移步驟](caching.zh-TW.md#遷移至-actions-cache)切換。正式容量與磁碟效能仍需另行觀察。
 
 回復時停止派發 canary 工作並排空。若從既有外部接收器遷移，在 manager 停止期間
 還原已審閱的舊 binary／設定與相容服務定義，包括選定 scale set 的外部端點。

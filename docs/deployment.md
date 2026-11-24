@@ -231,7 +231,7 @@ A manager configuration change needs a maintenance restart; there is no hot
 reload, per-set disable switch, or second-manager exception to the host lock.
 Preserve unrelated entries and check the running version's drain behavior and
 service stop deadline before any restart. Runner/doctor cleanup preserves the
-external cache data volume; it is not a generic wipeable job cache.
+external receiver's data volume.
 
 The native Go receiver is being developed behind separate acceptance gates.
 Its `[actions-cache]` listener starts before runner listeners and stays available

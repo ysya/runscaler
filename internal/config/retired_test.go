@@ -16,6 +16,14 @@ func TestRetiredConfigKeysFailWithoutUsingTheirValues(t *testing.T) {
 		{"multi provider", "[[scaleset]]\nbackend='private-retired-value'\n", "backend", "provider"},
 		{"multi docker", "[[scaleset]]\n[scaleset.docker]\nshared-volume-ttl='24h'\n", "shared-volume-ttl", "shared-volume-max-age"},
 		{"multi tart", "[[scaleset]]\n[scaleset.tart]\ncache-space-budget=123\n", "cache-space-budget", "cache-budget"},
+		{"cache volume", "[docker]\ncache-volumes=['private-retired-value:/cache']", "docker.cache-volumes", "workflow"},
+		{"cache table", "[[docker.cache]]\nname='private-retired-value'", "docker.cache", "workflow"},
+		{"empty cache volumes", "[docker]\ncache-volumes=[]", "docker.cache-volumes", "workflow"},
+		{"empty cache list", "[docker]\ncache=[]", "docker.cache", "workflow"},
+		{"empty cache table", "[[docker.cache]]", "docker.cache", "workflow"},
+		{"inherited cache table", "[[docker.cache]]\nname='private-retired-value'\n[[scaleset]]", "docker.cache", "workflow"},
+		{"per-set cache table", "[[scaleset]]\n[[scaleset.docker.cache]]\nname='private-retired-value'", "scaleset[0]", "docker.cache"},
+		{"per-set empty override", "[[scaleset]]\n[scaleset.docker]\ncache-volumes=[]", "scaleset[0]", "docker.cache-volumes"},
 		{"both spellings", "provider='docker'\nbackend='private-retired-value'\n", "backend", "provider"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

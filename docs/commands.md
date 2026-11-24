@@ -30,11 +30,12 @@ runner status --json
 runner status --no-color
 ```
 
-`runner update --check` also reads the selected service's config and reports
-advisory sunset notices before any binary replacement. It cannot inspect an
-unselected service in `--binary-path` mode. Check the target release notes and
-[upgrade requirements](../README.md#upgrade-requirements) for breaking changes;
-an older binary cannot detect notices added after it was released.
+`runner update --check` inspects the selected service's config. When it finds a
+removed cache setting it prints the migration error and a link to v0.24.0
+for rollback. In `--binary-path` mode there is no selected service to inspect.
+An older updater only knows the settings from its own release. Read the target
+[upgrade requirements](../README.md#upgrade-requirements) and validate with
+the new binary before restarting the service.
 
 Each scale set's optional `runtime` object in `/healthz` (and `status --json`)
 reports startup attempts, failures, consecutive failures, the last attempt and
@@ -174,10 +175,9 @@ rate-limit, or numeric HTTP-status categories, and a rate limit includes the
 wait GitHub asked for; raw SDK response bodies are not printed.
 
 The `--fix` flag takes the same machine-wide lock as `runner run`, so it refuses
-to remove resources while any current runner instance is active. Shared and
-cache volumes are never removed by startup reconciliation or `doctor --fix`:
-they intentionally outlive the process and may still contain data needed by a
-later job in an in-flight workflow.
+to remove resources while any current runner instance is active. The configured shared
+volume survives startup reconciliation and `doctor --fix` so later jobs can
+read their handoff files.
 
 Normal runner removal and these fix paths stop the root runner, then remove
 containers explicitly linked by `--network container:<runner-id-or-name>` or

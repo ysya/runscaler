@@ -17,8 +17,6 @@ import (
 	"charm.land/lipgloss/v2"
 	charmlog "charm.land/log/v2"
 	"github.com/actions/scaleset"
-
-	"github.com/ysya/runscaler/internal/bytesize"
 )
 
 // Config holds the complete runner configuration.
@@ -61,9 +59,6 @@ type Config struct {
 	// single-mode keys mixed with [[scaleset]] entries) surfaced by callers:
 	// `runner run` logs them, `runner validate` fails on them.
 	Warnings []string `mapstructure:"-"`
-	// Deprecations are advisory. They never make validation or service
-	// installation fail while older configurations remain supported.
-	Deprecations []string `mapstructure:"-"`
 }
 
 // ScaleSetConfig holds per-scale-set configuration.
@@ -150,27 +145,6 @@ type DockerConfig struct {
 	// distinct names.
 	SharedVolumeName string `mapstructure:"shared-volume-name"`
 
-	// CacheVolumes are named volumes mounted into every runner container at
-	// tool-default cache paths, so workflows hit warm caches with zero
-	// workflow changes. Entry format "volume-name:/absolute/container/path",
-	// e.g. "gradle-cache:/home/runner/.gradle". Cache volumes are persistent
-	// caches: they are deliberately never removed at exit and never swept by
-	// any TTL. Same name across scalesets = shared cache, different = isolated.
-	//
-	// This is the short form. See Cache for the long form, which adds an
-	// optional retention budget; ParseCacheVolumes merges the two.
-	// Sunset: migrate tool caches to workflow Actions cache for new deployments.
-	CacheVolumes []string `mapstructure:"cache-volumes"`
-
-	// Cache is the long form of CacheVolumes — [[docker.cache]] tables
-	// instead of "name:/path" strings — for entries that need a retention
-	// budget. An entry here whose Name also appears in CacheVolumes replaces
-	// it entirely (see ParseCacheVolumes); the two are never merged field by
-	// field.
-	// Sunset: retained for existing configurations; its budget does not map
-	// directly to the native Actions cache's global byte limit.
-	Cache []CacheVolumeSpec `mapstructure:"cache"`
-
 	// SharedVolumeMaxAge deletes files in shared-volume older than this
 	// duration. Accepts Go duration strings, e.g. "168h". It must exceed
 	// the longest workflow run on this host: the volume holds handoff data
@@ -226,168 +200,8 @@ type DockerConfig struct {
 	BuildCacheBudgetGB int `mapstructure:"build-cache-budget"`
 }
 
-// CacheVolumeSpec is one [[docker.cache]] long-form cache-volume entry: like
-// a CacheVolumes short-form "name:/path" string, plus an optional retention
-// budget. See ParseCacheVolumes for how it merges with the short form and
-// what each field validates to.
-type CacheVolumeSpec struct {
-	Name     string `mapstructure:"name"`
-	Path     string `mapstructure:"path"`
-	Budget   string `mapstructure:"budget"`
-	OnExceed string `mapstructure:"on-exceed"`
-}
-
-// CacheVolumeMount is one resolved cache-volumes entry — merged from the
-// short and long forms by ParseCacheVolumes — naming a Docker volume, the
-// absolute container path it mounts at, and its optional retention budget.
-// BudgetBytes 0 means no budget is configured (every short-form entry, and
-// a long-form entry whose Budget is ""); OnExceed only matters when
-// BudgetBytes != 0.
-type CacheVolumeMount struct {
-	Volume      string
-	Path        string
-	BudgetBytes uint64
-	OnExceed    string
-}
-
 // volumeNameRe matches Docker's volume-name pattern.
 var volumeNameRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
-
-// validateVolumeName reports whether name matches Docker's volume-name
-// pattern.
-func validateVolumeName(name string) error {
-	if !volumeNameRe.MatchString(name) {
-		return fmt.Errorf("invalid volume name %q", name)
-	}
-	return nil
-}
-
-// validateContainerPath reports whether path is a clean absolute path other
-// than "/" — the shape every cache-volume mount target must have.
-func validateContainerPath(path string) error {
-	if !filepath.IsAbs(path) || filepath.Clean(path) != path || path == "/" {
-		return fmt.Errorf("container path %q must be absolute", path)
-	}
-	return nil
-}
-
-// parseCacheVolumeBudget parses a [[docker.cache]] entry's Budget string
-// into bytes. "" means unconfigured (0, no error) — the short form's only
-// option. A percentage (e.g. "10%") is rejected: unlike [disk]'s
-// thresholds — which internal/diskguard resolves against a fresh statfs on
-// every sweep — there is no live filesystem to resolve a percentage against
-// at config-parse time, so letting bytesize.ParseThreshold's percentage
-// branch through would silently produce a permanently-zero budget (0% of an
-// unknown total).
-func parseCacheVolumeBudget(budget string) (uint64, error) {
-	if budget == "" {
-		return 0, nil
-	}
-	if strings.HasSuffix(budget, "%") {
-		return 0, fmt.Errorf("budget %q must be an absolute size like \"20GB\" (percentages are not supported for cache volumes)", budget)
-	}
-	th, err := bytesize.ParseThreshold(budget)
-	if err != nil {
-		return 0, fmt.Errorf("invalid budget %q: want a size like \"20GB\"", budget)
-	}
-	return th.Bytes, nil
-}
-
-// ParseCacheVolumes parses and merges CacheVolumes (short form) and Cache
-// (long form) into one list of mounts, ordered by first appearance across
-// both. An entry present in both forms is resolved entirely from its
-// long-form entry — path, budget, and on-exceed all come from there, and
-// the short-form entry of the same name is discarded rather than partially
-// merged — matching docker-compose's own short/long merge convention.
-//
-// Errors: an empty volume name or path, a non-absolute/non-clean container
-// path, a volume name outside Docker's volume-name pattern, the same volume
-// name repeated within one form (CacheVolumes or Cache — but not across the
-// two; see above), two entries (from either form) resolving to the same
-// container path, a long-form Budget that fails to parse or names a
-// percentage (see parseCacheVolumeBudget), or a long-form OnExceed other
-// than "", "warn", "wipe".
-func (dc DockerConfig) ParseCacheVolumes() ([]CacheVolumeMount, error) {
-	order := make([]string, 0, len(dc.CacheVolumes)+len(dc.Cache))
-	byName := make(map[string]CacheVolumeMount, len(dc.CacheVolumes)+len(dc.Cache))
-
-	seenShort := make(map[string]bool, len(dc.CacheVolumes))
-	for _, entry := range dc.CacheVolumes {
-		name, path, ok := strings.Cut(entry, ":")
-		if !ok || name == "" || path == "" {
-			return nil, fmt.Errorf("cache-volumes entry %q must be \"volume-name:/absolute/container/path\"", entry)
-		}
-		if err := validateVolumeName(name); err != nil {
-			return nil, fmt.Errorf("cache-volumes entry %q: %w", entry, err)
-		}
-		if err := validateContainerPath(path); err != nil {
-			return nil, fmt.Errorf("cache-volumes entry %q: %w", entry, err)
-		}
-		// A repeated name within this same list is rejected rather than
-		// silently resolving to whichever entry is seen last: two different
-		// paths under one volume name almost always means a copy-pasted
-		// entry whose name the operator forgot to change, not a deliberate
-		// request to mount one named volume at two paths. Cross-form
-		// repeats (a long-form entry naming a short-form one) are the
-		// opposite — a deliberate override — and stay unrestricted below.
-		if seenShort[name] {
-			return nil, fmt.Errorf("cache-volumes contains duplicate volume name %q", name)
-		}
-		seenShort[name] = true
-		order = append(order, name)
-		byName[name] = CacheVolumeMount{Volume: name, Path: path}
-	}
-
-	seenLong := make(map[string]bool, len(dc.Cache))
-	for _, spec := range dc.Cache {
-		if spec.Name == "" {
-			return nil, fmt.Errorf("[[docker.cache]] entry has an empty name")
-		}
-		if err := validateVolumeName(spec.Name); err != nil {
-			return nil, fmt.Errorf("[[docker.cache]] entry %q: %w", spec.Name, err)
-		}
-		if err := validateContainerPath(spec.Path); err != nil {
-			return nil, fmt.Errorf("[[docker.cache]] entry %q: %w", spec.Name, err)
-		}
-		budgetBytes, err := parseCacheVolumeBudget(spec.Budget)
-		if err != nil {
-			return nil, fmt.Errorf("[[docker.cache]] entry %q: %w", spec.Name, err)
-		}
-		switch spec.OnExceed {
-		case "", "warn", "wipe":
-		default:
-			return nil, fmt.Errorf("[[docker.cache]] entry %q: on-exceed must be \"warn\" or \"wipe\", got %q", spec.Name, spec.OnExceed)
-		}
-		// Same rationale as seenShort above, scoped to this form only.
-		if seenLong[spec.Name] {
-			return nil, fmt.Errorf("[[docker.cache]] contains duplicate volume name %q", spec.Name)
-		}
-		seenLong[spec.Name] = true
-
-		if _, exists := byName[spec.Name]; !exists {
-			order = append(order, spec.Name)
-		}
-		byName[spec.Name] = CacheVolumeMount{
-			Volume: spec.Name, Path: spec.Path, BudgetBytes: budgetBytes, OnExceed: spec.OnExceed,
-		}
-	}
-
-	if len(order) == 0 {
-		return nil, nil
-	}
-
-	mounts := make([]CacheVolumeMount, 0, len(order))
-	pathOwner := make(map[string]string, len(order))
-	for _, name := range order {
-		m := byName[name]
-		if owner, dup := pathOwner[m.Path]; dup {
-			return nil, fmt.Errorf("cache volumes %q and %q both mount container path %q", owner, name, m.Path)
-		}
-		pathOwner[m.Path] = name
-		mounts = append(mounts, m)
-	}
-	return mounts, nil
-}
 
 // TartConfig holds Tart VM-specific provider settings.
 type TartConfig struct {
@@ -647,11 +461,7 @@ func (ss *ScaleSetConfig) ValidationErrors() []error {
 				add(fmt.Errorf("docker platform must be os/arch or os/arch/variant"))
 			}
 		}
-		mounts, err := ss.Docker.ParseCacheVolumes()
-		if err != nil {
-			add(err)
-		}
-		if err := ss.validateDockerDaemon(mounts); err != nil {
+		if err := ss.validateDockerDaemon(); err != nil {
 			add(err)
 		}
 		if ss.Docker.Memory < 0 || ss.Docker.CPU < 0 || ss.Docker.PidsLimit < 0 || ss.Docker.BuildCacheBudgetGB < 0 {
@@ -663,11 +473,6 @@ func (ss *ScaleSetConfig) ValidationErrors() []error {
 		if ss.Docker.SharedVolume != "" {
 			if !filepath.IsAbs(ss.Docker.SharedVolume) || filepath.Clean(ss.Docker.SharedVolume) != ss.Docker.SharedVolume || ss.Docker.SharedVolume == "/" {
 				add(fmt.Errorf("shared-volume must be a clean absolute container path other than /"))
-			}
-			for _, mount := range mounts {
-				if mount.Path == ss.Docker.SharedVolume {
-					add(fmt.Errorf("shared-volume conflicts with cache-volumes path %q", mount.Path))
-				}
 			}
 		}
 	case "tart":

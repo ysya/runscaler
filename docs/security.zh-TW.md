@@ -8,7 +8,7 @@
 
 **`dind = true` 是共用 Docker socket，而不是具沙箱隔離的 Docker-in-Docker。** runner 容器會掛載主機的 Docker socket，因此任何工作都能控制主機常駐程式，包括啟動特權容器、掛載主機檔案系統、檢查其他工作的容器。這相當於擁有主機的 root 權限。請只執行你信任的程式碼：**絕對不要讓這些 runner 處理來自公開 fork 的 pull request**。不需要建置映像檔的 runner 規模集，請設定 `dind = false`。涵蓋整個常駐程式的 buildx／prune 清理程序預設關閉，而且只應在 runner 專用的 Docker 常駐程式上啟用。
 
-**DinD 會為每個工作分開保存 Docker 狀態。** 使用 `daemon-mode = "dind"` 時，只有 sidecar 以特權模式執行，runner 仍為非特權容器，兩者都不會取得外層 socket。特權 sidecar 與主機共用核心，因此無法作為執行惡意程式碼的沙箱；明確設定的共用／快取磁碟區也仍會共用檔案。請只執行你信任的程式碼：**絕對不要讓這些 runner 處理來自公開 fork 的 pull request**。不需要 daemon 的 runner 規模集，請設定 `daemon-mode = "none"`（或在模式為空時使用舊版 `dind = false`）。涵蓋整個 daemon 的 buildx／prune 清理程序預設關閉，而且只應在 runner 專用的 Docker daemon 上啟用。
+**DinD 會為每個工作分開保存 Docker 狀態。** 使用 `daemon-mode = "dind"` 時，只有 sidecar 以特權模式執行，runner 仍為非特權容器，兩者都不會取得外層 socket。特權 sidecar 與主機共用核心，因此無法作為執行惡意程式碼的沙箱；工作也可透過明確設定的 `shared-volume` 共用檔案。請只執行你信任的程式碼：**絕對不要讓這些 runner 處理來自公開 fork 的 pull request**。不需要 daemon 的 runner 規模集，請設定 `daemon-mode = "none"`（或在模式為空時使用舊版 `dind = false`）。涵蓋整個 daemon 的 buildx／prune 清理程序預設關閉，而且只應在 runner 專用的 Docker daemon 上啟用。
 
 隔離設定皆位於各 runner 規模集的 `[docker]` 下：
 

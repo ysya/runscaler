@@ -1,5 +1,5 @@
 // Package bytesize parses free-space/capacity thresholds shared by
-// internal/config (validating [disk] and cache-volume budget settings) and
+// internal/config (validating [disk] thresholds) and
 // internal/diskguard (comparing them against live statfs results). It is a
 // leaf package — it imports nothing internal — specifically so both of
 // those packages can import it without an import cycle: internal/diskguard

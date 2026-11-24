@@ -102,7 +102,7 @@ function serialize(field, raw, lang) {
 }
 
 function emitFields(values = {}, fields, lang, group, index = 0, excluded = []) {
-  return fields.filter(field => !excluded.includes(field.key) && field.type !== 'cache').flatMap(field => {
+  return fields.filter(field => !excluded.includes(field.key)).flatMap(field => {
     let encoded;
     try { encoded = serialize(field, values[field.key], lang); }
     catch (error) { throw fieldError(group, field.key, index, error.message); }
@@ -113,52 +113,6 @@ function emitFields(values = {}, fields, lang, group, index = 0, excluded = []) 
 function emitTable(header, values, fields, lang, group, index = 0) {
   const lines = emitFields(values, fields, lang, group, index);
   return lines.length ? ['', `[${header}]`, ...lines] : [];
-}
-
-function legacyEntries(raw) {
-  return list(raw).map((entry, index) => {
-    const [name, path = '', budget = '', onExceed = '', ...rest] = entry.split('|').map(part => part.trim());
-    return { name, path, budget, onExceed, rest, line: index + 1 };
-  });
-}
-
-function validateLegacyCache(docker, index, lang) {
-  const short = list(docker['cache-volumes']);
-  const long = legacyEntries(docker.cache);
-  const byName = new Map();
-  const shortNames = new Set();
-  const longNames = new Set();
-  const invalid = (key, line) => { throw fieldError('docker', key, index, message(lang, `Invalid legacy cache volume on line ${line}. Use a unique name and clean absolute path.`, `第 ${line} 行的舊版 cache volume 無效；請使用不重複的名稱及乾淨的絕對路徑。`, `${line} 行目の旧形式キャッシュボリュームが無効です。重複しない名前と、正規化された絶対パスを指定してください。`)); };
-  short.forEach((entry, line) => {
-    const colon = entry.indexOf(':');
-    const name = entry.slice(0, colon);
-    const path = entry.slice(colon + 1);
-    if (colon < 0 || !volumeName.test(name) || !cleanPath(path) || shortNames.has(name)) invalid('cache-volumes', line + 1);
-    shortNames.add(name);
-    byName.set(name, { path, key: 'cache-volumes', line: line + 1 });
-  });
-  long.forEach(entry => {
-    if (entry.rest.length || !volumeName.test(entry.name) || !cleanPath(entry.path) || (entry.budget && (!threshold(entry.budget) || threshold(entry.budget).type !== 'bytes')) || (entry.onExceed && !['warn', 'wipe'].includes(entry.onExceed)) || longNames.has(entry.name)) invalid('cache', entry.line);
-    longNames.add(entry.name);
-    byName.set(entry.name, { path: entry.path, key: 'cache', line: entry.line });
-  });
-  const paths = new Map();
-  for (const entry of byName.values()) {
-    if (paths.has(entry.path)) invalid(entry.key, entry.line);
-    paths.set(entry.path, entry.key);
-  }
-  return paths;
-}
-
-function emitLegacyCache(header, raw, lang, index) {
-  return legacyEntries(raw).flatMap(entry => {
-    try {
-      const lines = ['', `[[${header}]]`, `name = ${quoteToml(entry.name, lang)}`, `path = ${quoteToml(entry.path, lang)}`];
-      if (entry.budget) lines.push(`budget = ${quoteToml(entry.budget, lang)}`);
-      if (entry.onExceed) lines.push(`on-exceed = ${quoteToml(entry.onExceed, lang)}`);
-      return lines;
-    } catch (error) { throw fieldError('docker', 'cache', index, error.message); }
-  });
 }
 
 function fixedMinimum(set) {
@@ -212,24 +166,23 @@ function validateSet(scale, global, lang, index) {
     reject(copy(docker['workspace-root']) && !cleanPath(copy(docker['workspace-root'])), 'docker', 'workspace-root', index, lang, 'Workspace root must be a clean absolute path other than /.', '工作目錄須為乾淨的絕對路徑，且不可為 /。', 'ワークスペースには / 以外の正規化された絶対パスを指定してください。');
     reject(copy(docker.platform) && !/^[^/]+\/[^/]+(?:\/[^/]+)?$/u.test(copy(docker.platform)), 'docker', 'platform', index, lang, 'Docker platform must be os/arch or os/arch/variant.', 'Docker 平台須為 os/arch 或 os/arch/variant。', 'Docker プラットフォームは os/arch または os/arch/variant で指定してください。');
     reject(copy(docker['shared-volume-name']) && !volumeName.test(copy(docker['shared-volume-name'])), 'docker', 'shared-volume-name', index, lang, 'Invalid shared volume name.', '共用 volume 名稱無效。', '共有ボリューム名が無効です。');
-    reject(copy(docker['shared-volume']) && !cleanPath(copy(docker['shared-volume'])), 'docker', 'shared-volume', index, lang, 'Shared volume must be a clean absolute path other than /.', '共用 volume 須為乾淨的絕對路徑，且不可為 /。', '共有ボリュームには / 以外の正規化された絶対パスを指定してください。');
-    const cachePaths = validateLegacyCache(docker, index, lang);
-    reject(cachePaths.has(copy(docker['shared-volume'])), 'docker', 'shared-volume', index, lang, 'Shared volume conflicts with a legacy cache mount path.', '共用 volume 與舊版快取掛載路徑衝突。', '共有ボリュームが旧形式キャッシュのマウント先と重複しています。');
+    const sharedPath = copy(docker['shared-volume']);
+    reject(sharedPath && !cleanPath(sharedPath), 'docker', 'shared-volume', index, lang, 'Shared volume must be a clean absolute path other than /.', '共用 volume 須為乾淨的絕對路徑，且不可為 /。', '共有ボリュームには / 以外の正規化された絶対パスを指定してください。');
     if (daemonMode === 'dind') {
       const network = copy(docker.network);
       reject(network === 'host' || network.startsWith('container:'), 'docker', 'network', index, lang, 'Private Docker requires a private network namespace.', '私人 Docker daemon 需要獨立的網路命名空間。', '専用 Docker デーモンには独立したネットワーク名前空間が必要です。');
       reject(copy(docker.platform) && !copy(docker.platform).startsWith('linux/'), 'docker', 'platform', index, lang, 'Private Docker requires a Linux platform.', '私人 Docker daemon 需要 Linux 平台。', '専用 Docker デーモンには Linux プラットフォームが必要です。');
-      const mounts = [...cachePaths];
-      if (copy(docker['shared-volume'])) mounts.unshift([copy(docker['shared-volume']), 'shared-volume']);
       const reserved = ['/var/run', '/run', '/var/lib/docker', '/home/runner/_work', '/home/runner/externals'];
-      mounts.forEach(([path, key], mountIndex) => {
-        reject(reserved.some(target => pathsOverlap(path, target)), 'docker', key, index, lang, `Private Docker mount ${path} overlaps a reserved runner or daemon path.`, `${path} 與私人 Docker daemon 或 runner 的保留路徑重疊。`, `マウント先 ${path} がランナーまたは専用 Docker デーモンの予約済みパスと重複しています。`);
-        reject(mounts.slice(0, mountIndex).some(([other]) => pathsOverlap(path, other)), 'docker', key, index, lang, `Private Docker mount ${path} overlaps another shared or cache mount.`, `${path} 與另一個共用或快取掛載路徑重疊。`, `マウント先 ${path} が別の共有またはキャッシュのマウント先と重複しています。`);
-      });
+      reject(sharedPath && reserved.some(target => pathsOverlap(sharedPath, target)), 'docker', 'shared-volume', index, lang, 'Shared volume overlaps a reserved runner or Docker daemon path.', '共用 volume 與 runner 或 Docker daemon 的保留路徑重疊。', '共有ボリュームのマウント先がランナーまたは Docker デーモンの予約済みパスと重複しています。');
     }
-    reject(copy(docker['native-actions-cache']) === 'true' && copy(global['actions-cache']?.enabled) !== 'true', 'docker', 'native-actions-cache', index, lang, 'Enable the global native Actions cache receiver first.', '請先啟用全域內建 Actions 快取接收端。', '先にグローバル設定の内蔵 Actions キャッシュ受信機能を有効にしてください。');
-    reject(copy(docker['actions-cache-url']) && (!validURL(copy(docker['actions-cache-url']), ['http:', 'https:']) || !copy(docker['actions-cache-url']).endsWith('/')), 'docker', 'actions-cache-url', index, lang, 'Actions cache URL must end with / and contain no credentials, query, or fragment.', 'Actions 快取網址須以 / 結尾，且不可包含憑證、查詢參數或片段。', 'Actions キャッシュの URL は末尾を / にし、認証情報・クエリ・フラグメントを含めないでください。');
-    reject(copy(docker['native-actions-cache']) === 'true' && copy(docker['actions-cache-url']) && docker['actions-cache-url'] !== global['actions-cache']?.['advertise-url'], 'docker', 'actions-cache-url', index, lang, 'Native and explicit cache URLs must match.', '內建與明確指定的快取網址必須相同。', '内蔵キャッシュと明示的に指定したキャッシュの URL を一致させてください。');
+    const cache = global['actions-cache'];
+    const receiverEnabled = copy(cache?.enabled) === 'true';
+    const useNative = copy(docker['native-actions-cache']) === 'true';
+    const cacheURL = copy(docker['actions-cache-url']);
+    reject(useNative && !receiverEnabled, 'docker', 'native-actions-cache', index, lang, 'Enable the global native Actions cache receiver first.', '請先啟用全域內建 Actions 快取接收端。', '先にグローバル設定の内蔵 Actions キャッシュ受信機能を有効にしてください。');
+    reject(cacheURL && (!validURL(cacheURL, ['http:', 'https:']) || !cacheURL.endsWith('/')), 'docker', 'actions-cache-url', index, lang, 'Actions cache URL must end with / and contain no credentials, query, or fragment.', 'Actions 快取網址須以 / 結尾，且不可包含憑證、查詢參數或片段。', 'Actions キャッシュの URL は末尾を / にし、認証情報・クエリ・フラグメントを含めないでください。');
+    reject(cacheURL && receiverEnabled && cacheURL === copy(cache['advertise-url']), 'docker', 'actions-cache-url', index, lang, 'For the native receiver, enable native-actions-cache and leave the external URL blank.', '使用內建接收端時，請啟用 native-actions-cache 並將外部網址留白。', '内蔵キャッシュを使う場合は native-actions-cache を有効にし、外部 URL は空欄にしてください。');
+    reject(cacheURL && useNative, 'docker', 'actions-cache-url', index, lang, 'Disable native-actions-cache to use an external receiver.', '使用外部接收端時，請停用 native-actions-cache。', '外部キャッシュを使う場合は native-actions-cache を無効にしてください。');
   }
   if (provider === 'tart') {
     const tart = scale.tart ?? {};
@@ -293,10 +246,9 @@ function emitSet(scale, prefix, lang, index) {
     lines.push(`github-app.client-id = ${quoteField(copy(set['client-id']), 'set', 'client-id', index, lang)}`, `github-app.installation-id = ${Number(set['installation-id'])}`);
     lines.push(set['app-key-source'] === 'env' ? `github-app.private-key-env = ${quoteField(copy(set['key-env']), 'set', 'key-env', index, lang)}` : `github-app.private-key-file = ${quoteField(copy(set['key-file']), 'set', 'key-file', index, lang)}`);
   }
-  const nested = [
+  return [
+    ...lines,
     ...emitTable(`${prefix}retry`, scale.retry, groups.retry, lang, 'retry', index),
     ...(set.provider === 'docker' ? emitTable(`${prefix}docker`, scale.docker, groups.docker, lang, 'docker', index) : emitTable(`${prefix}tart`, scale.tart, groups.tart, lang, 'tart', index)),
   ];
-  if (set.provider === 'docker') nested.push(...emitLegacyCache(`${prefix}docker.cache`, scale.docker?.cache, lang, index));
-  return [...lines, ...nested];
 }

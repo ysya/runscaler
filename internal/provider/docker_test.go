@@ -178,7 +178,7 @@ func newTestDockerProvider(sharedVolume string, dind bool) (*DockerProvider, *mo
 }
 
 // newConfigDockerProvider builds a provider through NewDockerProvider so the
-// constructor path (volume-name default, cache-volume parsing) is exercised.
+// constructor path (including the shared volume name default) is exercised.
 // DinD is disabled to keep tests hermetic (no host socket stat).
 func newConfigDockerProvider(dc config.DockerConfig) (*DockerProvider, *mockDocker) {
 	md := &mockDocker{imagePresent: true}
@@ -421,103 +421,6 @@ func TestDockerProvider_StartInstance_MultipleShareVolume(t *testing.T) {
 		if m.Type != mount.TypeVolume {
 			t.Errorf("runner %d: mount type = %v, want %v", i, m.Type, mount.TypeVolume)
 		}
-	}
-}
-
-func TestDockerProvider_StartInstance_WithCacheVolumes(t *testing.T) {
-	b, md := newConfigDockerProvider(config.DockerConfig{
-		SharedVolume: "/shared",
-		CacheVolumes: []string{
-			"gradle-cache:/home/runner/.gradle",
-			"pnpm-store:/home/runner/.local/share/pnpm/store",
-		},
-	})
-
-	if _, err := b.StartInstance(context.Background(), "runner-1", "jit"); err != nil {
-		t.Fatalf("StartInstance() error: %v", err)
-	}
-	call := md.createCalls[0]
-
-	// Shared volume mount uses the default volume name.
-	shared := findMountByTarget(call.hostConfig.Mounts, "/shared")
-	if shared == nil {
-		t.Fatal("shared volume mount not found")
-	}
-	if shared.Type != mount.TypeVolume || shared.Source != "runner-shared" {
-		t.Errorf("shared mount = %+v, want named volume runner-shared", shared)
-	}
-
-	// Each cache volume is mounted as a named volume at its path.
-	wantCaches := map[string]string{
-		"/home/runner/.gradle":                 "gradle-cache",
-		"/home/runner/.local/share/pnpm/store": "pnpm-store",
-	}
-	for target, source := range wantCaches {
-		m := findMountByTarget(call.hostConfig.Mounts, target)
-		if m == nil {
-			t.Fatalf("cache volume mount %s not found", target)
-		}
-		if m.Type != mount.TypeVolume || m.Source != source {
-			t.Errorf("cache mount %s = %+v, want named volume %s", target, m, source)
-		}
-	}
-	// No DinD → shared + 2 cache mounts and nothing else.
-	if len(call.hostConfig.Mounts) != 3 {
-		t.Errorf("mounts = %d, want 3", len(call.hostConfig.Mounts))
-	}
-
-	// The fix_own prelude must cover every volume mount target.
-	assertFixOwnCmd(t, call.config.Cmd,
-		"/shared", "/home/runner/.gradle", "/home/runner/.local/share/pnpm/store")
-}
-
-func TestDockerProvider_StartInstance_CacheVolumesWithoutSharedVolume(t *testing.T) {
-	b, md := newConfigDockerProvider(config.DockerConfig{
-		CacheVolumes: []string{"go-build-cache:/home/runner/.cache/go-build"},
-	})
-
-	if _, err := b.StartInstance(context.Background(), "runner-1", "jit"); err != nil {
-		t.Fatalf("StartInstance() error: %v", err)
-	}
-	call := md.createCalls[0]
-
-	m := findMountByTarget(call.hostConfig.Mounts, "/home/runner/.cache/go-build")
-	if m == nil {
-		t.Fatal("cache volume mount not found")
-	}
-	if m.Type != mount.TypeVolume || m.Source != "go-build-cache" {
-		t.Errorf("cache mount = %+v, want named volume go-build-cache", m)
-	}
-
-	// The prelude covers the cache path even without a shared volume.
-	assertFixOwnCmd(t, call.config.Cmd, "/home/runner/.cache/go-build")
-
-	// SHARED_DIR stays unset without a shared volume.
-	for _, env := range call.config.Env {
-		if strings.HasPrefix(env, "SHARED_DIR=") {
-			t.Errorf("env should not contain SHARED_DIR, got: %v", call.config.Env)
-		}
-	}
-}
-
-func TestNewDockerProvider_InvalidCacheVolumesMountsNone(t *testing.T) {
-	// Validate() rejects such a config before startup; if a provider is built
-	// anyway, the bad list must yield no cache mounts rather than a partial set.
-	b, md := newConfigDockerProvider(config.DockerConfig{
-		CacheVolumes: []string{"gradle-cache:/home/runner/.gradle", "not-an-entry"},
-	})
-
-	if _, err := b.StartInstance(context.Background(), "runner-1", "jit"); err != nil {
-		t.Fatalf("StartInstance() error: %v", err)
-	}
-	call := md.createCalls[0]
-
-	if len(call.hostConfig.Mounts) != 0 {
-		t.Errorf("mounts = %+v, want none for an invalid cache-volumes list", call.hostConfig.Mounts)
-	}
-	// No volume mounts → the bare cmd, no shell wrapper.
-	if len(call.config.Cmd) != 1 || call.config.Cmd[0] != "/home/runner/run.sh" {
-		t.Errorf("cmd = %v, want [/home/runner/run.sh]", call.config.Cmd)
 	}
 }
 

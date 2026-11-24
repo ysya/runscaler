@@ -168,6 +168,9 @@ func loadServicePreparationConfig(path string) (config.Config, []byte, error) {
 		return config.Config{}, nil, errors.New("invalid service configuration")
 	}
 	cfg, err := config.Load(v)
+	if errors.Is(err, config.ErrRemovedCacheSetting) {
+		return cfg, nil, err
+	}
 	if err != nil {
 		return cfg, nil, errors.New("invalid service configuration")
 	}

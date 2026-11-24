@@ -82,9 +82,7 @@ func (s *tartStore) Path() string {
 func (s *tartStore) Enabled() bool { return s.cfg.Enabled }
 
 // Measure runs `du -sb` on the cache subdirectory directly on the host via
-// the injected CommandRunner. Tart's cache lives on the local filesystem,
-// not in a Docker volume, so — unlike the shared-volume/cache-volume
-// stores' Measure in volume.go — there is no container to run it inside.
+// the injected CommandRunner.
 func (s *tartStore) Measure(ctx context.Context) (uint64, error) {
 	out, err := s.runner.Run(ctx, "du", "-sb", filepath.Join(s.Path(), "cache"))
 	if err != nil {
@@ -129,15 +127,6 @@ func (s *tartStore) Reclaim(ctx context.Context, tier Tier) (uint64, error) {
 		return 0, nil
 	}
 }
-
-// Budget reports no cap for the disk guard's independent budget-enforcement
-// pass. cfg.BudgetGB is a real cap, but it already drives Tier2's
-// disk-pressure-gated trim above via `tart prune --space-budget` — tart's
-// own LRU eviction, not the guard's. Surfacing it here too would let the
-// guard's unconditional Tier4 wipe fire on the same number, which would
-// also break the explicit "never wholesale-wipe Tart's cache" decision in
-// the Tier4 case above.
-func (s *tartStore) Budget() (uint64, string) { return 0, "" }
 
 // pruneTartCache runs `tart prune --entries caches` through runner against
 // home, trimming OCI/IPSW caches. Local VMs are never touched. Two criteria

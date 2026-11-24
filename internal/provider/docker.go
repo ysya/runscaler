@@ -51,14 +51,13 @@ type DockerProvider struct {
 	workspaceRoot         string
 	workspaceMu           sync.Mutex
 	workspaces            map[string]*runnerWorkspace
-	sharedVolume          string                    // container path of the shared volume ("" = disabled)
-	sharedVolumeName      string                    // named volume backing the shared-volume mount
-	cacheVolumes          []config.CacheVolumeMount // persistent named cache volumes (never cleaned up)
-	network               string                    // pre-existing network to attach containers to ("" = default bridge)
-	memoryBytes           int64                     // container memory limit in bytes (0 = unlimited)
-	nanoCPUs              int64                     // container CPU limit in nanoseconds (0 = unlimited)
-	pidsLimit             int64                     // container pids limit (0 = unlimited)
-	platform              *ocispec.Platform         // nil = use host default
+	sharedVolume          string            // container path of the shared volume ("" = disabled)
+	sharedVolumeName      string            // named volume backing the shared-volume mount
+	network               string            // pre-existing network to attach containers to ("" = default bridge)
+	memoryBytes           int64             // container memory limit in bytes (0 = unlimited)
+	nanoCPUs              int64             // container CPU limit in nanoseconds (0 = unlimited)
+	pidsLimit             int64             // container pids limit (0 = unlimited)
+	platform              *ocispec.Platform // nil = use host default
 	logger                *slog.Logger
 	readiness             bool
 	readyTimeout          time.Duration
@@ -99,9 +98,6 @@ func NewDockerProviderWithCoordinator(ss config.ScaleSetConfig, client DockerAPI
 		readyPoll:        500 * time.Millisecond,
 		imageCoordinator: coordinator,
 	}
-	// Validate() already surfaced parse errors before startup; on error no
-	// cache volumes are mounted rather than a partial set.
-	p.cacheVolumes, _ = ss.Docker.ParseCacheVolumes()
 	if ss.Docker.Platform != "" {
 		p.platform = parsePlatform(ss.Docker.Platform)
 	}
@@ -157,27 +153,14 @@ func (p *DockerProvider) StartInstance(ctx context.Context, name string, jitConf
 			groupAdd = append(groupAdd, "0")
 		}
 	}
-	// Named volume mounts (shared + cache); their targets need ownership
-	// fixed before the runner starts.
+	// Fix ownership of mounted volume directories before the runner starts.
 	var volumeTargets []string
 	if workspace != nil {
 		volumeTargets = append(volumeTargets, runnerWorkPath)
 	}
 	if p.sharedVolume != "" {
-		mounts = append(mounts, mount.Mount{
-			Type:   mount.TypeVolume,
-			Source: p.sharedVolumeName,
-			Target: p.sharedVolume,
-		})
+		mounts = append(mounts, p.sharedVolumeMount())
 		volumeTargets = append(volumeTargets, p.sharedVolume)
-	}
-	for _, cv := range p.cacheVolumes {
-		mounts = append(mounts, mount.Mount{
-			Type:   mount.TypeVolume,
-			Source: cv.Volume,
-			Target: cv.Path,
-		})
-		volumeTargets = append(volumeTargets, cv.Path)
 	}
 
 	hostConfig := &container.HostConfig{
@@ -238,6 +221,10 @@ func (p *DockerProvider) StartInstance(ctx context.Context, name string, jitConf
 		slog.Int("mounts", len(mounts)),
 	)
 	return c.ID, nil
+}
+
+func (p *DockerProvider) sharedVolumeMount() mount.Mount {
+	return mount.Mount{Type: mount.TypeVolume, Source: p.sharedVolumeName, Target: p.sharedVolume}
 }
 
 // ensureRunnerImage repairs a missing local cache entry before Docker creates

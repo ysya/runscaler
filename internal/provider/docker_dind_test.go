@@ -287,7 +287,7 @@ func (m *dinDFake) ContainerWait(ctx context.Context, id string, _ dockerclient.
 }
 
 func newDinDTestProvider(m *dinDFake) *DockerProvider {
-	return NewDockerProvider(config.ScaleSetConfig{RunnerImage: "runner:test", Docker: config.DockerConfig{DaemonMode: "dind", SharedVolume: "/shared", SharedVolumeName: "persistent-shared", CacheVolumes: []string{"persistent-cache:/home/runner/.cache"}}}, m, slog.New(slog.DiscardHandler))
+	return NewDockerProvider(config.ScaleSetConfig{RunnerImage: "runner:test", Docker: config.DockerConfig{DaemonMode: "dind", SharedVolume: "/shared", SharedVolumeName: "persistent-shared"}}, m, slog.New(slog.DiscardHandler))
 }
 
 func TestDinDInstancesHavePrivateDaemonsAndStorage(t *testing.T) {
@@ -573,22 +573,21 @@ func TestDinDConcurrentStartsDoNotShareState(t *testing.T) {
 	}
 }
 
-func TestDinDSidecarDoesNotSeedPersistentCachesFromDaemonImage(t *testing.T) {
+func TestDinDSharedVolumeMirroredWithoutCopyingDaemonFiles(t *testing.T) {
 	m := newDinDFake()
 	p := newDinDTestProvider(m)
-	if _, err := p.StartInstance(context.Background(), "cache-copy", ""); err != nil {
+	if _, err := p.StartInstance(context.Background(), "shared-volume", ""); err != nil {
 		t.Fatal(err)
 	}
 	for _, o := range m.objects {
-		if o.Config.Labels[dindRoleLabel] != "daemon" {
-			continue
+		role := o.Config.Labels[dindRoleLabel]
+		v := findMountByTarget(o.HostConfig.Mounts, "/shared")
+		if v == nil || v.Type != mount.TypeVolume || v.Source != "persistent-shared" {
+			t.Fatalf("%s shared mount = %+v", role, v)
 		}
-		for _, v := range o.HostConfig.Mounts {
-			if v.Source == "persistent-shared" || v.Source == "persistent-cache" {
-				if v.VolumeOptions == nil || !v.VolumeOptions.NoCopy {
-					t.Fatalf("daemon image may populate runner cache %s", v.Source)
-				}
-			}
+		noCopy := v.VolumeOptions != nil && v.VolumeOptions.NoCopy
+		if noCopy != (role == "daemon") {
+			t.Fatalf("%s shared mount NoCopy = %t", role, noCopy)
 		}
 	}
 }

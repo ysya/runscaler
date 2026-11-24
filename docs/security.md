@@ -7,7 +7,7 @@
 **DinD separates Docker state per job.** With `daemon-mode = "dind"`, only the
 sidecar is privileged; the runner stays unprivileged and neither receives the
 outer socket. The privileged sidecar shares the host kernel, so this is not a
-sandbox for hostile code. Explicit shared/cache volumes also still share files.
+sandbox for hostile code. Jobs can also exchange files through an explicitly configured `shared-volume`.
 Only run code you trust: **never expose these runners to pull requests from
 public forks**. Use `daemon-mode = "none"` for scale sets that need no daemon
 (or legacy `dind = false` when the mode is empty). Daemon-wide buildx/prune

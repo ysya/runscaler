@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"slices"
 	"strings"
 	"text/tabwriter"
@@ -26,7 +25,7 @@ var cacheCmd = &cobra.Command{
 	Short: "Show disk usage of every configured cache store",
 	Long: `Measure every cache store this config defines — Docker's dangling images
 and stopped containers, its build cache, orphaned buildx builders, the
-shared volume, named cache volumes, and Tart's image cache — and print how
+shared volume, and Tart's image cache — and print how
 much space each is using, the filesystem it lives on, that filesystem's
 current free percentage, and any retention policy configured for it.
 
@@ -127,28 +126,6 @@ func isUnmeasurableZero(name string, size uint64) bool {
 	return size == 0 && hardcodedZeroMeasureStores[name]
 }
 
-// policyString renders a store's Budget() as an operator-readable policy,
-// e.g. "budget=20.0 GiB on-exceed=warn". A zero budget means no policy is
-// configured (CacheStore.Budget's own doc comment), rendered as "".
-//
-// Several stores that do have a real retention setting (docker-build-cache
-// and shared-volume's MaxAge, tart's MaxAge) deliberately hard-return
-// (0, "") from Budget() regardless — see each store's own Budget() doc
-// comment: it is already fully consumed by their own Reclaim(Tier2)/(Tier3)
-// via a tool-native trim, and surfacing it here too would let the disk
-// guard's separate, unconditional budget-enforcement pass double-drive the
-// same number. Their Policy column is legitimately empty for that reason —
-// CacheStore has no method to read those settings back, only Budget().
-func policyString(budgetBytes uint64, onExceed string) string {
-	if budgetBytes == 0 {
-		return ""
-	}
-	if onExceed == "" {
-		onExceed = "warn"
-	}
-	return fmt.Sprintf("budget=%s on-exceed=%s", bytesize.Format(budgetBytes), onExceed)
-}
-
 func compareCacheRows(a, b cacheRow) int {
 	return cmp.Or(cmp.Compare(a.Filesystem, b.Filesystem), cmp.Compare(a.Store, b.Store))
 }
@@ -164,9 +141,6 @@ func buildCacheRows(stores []cachestore.CacheStore) []cacheRow {
 	rows := make([]cacheRow, 0, len(stores))
 	for _, s := range stores {
 		row := cacheRow{Store: s.Name(), Filesystem: s.Path()}
-
-		budgetBytes, onExceed := s.Budget()
-		row.Policy = policyString(budgetBytes, onExceed)
 
 		var errs []string
 
@@ -225,9 +199,6 @@ func runCache(cmd *cobra.Command, args []string) error {
 	}
 	for _, w := range cfg.Warnings {
 		fmt.Printf("  ⚠ config: %s\n", w)
-	}
-	for _, d := range cfg.Deprecations {
-		fmt.Fprintf(os.Stderr, "  ⚠ config: %s\n", d)
 	}
 
 	scaleSets := cfg.ResolveScaleSets()

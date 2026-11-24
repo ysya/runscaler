@@ -203,137 +203,18 @@ func TestSharedVolumeStore_Measure_PropagatesParseError(t *testing.T) {
 	}
 }
 
-// --- cacheVolumeStore ---
-
-// TestCacheVolumeStore_Tier4WipesOnlyWhenAllowed pins that a cache volume
-// (no safe age-based eviction) only reclaims at the guard's emergency tier.
-func TestCacheVolumeStore_Tier4WipesOnlyWhenAllowed(t *testing.T) {
-	fake := &fakeDockerAPI{rootDir: "/var/lib/docker"}
-	s := NewCacheVolumeStore(fake, CacheVolumeConfig{
-		VolumeName: "ccache", MountPath: "/home/runner/.ccache", HelperImage: "img",
-	})
-
-	if _, err := s.Reclaim(context.Background(), Tier2); err != nil {
-		t.Fatalf("Reclaim(Tier2) error: %v", err)
-	}
-	if fake.createdContainers != 0 {
-		t.Error("cache volume has no age-based reclaim; Tier2 must be a no-op")
-	}
-	if _, err := s.Reclaim(context.Background(), Tier4); err != nil {
-		t.Fatalf("Reclaim(Tier4) error: %v", err)
-	}
-	if fake.createdContainers != 1 {
-		t.Error("Tier4 should run one helper container to empty the volume")
-	}
-}
-
-func TestCacheVolumeStore_NameKindPath(t *testing.T) {
-	fake := &fakeDockerAPI{}
-	s := NewCacheVolumeStore(fake, CacheVolumeConfig{
-		VolumeName: "ccache", MountPath: "/home/runner/.ccache",
-		HelperImage: "img", RootDir: "/mnt/docker-data",
-	})
-
-	if s.Kind() != KindCache {
-		t.Errorf("Kind() = %v, want KindCache", s.Kind())
-	}
-	if want := "cache-volume:ccache"; s.Name() != want {
-		t.Errorf("Name() = %q, want %q", s.Name(), want)
-	}
-	if got := s.Path(); got != "/mnt/docker-data" {
-		t.Errorf("Path() = %q, want cfg.RootDir %q", got, "/mnt/docker-data")
-	}
-}
-
-func TestCacheVolumeStore_DisabledReclaimsNothing(t *testing.T) {
-	fake := &fakeDockerAPI{}
-	s := NewCacheVolumeStore(fake, CacheVolumeConfig{VolumeName: "ccache", HelperImage: "img"}) // MountPath unset
-
-	if s.Enabled() {
-		t.Fatal("Enabled() = true, want false when MountPath is unset")
-	}
-	freed, err := s.Reclaim(context.Background(), Tier4)
-	if err != nil {
-		t.Fatalf("Reclaim(Tier4) error: %v", err)
-	}
-	if freed != 0 || fake.createdContainers != 0 {
-		t.Errorf("a disabled store must not reclaim, got freed=%d containers=%d", freed, fake.createdContainers)
-	}
-}
-
-// TestCacheVolumeStore_Tier4DeletesEverythingAndReportsFreedBytes checks the
-// full wipe's script (no -mtime filter, unlike the shared volume) and its
-// freed-bytes accounting.
-func TestCacheVolumeStore_Tier4DeletesEverythingAndReportsFreedBytes(t *testing.T) {
-	fake := &fakeDockerAPI{containerLogsStdout: "900000\t/home/runner/.ccache\n0\t/home/runner/.ccache\n"}
-	s := NewCacheVolumeStore(fake, CacheVolumeConfig{
-		VolumeName: "ccache", MountPath: "/home/runner/.ccache", HelperImage: "img",
-	})
-
-	freed, err := s.Reclaim(context.Background(), Tier4)
-	if err != nil {
-		t.Fatalf("Reclaim(Tier4) error: %v", err)
-	}
-	if freed != 900_000 {
-		t.Errorf("freed = %d, want %d", freed, 900_000)
-	}
-
-	script := fake.helperScripts[0]
-	if strings.Contains(script, "-mtime") {
-		t.Errorf("cache volume wipe must not filter by age, got: %q", script)
-	}
-	if !strings.Contains(script, "-mindepth 1 -delete") {
-		t.Errorf("script should delete everything under the mount, got: %q", script)
-	}
-
-	call := fake.createCalls[0]
-	m := call.HostConfig.Mounts[0]
-	if m.Source != "ccache" || m.Target != "/home/runner/.ccache" {
-		t.Errorf("mount = %+v, want Source=ccache Target=/home/runner/.ccache", m)
-	}
-}
-
-func TestCacheVolumeStore_Tier4NeverRemovesVolumeWholesale(t *testing.T) {
-	fake := &fakeDockerAPI{}
-	s := NewCacheVolumeStore(fake, CacheVolumeConfig{
-		VolumeName: "ccache", MountPath: "/home/runner/.ccache", HelperImage: "img",
-	})
-
-	if _, err := s.Reclaim(context.Background(), Tier4); err != nil {
-		t.Fatalf("Reclaim(Tier4) error: %v", err)
-	}
-	if fake.volumesRemoved != nil {
-		t.Error("Tier4 empties the volume's contents; it must never call VolumeRemove")
-	}
-}
-
-func TestCacheVolumeStore_Measure(t *testing.T) {
-	fake := &fakeDockerAPI{containerLogsStdout: "2048\t/home/runner/.ccache\n"}
-	s := NewCacheVolumeStore(fake, CacheVolumeConfig{
-		VolumeName: "ccache", MountPath: "/home/runner/.ccache", HelperImage: "img",
-	})
-
-	got, err := s.Measure(context.Background())
-	if err != nil {
-		t.Fatalf("Measure() error: %v", err)
-	}
-	if got != 2048 {
-		t.Errorf("Measure() = %d, want 2048", got)
-	}
-}
-
 // TestReclaimGuardsAgainstFreedUnderflow pins that a "usage went up between
 // the before/after du calls" reading (e.g. a concurrent writer) reports 0
 // rather than underflowing the unsigned subtraction into a huge number.
 func TestReclaimGuardsAgainstFreedUnderflow(t *testing.T) {
-	fake := &fakeDockerAPI{containerLogsStdout: "100\t/home/runner/.ccache\n500\t/home/runner/.ccache\n"}
-	s := NewCacheVolumeStore(fake, CacheVolumeConfig{
-		VolumeName: "ccache", MountPath: "/home/runner/.ccache", HelperImage: "img",
+	fake := &fakeDockerAPI{containerLogsStdout: "100\t/shared\n500\t/shared\n"}
+	s := NewSharedVolumeStore(fake, SharedVolumeConfig{
+		VolumeName: "shared", MountPath: "/shared", HelperImage: "img", MaxAge: 24 * time.Hour,
 	})
 
-	freed, err := s.Reclaim(context.Background(), Tier4)
+	freed, err := s.Reclaim(context.Background(), Tier3)
 	if err != nil {
-		t.Fatalf("Reclaim(Tier4) error: %v", err)
+		t.Fatalf("Reclaim(Tier3) error: %v", err)
 	}
 	if freed != 0 {
 		t.Errorf("freed = %d, want 0 (after > before must not underflow)", freed)
@@ -355,12 +236,12 @@ func TestReclaimDeletesEvenWhenDuFails(t *testing.T) {
 	// Recover the exact script production builds, then run it for real.
 	fake := &fakeDockerAPI{}
 	mount := t.TempDir()
-	s := NewCacheVolumeStore(fake, CacheVolumeConfig{
-		VolumeName: "ccache", MountPath: mount, HelperImage: "img",
+	s := NewSharedVolumeStore(fake, SharedVolumeConfig{
+		VolumeName: "shared", MountPath: mount, HelperImage: "img", MaxAge: 24 * time.Hour,
 	})
-	freed, err := s.Reclaim(context.Background(), Tier4)
+	freed, err := s.Reclaim(context.Background(), Tier3)
 	if err != nil {
-		t.Fatalf("Reclaim(Tier4) error: %v — an unreadable du must not fail the reclaim", err)
+		t.Fatalf("Reclaim(Tier3) error: %v — an unreadable du must not fail the reclaim", err)
 	}
 	if freed != 0 {
 		t.Errorf("freed = %d, want 0 (unparseable du output is 'freed unknown', not an error)", freed)
@@ -384,8 +265,13 @@ func TestReclaimDeletesEvenWhenDuFails(t *testing.T) {
 		_ = cmd.Run()
 	}
 
-	if err := os.WriteFile(filepath.Join(mount, "cached.o"), []byte("x"), 0o644); err != nil {
+	stale := filepath.Join(mount, "artifact")
+	if err := os.WriteFile(stale, []byte("x"), 0o644); err != nil {
 		t.Fatalf("seed file: %v", err)
+	}
+	old := time.Now().Add(-72 * time.Hour)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
 	}
 	runScript(script)
 	entries, err := os.ReadDir(mount)

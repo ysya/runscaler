@@ -42,7 +42,7 @@ func TestEffectiveConcurrent(t *testing.T) {
 }
 
 func TestValidateConcurrent(t *testing.T) {
-	sets := []ScaleSetConfig{{MinRunners: 2}, {MinRunners: 1}}
+	sets := []ScaleSetConfig{{MinRunners: RunnerMinimum{Fixed: 2}}, {MinRunners: RunnerMinimum{Fixed: 1}}}
 	if err := (&Config{Concurrent: 3}).ValidateConcurrent(sets); err != nil {
 		t.Fatalf("ValidateConcurrent() unexpected error: %v", err)
 	}
@@ -60,7 +60,6 @@ func validScaleSetConfig() ScaleSetConfig {
 		ScaleSetName:    "test-runners",
 		Token:           "ghp_test",
 		MaxRunners:      10,
-		MinRunners:      0,
 		Provider:        DefaultProvider,
 		RunnerImage:     DefaultRunnerImage,
 	}
@@ -106,7 +105,7 @@ func TestScaleSetConfigValidate(t *testing.T) {
 		},
 		{
 			name:    "negative min runners",
-			modify:  func(c *ScaleSetConfig) { c.MinRunners = -1 },
+			modify:  func(c *ScaleSetConfig) { c.MinRunners.Fixed = -1 },
 			wantErr: "min-runners must be >= 0",
 		},
 		{
@@ -117,7 +116,7 @@ func TestScaleSetConfigValidate(t *testing.T) {
 		{
 			name: "min exceeds max",
 			modify: func(c *ScaleSetConfig) {
-				c.MinRunners = 5
+				c.MinRunners.Fixed = 5
 				c.MaxRunners = 3
 			},
 			wantErr: "min-runners (5) must be <= max-runners (3)",

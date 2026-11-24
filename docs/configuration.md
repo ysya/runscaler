@@ -618,7 +618,7 @@ pool-size = 2
 | `--provider`        | `provider`           | `docker`                                | Instance provider (`docker` or `tart`)             |
 | `--max-runners`     | `max-runners`        | `10`                                    | Maximum concurrent runners                        |
 | `--concurrent`      | `concurrent`         | `0` (sum of `max-runners`)              | Host-wide maximum across all scale sets           |
-| `--min-runners`     | `min-runners`        | `0`                                     | Minimum runners to keep warm                      |
+| `--min-runners`     | `min-runners`        | `0`                                     | Fixed idle count or `auto` for one temporary spare |
 | `--labels`          | `labels`             | `<name>`                                | Runner labels (comma-separated)                   |
 | `--runner-group`    | `runner-group`       | `default`                               | Runner group name                                 |
 | `--runner-image`    | `runner-image`       | `ghcr.io/actions/actions-runner:latest` | Runner image (Docker image or Tart VM image)      |
@@ -659,6 +659,14 @@ capacity before JIT/provider startup. Warm Tart VMs do not hold those leases
 and come on top of `concurrent`. Every scale set's `min-runners` floor is
 reserved before FIFO surplus capacity is handed out. With `concurrent = 0`,
 the limit is the sum of effective `max-runners` values after macOS caps.
+
+With `min-runners = "auto"` (or `--min-runners auto`), a scale set starts
+cold. While GitHub reports assigned jobs, it targets one extra runner for
+the next job. Once demand drops to zero, the target is one for five minutes,
+then zero. A new job starts a new activity period. Each runner still handles
+one job. The spare counts toward both capacity limits and can occupy a slot
+another scale set needs. Auto reserves zero slots in advance. An integer
+keeps the fixed idle count, with zero as the default.
 
 Use the `provider` TOML key and `--provider` flag to select Docker or Tart.
 

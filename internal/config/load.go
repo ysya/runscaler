@@ -341,6 +341,9 @@ func hasKeyPath(m map[string]any, dotted string) bool {
 func singleModeKeysSet(settings map[string]any) []string {
 	var keys []string
 	for _, key := range identityKeys {
+		if key == "min-runners" && settings[key] == "0" {
+			continue // the CLI default also applies in multi-scale-set mode
+		}
 		if isExplicitlySet(settings[key]) {
 			keys = append(keys, key)
 		}

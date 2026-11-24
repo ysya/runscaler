@@ -90,7 +90,7 @@ func TestMessageHandlerInitialStatisticsSetDemand(t *testing.T) {
 		t.Fatalf("Scale(initial) error: %v", err)
 	}
 
-	if got := s.targetRunnerCount(); got != 3 {
+	if got := s.DesiredRunnerCount(); got != 3 {
 		t.Errorf("target runners = %d, want 3", got)
 	}
 	if len(acquirer.calls) != 0 {
@@ -112,7 +112,7 @@ func TestMessageHandlerAcquiresOfferedJobsBeforeUpdatingDemand(t *testing.T) {
 		t.Fatalf("Scale(initial) error: %v", err)
 	}
 	targetAtAcquire := -1
-	acquirer.before = func() { targetAtAcquire = s.targetRunnerCount() }
+	acquirer.before = func() { targetAtAcquire = s.DesiredRunnerCount() }
 
 	err := h.Scale(ctx, &scaleset.RunnerScaleSetMessage{
 		MessageID:            1,
@@ -129,7 +129,7 @@ func TestMessageHandlerAcquiresOfferedJobsBeforeUpdatingDemand(t *testing.T) {
 	if targetAtAcquire != 0 {
 		t.Errorf("target runners while acquiring = %d, want 0: jobs must be acquired before demand changes", targetAtAcquire)
 	}
-	if got := s.targetRunnerCount(); got != 2 {
+	if got := s.DesiredRunnerCount(); got != 2 {
 		t.Errorf("target runners = %d, want 2", got)
 	}
 }
@@ -158,7 +158,7 @@ func TestMessageHandlerAcquireFailureLeavesMessageForRedelivery(t *testing.T) {
 	if err := h.Scale(ctx, msg); !errors.Is(err, errAcquire) {
 		t.Fatalf("Scale() error = %v, want the acquire error", err)
 	}
-	if got := s.targetRunnerCount(); got != 1 {
+	if got := s.DesiredRunnerCount(); got != 1 {
 		t.Errorf("target runners after failed acquire = %d, want 1", got)
 	}
 	if phase, _ := s.instances.phase("runner-abc"); phase != instanceIdle {
@@ -175,7 +175,7 @@ func TestMessageHandlerAcquireFailureLeavesMessageForRedelivery(t *testing.T) {
 	if want := [][]int64{{201}, {201}}; !reflect.DeepEqual(acquirer.calls, want) {
 		t.Errorf("AcquireJobs calls = %v, want %v", acquirer.calls, want)
 	}
-	if got := s.targetRunnerCount(); got != 2 {
+	if got := s.DesiredRunnerCount(); got != 2 {
 		t.Errorf("target runners after redelivery = %d, want 2", got)
 	}
 	if phase, _ := s.instances.phase("runner-abc"); phase != instanceBusy {
@@ -246,7 +246,7 @@ func TestMessageHandlerIdlePollRefreshesDemandFromLastStatistics(t *testing.T) {
 	if _, canScale := s.scaleTarget(); !canScale {
 		t.Error("scale-up still blocked after an idle poll; want demand refreshed from the last statistics")
 	}
-	if got := s.targetRunnerCount(); got != 2 {
+	if got := s.DesiredRunnerCount(); got != 2 {
 		t.Errorf("target runners = %d, want 2 from the last statistics", got)
 	}
 	if len(acquirer.calls) != 0 {
@@ -276,7 +276,7 @@ func TestMessageHandlerMessageWithoutStatisticsKeepsLastDemand(t *testing.T) {
 	if _, canScale := s.scaleTarget(); !canScale {
 		t.Error("idle poll did not refresh demand; want the statistics from before the message kept")
 	}
-	if got := s.targetRunnerCount(); got != 2 {
+	if got := s.DesiredRunnerCount(); got != 2 {
 		t.Errorf("target runners = %d, want 2", got)
 	}
 	if snap := recorder.Snapshot(); snap.Statistics == nil || snap.Statistics.TotalAssignedJobs != 2 {
@@ -326,7 +326,7 @@ func TestSDKListenerAcksMessageOnlyAfterJobsAreAcquired(t *testing.T) {
 	if want := []int{1}; !reflect.DeepEqual(second.acked, want) {
 		t.Errorf("acked messages = %v, want %v", second.acked, want)
 	}
-	if got := s.targetRunnerCount(); got != 1 {
+	if got := s.DesiredRunnerCount(); got != 1 {
 		t.Errorf("target runners = %d, want 1", got)
 	}
 }

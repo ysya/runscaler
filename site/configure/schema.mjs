@@ -25,7 +25,7 @@ export const setFields = [
   field('key-file', 'text', 'Private-key file path on host', '主機上的私鑰檔案路徑', 'ホスト上の秘密鍵ファイルのパス', { visible: 'app-file', placeholder: '/etc/runner/app.pem' }),
   field('key-env', 'text', 'Private-key environment variable name', '私鑰環境變數名稱', '秘密鍵の環境変数名', { visible: 'app-env', helpEn: 'Enter only the variable name, never the private key.', helpZh: '只輸入變數名稱，不要貼上私鑰。', helpJa: '変数名だけを入力してください。秘密鍵を貼り付けないでください。' }),
   field('max-runners', 'number', 'Maximum runners *', '最多 runner 數量 *', 'ランナー数の上限 *', { value: '10', min: 1 }),
-  field('min-runners', 'number', 'Warm runner minimum', '常駐 runner 下限', '待機ランナー数の下限', { min: 0 }),
+  field('min-runners', 'number-or-auto', 'Minimum idle runners (number or auto)', '待命 runner 下限（整數或 auto）', '待機ランナー数の下限（整数または auto）', { min: 0, placeholder: '0' }),
   field('labels', 'lines', 'Additional labels (one per line)', '其他標籤（每行一個）', '追加ラベル（1 行に 1 つ）'),
   field('runner-group', 'text', 'Runner group', 'Runner 群組', 'ランナーグループ', { placeholder: 'default' }),
   field('runner-image', 'text', 'Runner image *', 'Runner 映像檔 *', 'ランナーイメージ *', { value: 'ghcr.io/actions/actions-runner:latest' }),

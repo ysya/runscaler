@@ -52,15 +52,15 @@ func applyTartGuestLimits(runtimes []*scaleSetRuntime, logger *slog.Logger) []er
 			logger.Info("Apple allows two macOS VMs per host; capping max-runners",
 				slog.String("scaleSet", ss.ScaleSetName), slog.Int("configured", ss.MaxRunners), slog.Int("effective", rt.maxRunners))
 		}
-		if ss.MinRunners > limit {
+		if ss.MinRunners.Fixed > limit {
 			invalidMin = true
-			problems = append(problems, fmt.Errorf("scaleset[%d] %q: min-runners is %d, but its image is a macOS guest and Apple allows %d macOS VMs per host", rt.index, ss.ScaleSetName, ss.MinRunners, limit))
+			problems = append(problems, fmt.Errorf("scaleset[%d] %q: min-runners is %d, but its image is a macOS guest and Apple allows %d macOS VMs per host", rt.index, ss.ScaleSetName, ss.MinRunners.Fixed, limit))
 		}
 		if ss.Tart.PoolSize > limit {
 			invalidPool = true
 			problems = append(problems, fmt.Errorf("scaleset[%d] %q: tart pool-size is %d, but its image is a macOS guest and Apple allows %d macOS VMs per host", rt.index, ss.ScaleSetName, ss.Tart.PoolSize, limit))
 		}
-		totalMin += ss.MinRunners
+		totalMin += ss.MinRunners.Fixed
 		totalPool += ss.Tart.PoolSize
 	}
 	if totalMin > limit && !invalidMin {
@@ -85,7 +85,7 @@ func effectiveConcurrent(cfg config.Config, runtimes []*scaleSetRuntime) int {
 
 func registerCapacity(broker *capacity.Broker, runtimes []*scaleSetRuntime) {
 	for _, rt := range runtimes {
-		rt.capacity = broker.Register(fmt.Sprintf("%d:%s", rt.index, rt.config.ScaleSetName), rt.config.MinRunners)
+		rt.capacity = broker.Register(fmt.Sprintf("%d:%s", rt.index, rt.config.ScaleSetName), rt.config.MinRunners.Fixed)
 	}
 }
 

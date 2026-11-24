@@ -528,8 +528,8 @@ token = "token-a"
 	if len(sets[0].Labels) != 0 {
 		t.Errorf("labels = %q, want none (never inherited)", sets[0].Labels)
 	}
-	if sets[0].MinRunners != 0 {
-		t.Errorf("min-runners = %d, want 0 (never inherited)", sets[0].MinRunners)
+	if sets[0].MinRunners.Fixed != 0 {
+		t.Errorf("min-runners = %d, want 0 (never inherited)", sets[0].MinRunners.Fixed)
 	}
 
 	if len(cfg.Warnings) != 1 {
@@ -570,8 +570,8 @@ token = "token-a"
 min-runners = 3
 max-runners = 5
 `)
-	if sets[0].MinRunners != 3 {
-		t.Errorf("min-runners = %d, want 3", sets[0].MinRunners)
+	if sets[0].MinRunners.Fixed != 3 {
+		t.Errorf("min-runners = %d, want 3", sets[0].MinRunners.Fixed)
 	}
 	if sets[0].MaxRunners != 5 {
 		t.Errorf("max-runners = %d, want 5", sets[0].MaxRunners)
@@ -1333,5 +1333,51 @@ actions-cache-url = "http://192.168.50.10:3001/"`,
 				t.Errorf("sunset notices must remain advisory: %q", cfg.Warnings)
 			}
 		})
+	}
+}
+
+func TestLoadAutoMinRunners(t *testing.T) {
+	cfg := loadTOML(t, `min-runners = "auto"`)
+	if len(cfg.Warnings) != 0 || cfg.Defaults.MinRunners != (RunnerMinimum{Auto: true}) {
+		t.Fatalf("auto minimum must have a zero reserved floor: warnings=%v, minimum=%+v", cfg.Warnings, cfg.Defaults.MinRunners)
+	}
+}
+
+func TestAutoMinRunnersIsScopedToOneScaleSet(t *testing.T) {
+	cfg := loadTOML(t, `
+min-runners = "auto"
+[[scaleset]]
+name = "fixed"
+min-runners = 2
+[[scaleset]]
+name = "default"
+[[scaleset]]
+name = "automatic"
+min-runners = "auto"`)
+	if len(cfg.Warnings) != 1 || !strings.Contains(cfg.Warnings[0], "top-level min-runners") {
+		t.Fatalf("mixed single/multi-mode warnings = %v", cfg.Warnings)
+	}
+	sets := cfg.ResolveScaleSets()
+	for i, want := range []RunnerMinimum{{Fixed: 2}, {}, {Auto: true}} {
+		if got := sets[i].MinRunners; got != want {
+			t.Errorf("scale set %d minimum = %+v, want %+v", i, got, want)
+		}
+	}
+	cfg.Concurrent = 2
+	if err := cfg.ValidateConcurrent(sets); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLoadRejectsInvalidRunnerMinimum(t *testing.T) {
+	for _, value := range []string{`"automatic"`, `true`, `1.5`, `{ fixed = 2 }`} {
+		v := viper.New()
+		v.SetConfigType("toml")
+		if err := v.ReadConfig(strings.NewReader("min-runners = " + value)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(v); err == nil || !strings.Contains(err.Error(), "min-runners") {
+			t.Errorf("min-runners = %s: error = %v", value, err)
+		}
 	}
 }

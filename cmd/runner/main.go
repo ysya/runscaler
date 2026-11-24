@@ -57,7 +57,7 @@ func init() {
 	flags.String("token", "", "Personal access token")
 	registerGitHubAppFlags(flags)
 	flags.Int("max-runners", config.DefaultMaxRunners, "Maximum number of runners")
-	flags.Int("min-runners", 0, "Minimum number of runners")
+	flags.String("min-runners", "0", "Minimum idle runners, or auto for one temporary spare")
 	flags.StringSlice("labels", nil, "Runner labels (comma-separated)")
 	flags.String("runner-group", config.DefaultRunnerGroup, "Runner group name")
 	flags.String("runner-image", config.DefaultRunnerImage, "Docker image for runners")
@@ -677,7 +677,10 @@ func runScaleSetController(ctx context.Context, deps managerDeps, rt *scaleSetRu
 	if sweeper != nil {
 		controllerOpts = append(controllerOpts, controller.WithStartFailureNotifier(sweeper.Trigger))
 	}
-	s = controller.NewScaleSetController(scaleSet.ID, rt.config.MinRunners, rt.maxRunners, instanceProvider, scalesetClient, rt.logger, controllerOpts...)
+	if rt.config.MinRunners.Auto {
+		controllerOpts = append(controllerOpts, controller.WithAutoMinRunners())
+	}
+	s = controller.NewScaleSetController(scaleSet.ID, rt.config.MinRunners.Fixed, rt.maxRunners, instanceProvider, scalesetClient, rt.logger, controllerOpts...)
 	defer s.Shutdown(context.WithoutCancel(ctx))
 	if sweeper != nil {
 		// Deferred after Shutdown, so it runs first: Shutdown removes
@@ -724,7 +727,7 @@ func runScaleSetController(ctx context.Context, deps managerDeps, rt *scaleSetRu
 	for {
 		rt.logger.Info("Listening for jobs",
 			slog.Int("maxRunners", rt.maxRunners),
-			slog.Int("minRunners", rt.config.MinRunners),
+			slog.Any("minRunners", rt.config.MinRunners.ConfigValue()),
 		)
 
 		listenStart := time.Now()
